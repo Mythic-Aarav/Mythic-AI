@@ -314,6 +314,9 @@ PAGE = r"""<!DOCTYPE html>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Mythic AI">
 <meta name="description" content="Mythic AI - Smart AI assistant by Aarav Singh">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
+<link rel="shortcut icon" type="image/png" href="/icon.png">
 <link rel="apple-touch-icon" href="/icon.png">
 <link rel="manifest" href="/manifest.json">
 <title>Mythic AI</title>
@@ -2236,6 +2239,15 @@ def pwa_icon_192():
 def pwa_icon_512():
     from flask import Response as FlaskResponse
     return FlaskResponse(base64.b64decode(_ICON_512_PNG_B64), mimetype="image/png")
+
+@app.route("/favicon.ico")
+def favicon_ico():
+    # Browsers request this exact path automatically regardless of <link> tags.
+    # Serving the same PNG here (browsers accept PNG content at /favicon.ico
+    # just fine) avoids 404s and the default globe icon some browsers show
+    # when this route is missing.
+    from flask import Response as FlaskResponse
+    return FlaskResponse(base64.b64decode(_ICON_192_PNG_B64), mimetype="image/png")
 
 
 @app.route("/")
