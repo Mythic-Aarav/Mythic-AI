@@ -803,7 +803,14 @@ PAGE = r"""<!DOCTYPE html>
     <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">Describe what you want to see</p>
 
     <textarea id="img-prompt" rows="3" placeholder="e.g. a cat astronaut floating in space, digital art"
-      style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:13.5px;outline:none;margin-bottom:12px;font-family:inherit;resize:vertical;"></textarea>
+      style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:13.5px;outline:none;margin-bottom:8px;font-family:inherit;resize:vertical;"></textarea>
+
+    <div style="display:flex;gap:6px;margin-bottom:12px;">
+      <button type="button" id="img-surprise-btn" style="flex:1;background:var(--accent-dim);border:1px solid var(--accent);color:var(--accent);border-radius:8px;padding:8px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;">🎲 Surprise Me</button>
+      <button type="button" id="img-ideas-toggle-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px;font-size:12.5px;cursor:pointer;font-family:inherit;">💡 Browse 100 Ideas</button>
+    </div>
+
+    <div id="img-ideas-list" style="display:none;max-height:160px;overflow-y:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:12px;"></div>
 
     <select id="img-style" style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:9px 12px;font-size:13px;outline:none;margin-bottom:12px;font-family:inherit;">
       <option value="">No specific style</option>
@@ -2073,6 +2080,144 @@ const imgLoadingEl    = document.getElementById('img-loading');
 const imgErrorEl      = document.getElementById('img-error');
 const imgGenerateBtn2 = document.getElementById('img-generate-btn');
 const imgCloseBtn2    = document.getElementById('img-close-btn');
+const imgSurpriseBtn  = document.getElementById('img-surprise-btn');
+const imgIdeasToggleBtn = document.getElementById('img-ideas-toggle-btn');
+const imgIdeasList    = document.getElementById('img-ideas-list');
+
+// 100 ready-made image prompt ideas across a mix of categories, so people
+// who don't know what to type can still generate something interesting.
+const IMAGE_PROMPT_IDEAS = [
+  "a cat astronaut floating in space, digital art",
+  "a dragon curled around a mountain peak at sunrise",
+  "a cyberpunk city street at night, neon reflections on wet pavement",
+  "a cozy cabin in a snowy forest, warm lights glowing from the windows",
+  "an ancient library with floating books and glowing runes",
+  "a samurai standing under a cherry blossom tree in the rain",
+  "a steampunk airship sailing above the clouds",
+  "a bioluminescent jellyfish forest deep in the ocean",
+  "a fox spirit with nine tails in a moonlit bamboo grove",
+  "a giant robot standing guard over a ruined city",
+  "a witch's cottage surrounded by glowing mushrooms",
+  "a lighthouse on a rocky cliff during a storm",
+  "a phoenix rising from flames, wings spread wide",
+  "a knight in golden armor facing a dragon in a canyon",
+  "a floating island with waterfalls pouring into the clouds",
+  "a desert oasis at dusk with palm trees and a starry sky",
+  "a portrait of an old sailor with a weathered face and a pipe",
+  "a futuristic space station orbiting a ringed planet",
+  "a mermaid sitting on a rock at sunset, ocean spray around her",
+  "a wolf howling on a cliff under a full moon",
+  "a magical potion shop filled with glowing jars",
+  "a samurai cat warrior in traditional armor",
+  "a treehouse village connected by rope bridges in a giant forest",
+  "an astronaut discovering an alien garden on a distant moon",
+  "a medieval marketplace bustling with merchants and dragons overhead",
+  "a phoenix made of autumn leaves swirling in the wind",
+  "a robot gardener tending to a greenhouse full of glowing plants",
+  "a viking longship sailing through a stormy sea",
+  "a crystal cave glowing with blue and purple light",
+  "a fantasy castle floating among the clouds",
+  "a ninja leaping between rooftops under a red moon",
+  "a underwater city with glass domes and glowing coral",
+  "a majestic elephant painted with intricate henna patterns",
+  "a cyberpunk hacker in a rain-soaked alley, neon signs above",
+  "a giant turtle carrying a floating island on its back",
+  "a wizard's tower surrounded by swirling magical energy",
+  "a peaceful zen garden with cherry blossoms and koi pond",
+  "a post-apocalyptic city reclaimed by nature",
+  "a fairy tale forest with glowing mushrooms and tiny lanterns",
+  "a space explorer standing on the surface of Mars at sunset",
+  "a majestic griffin perched on a mountain peak",
+  "a pirate ship battling a giant sea monster",
+  "a Japanese onsen surrounded by autumn maple trees",
+  "a clockwork owl with intricate brass gears",
+  "a dreamlike portrait of a girl made of stardust",
+  "a warrior princess standing before a burning castle",
+  "a tranquil rice terrace at golden hour",
+  "a spaceship crash-landed in an alien jungle",
+  "a demon hunter standing in a moonlit graveyard",
+  "a floating market on a river in a fantasy world",
+  "a majestic white tiger walking through falling snow",
+  "an ancient temple overtaken by glowing vines",
+  "a girl with an umbrella walking through a neon-lit rainy street",
+  "a dragon egg hatching in a nest of gold and jewels",
+  "a samurai fox spirit wielding a katana made of fire",
+  "a city built inside a giant tree",
+  "a knight's horse galloping through a field of fireflies",
+  "a celestial goddess made of stars and galaxies",
+  "an old wizard reading a spellbook by candlelight",
+  "a robotic dog exploring an abandoned space colony",
+  "a Viking warrior standing atop a glacier",
+  "a mystical forest path lit by floating lanterns",
+  "a dragon perched atop a gothic cathedral at night",
+  "a mecha pilot standing beside her giant robot at sunset",
+  "a phoenix and dragon locked in an epic aerial battle",
+  "a hidden waterfall behind a curtain of glowing vines",
+  "a spaceship gliding through a colorful nebula",
+  "a samurai standing in a field of red spider lilies",
+  "a giant whale swimming through the clouds",
+  "an enchanted library where the books fly like birds",
+  "a lone traveler crossing a desert under twin moons",
+  "a steampunk inventor's workshop full of gadgets and gears",
+  "a mystical shrine hidden deep in a bamboo forest",
+  "a dragon made entirely of ice and frost",
+  "a warrior standing at the edge of a volcano",
+  "a city of floating lanterns during a festival night",
+  "a fox with glowing blue eyes sitting in a snowy forest",
+  "a pirate captain steering through a storm with lightning around the ship",
+  "an ancient stone golem awakening in a forgotten ruin",
+  "a girl riding a giant koi fish through the sky",
+  "a futuristic samurai with a glowing energy blade",
+  "a peaceful mountain village at dawn with mist rolling through",
+  "a dragon curled around a treasure hoard in a cave",
+  "a celestial wolf running across a starry night sky",
+  "a magical tea house with floating teacups and glowing steam",
+  "a knight standing before an ancient sealed gate",
+  "a phoenix feather glowing in a moonlit meadow",
+  "a samurai facing off against a giant oni demon",
+  "a spaceship docking at a neon-lit space station",
+  "a mystical deer with antlers made of branches and flowers",
+  "a lone lighthouse keeper watching a meteor shower",
+  "a dragon rider soaring above a canyon at sunset",
+  "a hidden shrine covered in autumn leaves",
+  "a robotic butterfly with glowing mechanical wings",
+  "a warrior queen standing before her army at dawn",
+  "a floating city held up by giant glowing crystals",
+  "a fox spirit dancing in a field of fireflies",
+  "a majestic phoenix flying over a burning forest",
+  "a samurai meditating beneath a waterfall",
+  "a mystical portal opening in the middle of an ancient forest",
+];
+
+function fillImagePrompt(text) {
+  imgPromptEl.value = text;
+  imgPromptEl.focus();
+}
+
+if (imgSurpriseBtn) imgSurpriseBtn.addEventListener('click', () => {
+  const pick = IMAGE_PROMPT_IDEAS[Math.floor(Math.random() * IMAGE_PROMPT_IDEAS.length)];
+  fillImagePrompt(pick);
+});
+
+if (imgIdeasToggleBtn) imgIdeasToggleBtn.addEventListener('click', () => {
+  const showing = imgIdeasList.style.display === 'block';
+  if (showing) { imgIdeasList.style.display = 'none'; return; }
+  if (!imgIdeasList.dataset.built) {
+    imgIdeasList.innerHTML = IMAGE_PROMPT_IDEAS.map((p, i) =>
+      `<button type="button" class="img-idea-btn" data-idx="${i}" style="display:block;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid var(--border);color:var(--text);padding:7px 4px;font-size:12px;cursor:pointer;font-family:inherit;">${p}</button>`
+    ).join('');
+    imgIdeasList.dataset.built = '1';
+    imgIdeasList.querySelectorAll('.img-idea-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        fillImagePrompt(IMAGE_PROMPT_IDEAS[parseInt(btn.dataset.idx, 10)]);
+        imgIdeasList.style.display = 'none';
+      });
+      btn.addEventListener('mouseenter', () => { btn.style.background = 'var(--accent-dim)'; });
+      btn.addEventListener('mouseleave', () => { btn.style.background = 'none'; });
+    });
+  }
+  imgIdeasList.style.display = 'block';
+});
 
 if (imgGenerateBtn2) imgGenerateBtn2.addEventListener('click', async () => {
   const prompt = imgPromptEl.value.trim();
