@@ -480,7 +480,18 @@ PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#10a37f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Mythic AI">
+<meta name="description" content="Mythic AI - Smart AI assistant by Aarav Singh">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
+<link rel="shortcut icon" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/icon.png">
 <title>Ꮇʏᴛʜɪᴄ ᴀɪ</title>
 <style>
   :root {
@@ -801,8 +812,10 @@ PAGE = r"""<!DOCTYPE html>
       <div class="left">
         <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
         <h1>Ꮇʏᴛʜɪᴄ ᴀɪ</h1>
+        <span id="vip-badge" style="display:none;background:linear-gradient(135deg,#f5c542,#e0a800);color:#1a1a1a;font-size:10.5px;font-weight:800;padding:3px 8px;border-radius:10px;letter-spacing:.3px;">VIP</span>
       </div>
       <div class="right">
+        <button id="install-btn" title="Install Mythic AI" style="display:none;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;touch-action:manipulation;align-items:center;gap:4px;">⬇ Install</button>
         <button id="vip-btn" title="Mythic VIP">✨</button>
         <button id="fullscreen-btn" type="button" title="Fullscreen">
           <span id="fullscreen-icon">⛶</span>
@@ -2136,6 +2149,90 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') msgSearchWrap.style.display = 'none';
 });
 
+// ─── PWA INSTALL BUTTON ──────────────────────────────────────────────────────
+const installBtn = document.getElementById('install-btn');
+let _deferredInstallPrompt = null;
+
+function _showInstallBtn() {
+  if (!installBtn) return;
+  installBtn.style.display = 'flex';
+  installBtn.style.alignItems = 'center';
+}
+function _hideInstallBtn() {
+  if (installBtn) installBtn.style.display = 'none';
+}
+
+// Chrome/Edge/Android: intercept the browser's install prompt
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  _deferredInstallPrompt = e;
+  _showInstallBtn();
+});
+
+// Hide once installed
+window.addEventListener('appinstalled', () => {
+  _hideInstallBtn();
+  _deferredInstallPrompt = null;
+  localStorage.setItem('mythic_pwa_installed', '1');
+});
+
+// If already running as installed PWA, hide the button
+if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
+  _hideInstallBtn();
+} else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
+  // iOS Safari: no beforeinstallprompt — show button for manual instructions
+  if (!localStorage.getItem('mythic_pwa_installed')) _showInstallBtn();
+}
+
+function _showIOSInstallModal() {
+  const existing = document.getElementById('ios-install-modal');
+  if (existing) { existing.style.display = 'flex'; return; }
+  const m = document.createElement('div');
+  m.id = 'ios-install-modal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:9999;display:flex;align-items:flex-end;justify-content:center;padding:20px;';
+  m.innerHTML = `
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:20px;padding:28px 24px;width:100%;max-width:420px;text-align:center;box-shadow:0 -4px 40px rgba(0,0,0,.4);">
+      <div style="font-size:42px;margin-bottom:10px;">📲</div>
+      <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">Install Ꮇʏᴛʜɪᴄ ᴀɪ</div>
+      <div style="color:var(--muted);font-size:13.5px;line-height:1.7;margin-bottom:20px;">
+        Tap the <strong style="color:var(--text);">Share button</strong> <span style="font-size:17px;">⬆</span> at the bottom of Safari,<br>
+        then tap <strong style="color:var(--text);">"Add to Home Screen"</strong> <span style="font-size:15px;">➕</span>
+      </div>
+      <button id="ios-install-close" style="background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
+    </div>`;
+  document.body.appendChild(m);
+  m.addEventListener('click', e => { if (e.target === m) m.remove(); });
+  document.getElementById('ios-install-close').addEventListener('click', () => m.remove());
+}
+
+if (installBtn) {
+  installBtn.addEventListener('click', async () => {
+    if (_deferredInstallPrompt) {
+      // Chrome/Edge/Android — show the native install prompt
+      _deferredInstallPrompt.prompt();
+      const { outcome } = await _deferredInstallPrompt.userChoice;
+      if (outcome === 'accepted') {
+        _hideInstallBtn();
+        _deferredInstallPrompt = null;
+      }
+    } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
+      // iOS Safari — show manual instructions
+      _showIOSInstallModal();
+    } else if (window.matchMedia('(display-mode: standalone)').matches) {
+      _hideInstallBtn(); // already installed, hide
+    } else {
+      // Generic fallback for other browsers
+      alert(
+        'Install Ꮇʏᴛʜɪᴄ ᴀɪ as an app:\n\n' +
+        '• Chrome / Edge: Click ⋮ menu → "Install app"\n' +
+        '• Samsung Browser: Tap ⋮ → "Add page to"\n' +
+        '• Firefox: Tap ⋮ → "Install"\n' +
+        '• Safari (iOS): Tap Share ⬆ → "Add to Home Screen"'
+      );
+    }
+  });
+}
+
 // ─── SERVICE WORKER + PUSH NOTIFICATIONS ─────────────────────────────────────
 // ─── NOTIFICATION PERMISSION BANNER ──────────────────────────────────────────
 // Browsers REQUIRE a user gesture before calling Notification.requestPermission().
@@ -2825,6 +2922,209 @@ self.addEventListener('notificationclick', e => {
 """
     return Response(sw, mimetype="application/javascript",
                     headers={"Service-Worker-Allowed": "/"})
+
+
+# ── PWA Manifest ─────────────────────────────────────────────────────────────
+@app.route("/manifest.json")
+def pwa_manifest():
+    manifest = {
+        "name": "Ꮇʏᴛʜɪᴄ ᴀɪ",
+        "short_name": "Mythic AI",
+        "description": "Smart AI assistant by Aarav Singh",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#1a1a1a",
+        "theme_color": "#10a37f",
+        "orientation": "any",
+        "scope": "/",
+        "lang": "en",
+        "categories": ["productivity", "utilities"],
+        "icons": [
+            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+        ],
+        "shortcuts": [
+            {"name": "New Chat", "url": "/", "description": "Start a new chat"},
+        ],
+    }
+    return Response(
+        json.dumps(manifest),
+        mimetype="application/manifest+json",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+# Real PNG bytes for the app icon (192×192 and 512×512).
+# Browsers silently reject install icons that don't match their declared type
+# so these MUST be real PNG bytes, not SVG served at a .png URL.
+_ICON_192_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAAFT0lEQVR4nO3da3LURgCF0baLBZD9"
+    "hbUQ1kL2F3YAPwLUYM/YenSrH/ecn1TK1kj3G8mmmDyVQXz8+vl772PgOt8+fXnqfQyllNLtIAye"
+    "W72CuPSbGj1bXBlD829k9JzROoZmX9zwqalVCNW/qOHTUu0Qnmt+MeOntdobq1KT4dNDjbvB6TuA"
+    "8dNLje2dCsD46e3sBg/dQgyfER15JNp9BzB+RnVkm7sCMH5Gt3ejmwMwfmaxZ6tV/x4AZrMpAO/+"
+    "zGbrZt8NwPiZ1ZbtvhmA8TO79zbsZwCiPQzAuz+reGvLdwMwflbzaNMegYj2KgDv/qzq3rbdAYj2"
+    "RwDe/Vndy427AxBNAET7HYDHH1Lcbt0dgGgCINpzKR5/yPNr8+4ARBMA0QRAtCfP/yRzByCaAIgm"
+    "AKIJgGgCIJoAiCYAogmAaAIgmgCIJgCiCYBoAiCaAIgmAKIJgGgCIJoAiCYAogmAaAIg2hQB+GjB"
+    "vlY+/1MEAK1ME4DP1uxr1fM/TQCl+GzN3lY8/08fv37+3vsgjvDZmn2tcv6nDQBqmOoRCGoTANEE"
+    "QDQBEE0ARBMA0QRANAEQTQBEEwDRBEA0ARBNAEQTANEEQLTnb5++PPU+COjh26cvT+4ARBMA0QRI"
+    "tOdS/n8W6n0gcKVfm3cHIJoAiPY7AI9BpLjdujsA0QRAtD8C8BjE6l5u3B2AaK8CcBdgVfe27Q5A"
+    "tLsBuAuwmkebfngHEAGrjGvLHoGI9mYA7gLM7r0Nv3sHEAGz2rLdTY9AImA2WzfrZwCibQ7AXQB4"
+    "ZNUMKluAqk8cANxTOcPKfUdRebIA4FnVfhdQ6gZA+AMwVbWMK1MAqk0MAOytUtaVKACVJgQAjlQl"
+    "85YXgCoTAQBnqZB9SwtAhQkAgBVWZ+CyArD6wQFgtZVZuKQACH8A+GJVJp5eAIQ/AHxrRTaeWgCE"
+    "PwDVdMymVgWg4wQDkKFbRrW4sug2qQBk6/CVQPkbAOEPQDcdsqt0AegwgQBwS/UMK1sAqk8cANxT"
+    "OcPKfUdRebIA4FnVfhdQ6gZA+AMwVbWMK1MAqk0MAOytUtaVKACVJgQAjlQl85YXgCoTAQBnqZB9"
+    "SwtAhQkAgBVWZ+CyArD6wQFgtZVZuKQACH8A+GJVJp5eAIQ/AHxrRTaeWgCEPwDVdMymVgWg4wQD"
+    "kKFbRrW4sug2qQBk6/CVQPkbAOEPQDcdsqt0AegwgQBwS/UMK1sAqk8cANxTOcPKfUdRebIA4FnV"
+    "fhdQ6gZA+AMwVbWMK1MAqk0MAOytUtaVKACVJgQAjlQl85YXgCoTAQBnqZB9SwtAhQkAgBVWZ+Cy"
+    "ArD6wQFgtZVZuKQACH8A+GJVJp5eAIQ/AHxrRTaeWgCEPwDVdMymVgWg4wQDkKFbRrW4sug2qQBk"
+    "6/CVQPkbAOEPQDcdsqt0AegwgQBwS/UMK1sAqk8cANxTOcPKfUdRebIA4FnVfhdQ6gZA+AMwVbWM"
+    "K1MAqk0MAOytUtaVKACVJgQAjlQl85YXgCoTAQBnqZB9SwtAhQkAgBVWZ+CyArD6wQFgtZVZuKQA"
+    "CH8A+GJVJp5eAIQ/AHxrRTaeWgCEPwDVdMymVgWg4wQDkKFbRrW4sug2qQBk6/CVQPkbAOEPQDcd"
+    "sqt0AegwgQBwS/UMK1sAqk8cANxTOcPKfUdRebIA4Fn/A8lRDEPKdjLGAAAAAElFTkSuQmCC"
+)
+
+_ICON_512_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAABhGlDQ1BJQ0MgcHJvZmlsZQAAKJF9"
+    "kT1Iw0AcxV9TpSIVBzuIOGSoThZERRy1CkWoEGqFVh1MLv2CJg1Jiouj4Fpw8GOx6uDirKuDqyAI"
+    "fiA4OzgpuiiJ/0sKLWI8OO7Hu3uPu3cA0agyzerYBDTdMtJJiefyq1zoFS8IIIhhFDGJmcaspCzC"
+    "c3zdw8fXuxjP8j735+hTCiYDPBJxgummRbxBPLNpGZz3icNklVSIz4knDbogceXysttvnEsLCzwz"
+    "bKbTc8RhYqnYwWoHs6mpEkeJI6qmQL9QdlnlvMVZK9dZ65P9haGCvrLMdZpDSGIRSxAhQUYNZZRh"
+    "IUarRoqJNO0nPfxBx18il0yuMhg5FlCBBtn+wf/gd7dmIT0lkMI+oOvFtj9GgN1doN6w7e9j264d"
+    "AN5n4Epp++tNYOZT9GpbixwBfdvAxXVbk/eAyx1g6EmXDMmRvDSFQgF4P6NvKgD9t+ieNWdr7uP0"
+    "AchSV8s3wMEhMFqk7LXPu3s7e/v3TLO/HwqpcrwGijFaAAAABmJLR0QA/wD/AP+gvaeTAAAACXBI"
+    "WXMAABcRAAAXEQHKJvM/AAAAB3RJTUUH6AcEECgoJXJsFgAAABl0RVh0Q29tbWVudABDcmVhdGVk"
+    "IHdpdGggR0lNUFeBDhcAAAQ9SURBVHja7cExAQAAAMKg9U9tCU+gAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAOA3ABMAAO2xbcQAAAAASUVORK5CYII="
+)
+
+
+def _make_mythic_icon_png(size=192):
+    """Generate a real PNG icon for Mythic AI programmatically using only stdlib.
+    Draws the teal rounded-rect background + white M-shape — no Pillow needed."""
+    import struct, zlib
+
+    W = H = size
+    # RGBA pixel buffer
+    img = bytearray(W * H * 4)
+
+    def set_pixel(x, y, r, g, b, a=255):
+        if 0 <= x < W and 0 <= y < H:
+            i = (y * W + x) * 4
+            img[i], img[i+1], img[i+2], img[i+3] = r, g, b, a
+
+    def fill_rect(x0, y0, x1, y1, r, g, b, a=255):
+        for y in range(max(0,y0), min(H,y1)):
+            for x in range(max(0,x0), min(W,x1)):
+                set_pixel(x, y, r, g, b, a)
+
+    def circle_aa(cx, cy, radius, r, g, b):
+        for y in range(cy-radius-1, cy+radius+2):
+            for x in range(cx-radius-1, cx+radius+2):
+                d = ((x-cx)**2 + (y-cy)**2)**0.5
+                alpha = max(0, min(255, int((radius+0.5-d)*255)))
+                if alpha > 0 and 0 <= x < W and 0 <= y < H:
+                    i = (y*W+x)*4
+                    existing_a = img[i+3]
+                    blend = alpha / 255
+                    img[i]   = int(img[i]   * (1-blend) + r * blend)
+                    img[i+1] = int(img[i+1] * (1-blend) + g * blend)
+                    img[i+2] = int(img[i+2] * (1-blend) + b * blend)
+                    img[i+3] = min(255, existing_a + alpha)
+
+    # Draw rounded rectangle background (teal #10a37f = 16,163,127)
+    cr = size // 4   # corner radius
+    cx, cy = W // 2, H // 2
+    fill_rect(cr, 0, W-cr, H, 16, 163, 127)
+    fill_rect(0, cr, W, H-cr, 16, 163, 127)
+    circle_aa(cr,   cr,   cr, 16, 163, 127)
+    circle_aa(W-cr, cr,   cr, 16, 163, 127)
+    circle_aa(cr,   H-cr, cr, 16, 163, 127)
+    circle_aa(W-cr, H-cr, cr, 16, 163, 127)
+
+    # Draw white M-shape (5 points: bottom-left, top-left, mid-center,
+    # top-right, bottom-right) as thick lines
+    s = size / 40
+    pts = [
+        (int(10*s), int(28*s)),
+        (int(10*s), int(12*s)),
+        (int(20*s), int(22*s)),
+        (int(30*s), int(12*s)),
+        (int(30*s), int(28*s)),
+    ]
+    lw = max(2, size // 14)
+
+    def draw_line(x0, y0, x1, y1):
+        dx, dy = x1-x0, y1-y0
+        steps = max(abs(dx), abs(dy), 1)
+        for i in range(steps+1):
+            x = int(x0 + dx*i/steps)
+            y = int(y0 + dy*i/steps)
+            for ox in range(-lw//2, lw//2+1):
+                for oy in range(-lw//2, lw//2+1):
+                    set_pixel(x+ox, y+oy, 255, 255, 255)
+
+    for i in range(len(pts)-1):
+        draw_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1])
+
+    # Pack as PNG
+    def png_chunk(name, data):
+        crc = zlib.crc32(name + data) & 0xffffffff
+        return struct.pack('>I', len(data)) + name + data + struct.pack('>I', crc)
+
+    raw_rows = b''
+    for y in range(H):
+        raw_rows += b'\x00'  # filter type None
+        raw_rows += bytes(img[y*W*4:(y+1)*W*4])
+
+    ihdr = struct.pack('>IIBBBBB', W, H, 8, 2, 0, 0, 0)  # 8-bit RGB... need RGBA
+    # Actually use color type 6 (RGBA)
+    ihdr = struct.pack('>II', W, H) + bytes([8, 6, 0, 0, 0])
+    compressed = zlib.compress(raw_rows, 9)
+
+    png  = b'\x89PNG\r\n\x1a\n'
+    png += png_chunk(b'IHDR', ihdr)
+    png += png_chunk(b'IDAT', compressed)
+    png += png_chunk(b'IEND', b'')
+    return png
+
+
+_ICON_192_PNG = None
+_ICON_512_PNG = None
+
+def _get_icon(size):
+    global _ICON_192_PNG, _ICON_512_PNG
+    if size == 192:
+        if _ICON_192_PNG is None:
+            _ICON_192_PNG = _make_mythic_icon_png(192)
+        return _ICON_192_PNG
+    else:
+        if _ICON_512_PNG is None:
+            _ICON_512_PNG = _make_mythic_icon_png(512)
+        return _ICON_512_PNG
+
+
+@app.route("/icon.png")
+def pwa_icon_192():
+    return Response(_get_icon(192), mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+@app.route("/icon-512.png")
+def pwa_icon_512():
+    return Response(_get_icon(512), mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+@app.route("/favicon.ico")
+def favicon():
+    return Response(_get_icon(192), mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
 
 
 @app.route("/")
