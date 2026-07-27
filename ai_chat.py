@@ -835,6 +835,33 @@ PAGE = r"""<!DOCTYPE html>
       <button id="stop-speak-btn">Stop</button>
     </div>
 
+    <!-- Notification permission banner — shown once, requires user click (browsers require a gesture) -->
+    <div id="notif-banner" style="display:none;align-items:center;justify-content:space-between;gap:10px;
+      background:linear-gradient(135deg,var(--accent-dim),rgba(16,163,127,.15));
+      border:1px solid var(--accent);border-radius:12px;padding:10px 14px;
+      max-width:760px;margin:8px auto 0;width:calc(100% - 40px);flex-wrap:wrap;">
+      <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;">
+        <span style="font-size:20px;flex-shrink:0;">🔔</span>
+        <div style="min-width:0;">
+          <div style="font-size:13px;font-weight:600;color:var(--text);">Get notified when Ꮇʏᴛʜɪᴄ ᴀɪ replies</div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:1px;">Even when you switch to another tab</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0;">
+        <button id="notif-banner-allow" type="button"
+          style="background:var(--accent);color:#fff;border:none;border-radius:8px;
+            padding:7px 14px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;
+            white-space:nowrap;">
+          Allow 🔔
+        </button>
+        <button id="notif-banner-dismiss" type="button"
+          style="background:none;border:1px solid var(--border);color:var(--muted);
+            border-radius:8px;padding:7px 10px;font-size:12.5px;cursor:pointer;font-family:inherit;">
+          ✕
+        </button>
+      </div>
+    </div>
+
     <!-- Quick action buttons -->
     <div id="quick-actions" style="display:flex;gap:8px;padding:6px 20px 0;max-width:760px;margin:0 auto;width:100%;flex-wrap:wrap;">
       <button class="quick-btn" id="img-gen-btn">🎨 Image</button>
@@ -2110,101 +2137,145 @@ document.addEventListener('keydown', e => {
 });
 
 // ─── SERVICE WORKER + PUSH NOTIFICATIONS ─────────────────────────────────────
-(async () => {
-  if (!('serviceWorker' in navigator)) return;
+// ─── NOTIFICATION PERMISSION BANNER ──────────────────────────────────────────
+// Browsers REQUIRE a user gesture before calling Notification.requestPermission().
+// The banner provides that gesture button. We show it immediately on first visit
+// (not after a delay) so users actually see it.
 
-  // Register the real /sw.js (not a blob — blobs can't receive push events)
-  let reg;
+const notifBanner     = document.getElementById('notif-banner');
+const notifAllowBtn   = document.getElementById('notif-banner-allow');
+const notifDismissBtn = document.getElementById('notif-banner-dismiss');
+let _swReg = null;
+
+function _hideBanner() { if (notifBanner) notifBanner.style.display = 'none'; }
+
+function _showBanner() {
+  if (!notifBanner) return;
+  if (!('Notification' in window)) return;          // browser doesn't support it
+  if (Notification.permission === 'granted') return; // already allowed
+  if (Notification.permission === 'denied') return;  // blocked — can't ask again
+  if (localStorage.getItem('mythic_notif_dismissed')) return; // user said no recently
+  notifBanner.style.display = 'flex';
+}
+
+function _urlB64ToUint8(b64url) {
+  const pad = '='.repeat((4 - b64url.length % 4) % 4);
+  const b64 = (b64url + pad).replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+}
+
+async function _doSubscribe(reg) {
+  if (!('PushManager' in window)) return;
   try {
-    reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
-  } catch (err) {
-    console.warn('[SW] registration failed:', err);
-    return;
-  }
+    const kr = await fetch('/api/push/vapid-public-key');
+    if (!kr.ok) return; // VAPID not configured on server — silent, no error
+    const { publicKey } = await kr.json();
+    if (!publicKey) return;
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: _urlB64ToUint8(publicKey),
+    });
+    await fetch('/api/push/subscribe', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subscription: sub.toJSON() }),
+    });
+    localStorage.setItem('mythic_push_subscribed', '1');
+  } catch (err) { console.warn('[Push] subscribe error:', err); }
+}
 
-  // ── Ask for push permission after PWA install or after first AI reply ──
-  async function requestPushPermission() {
-    if (!('PushManager' in window)) return false;
-    if (Notification.permission === 'denied') return false;
-    if (Notification.permission === 'granted') return true;
-    const result = await Notification.requestPermission();
-    return result === 'granted';
-  }
+// Register /sw.js — show banner as soon as SW is ready (no 5s delay)
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js', { scope: '/' })
+    .then(reg => {
+      _swReg = reg;
+      if (Notification.permission === 'granted') {
+        _hideBanner();
+        _doSubscribe(reg); // re-subscribe in case sub expired
+      } else {
+        _showBanner(); // show immediately (no timeout)
+      }
+    })
+    .catch(err => {
+      console.warn('[SW] registration failed:', err);
+      // Even without SW, show banner — local notifications still work
+      _showBanner();
+    });
+} else {
+  // No service worker support — still show banner for local notifications
+  _showBanner();
+}
 
-  async function subscribeToPush() {
-    if (!('PushManager' in window)) return;
-    try {
-      // Fetch VAPID public key from the server
-      const kr = await fetch('/api/push/vapid-public-key');
-      if (!kr.ok) return; // push not configured server-side
-      const { publicKey } = await kr.json();
-      if (!publicKey) return;
+// ── Allow button: the user gesture that unlocks requestPermission() ───────────
+if (notifAllowBtn) notifAllowBtn.addEventListener('click', async () => {
+  _hideBanner();
+  let perm;
+  try { perm = await Notification.requestPermission(); }
+  catch { perm = 'denied'; }
 
-      // Convert base64url to Uint8Array for applicationServerKey
-      const padding = '='.repeat((4 - publicKey.length % 4) % 4);
-      const b64 = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
-      const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-
-      // Subscribe (browser may already have a sub — subscribe() is idempotent)
-      const sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: raw,
-      });
-
-      // Send subscription to backend
-      await fetch('/api/push/subscribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subscription: sub.toJSON() }),
-      });
-      localStorage.setItem('mythic_push_subscribed', '1');
-    } catch (err) {
-      console.warn('[Push] subscribe failed:', err);
-    }
-  }
-
-  // Ask once: either on first AI reply or after 30 s — whichever comes first
-  async function maybeAskForPush() {
-    if (localStorage.getItem('mythic_push_asked')) return;
-    localStorage.setItem('mythic_push_asked', '1');
-    const granted = await requestPushPermission();
-    if (granted) subscribeToPush();
-  }
-
-  // Prompt after 30 s of use (non-intrusive — user has seen the app by then)
-  setTimeout(maybeAskForPush, 30000);
-
-  // Also prompt when the PWA is installed
-  window.addEventListener('appinstalled', () => {
-    localStorage.removeItem('mythic_push_asked'); // allow re-prompt after install
-    setTimeout(maybeAskForPush, 2000);
-  });
-
-  // ── Send a push notification when an AI reply arrives and the tab is hidden ──
-  // This is the core use case: user switches away, AI finishes — they get notified.
-  window._notifyAiReply = function(preview) {
-    // Only send when the page isn't visible (user is in another tab/app)
-    if (document.visibilityState === 'visible') return;
-    if (Notification.permission !== 'granted') return;
-    if (!localStorage.getItem('mythic_push_subscribed')) {
-      // Fallback: local notification (no server round-trip needed)
+  if (perm === 'granted') {
+    // Immediately show a confirmation notification so the user knows it worked
+    if (_swReg) {
       try {
-        reg.showNotification('Ꮇʏᴛʜɪᴄ ᴀɪ replied', {
-          body: preview || 'Your answer is ready 💬',
-          icon: '/icon.png',
-          badge: '/icon.png',
-          tag: 'mythic-ai-reply',
-          renotify: true,
-          vibrate: [200, 100, 200],
-          data: { url: '/' },
-          actions: [{ action: 'open', title: '💬 Open Chat' }],
+        await _swReg.showNotification('Ꮇʏᴛʜɪᴄ ᴀɪ 🔔', {
+          body: "Notifications enabled! You'll hear from me when your answer is ready.",
+          icon: '/icon.png', badge: '/icon.png',
+          tag: 'mythic-notif-confirm', vibrate: [150, 80, 150],
         });
-      } catch {}
+      } catch (e) { console.warn('[Push] confirm notification failed:', e); }
+      _doSubscribe(_swReg);
+    } else {
+      // SW not ready yet — try a plain Notification as fallback
+      try { new Notification('Ꮇʏᴛʜɪᴄ ᴀɪ 🔔', { body: "Notifications enabled!", icon: '/icon.png' }); }
+      catch {}
     }
-    // Server-side push is sent automatically by the backend after /api/chat
-    // completes — no extra JS call needed here.
-  };
+    // Update the Settings toggle UI
+    const nb = document.getElementById('notif-toggle-btn');
+    const ns = document.getElementById('notif-status');
+    if (nb) { nb.textContent = 'Enabled ✓'; nb.style.borderColor = 'var(--accent)'; nb.style.color = 'var(--accent)'; }
+    if (ns) ns.textContent = "You'll get notified when Ꮇʏᴛʜɪᴄ ᴀɪ replies while you're away.";
+    localStorage.removeItem('mythic_notif_dismissed');
+  } else {
+    // User denied — update Settings UI accordingly
+    const nb = document.getElementById('notif-toggle-btn');
+    const ns = document.getElementById('notif-status');
+    if (nb) { nb.textContent = 'Blocked'; nb.style.borderColor = '#ef4444'; nb.style.color = '#ef4444'; }
+    if (ns) ns.textContent = 'Notifications blocked. Allow them in your browser site settings.';
+  }
+});
+
+// ── Dismiss button: hide for this session, re-show after 3 days ──────────────
+if (notifDismissBtn) notifDismissBtn.addEventListener('click', () => {
+  _hideBanner();
+  // Store a timestamp — re-show the banner after 3 days (not permanent dismissal)
+  localStorage.setItem('mythic_notif_dismissed', String(Date.now() + 3 * 24 * 60 * 60 * 1000));
+});
+
+// Clear the dismiss flag if the 3-day window has passed
+(function() {
+  const ts = parseInt(localStorage.getItem('mythic_notif_dismissed') || '0', 10);
+  if (ts && Date.now() > ts) localStorage.removeItem('mythic_notif_dismissed');
 })();
+
+// ── Notify when AI finishes replying and user is in another tab ───────────────
+window._notifyAiReply = function(preview) {
+  if (document.visibilityState === 'visible') return; // user is watching — no need
+  if (Notification.permission !== 'granted') return;
+  const body = preview || 'Your answer is ready — tap to read it.';
+  if (_swReg) {
+    try {
+      _swReg.showNotification('Ꮇʏᴛʜɪᴄ ᴀɪ replied 💬', {
+        body, icon: '/icon.png', badge: '/icon.png',
+        tag: 'mythic-ai-reply', renotify: true, vibrate: [200, 100, 200],
+        data: { url: '/' },
+        actions: [{ action: 'open', title: '💬 Open Chat' }, { action: 'dismiss', title: '✕' }],
+      });
+    } catch {}
+  } else {
+    // SW not available — plain Notification as fallback
+    try { new Notification('Ꮇʏᴛʜɪᴄ ᴀɪ replied 💬', { body, icon: '/icon.png' }); }
+    catch {}
+  }
+};
 
 // ─── WIRE REACTIONS INTO MSG ACTIONS ─────────────────────────────────────────
 // Patch buildMsgActions to add reaction button
