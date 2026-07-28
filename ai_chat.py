@@ -34,6 +34,8 @@ Features:
 - Groq primary / Cerebras automatic silent fallback — no provider picker, ever
 - Image generation, Ghibli Me (image-to-image), and full weather (current +
   hourly + 7-day + air quality) built in
+- Daily chat streaks + re-engagement push notifications ("come back and chat",
+  study reminders, activity nudges, streak-on-hold alerts, feature updates)
 - No rate limiting — unlimited messages
 """
 
@@ -42,6 +44,9 @@ import json
 import uuid
 import time
 import base64
+import random
+import datetime
+import threading
 import urllib.parse
 import requests
 try:
@@ -92,6 +97,8 @@ VAPID_CLAIMS_EMAIL  = os.environ.get("VAPID_CLAIMS_EMAIL",  "mailto:admin@mythic
 
 # In-memory subscription store (replaced by file/Supabase in production)
 # Key: a stable browser id, Value: the full PushSubscription JSON object
+# (each subscription also carries an internal "_username" field so
+# re-engagement notifications can be targeted at a specific person)
 _push_subscriptions: dict = {}
 
 def _save_push_subscription(sub_id: str, sub_data: dict):
@@ -143,7 +150,7 @@ def send_push_notification(title: str, body: str, url: str = "/", icon: str = "/
     for sub_id, sub in list(_push_subscriptions.items()):
         try:
             webpush(
-                subscription_info=sub,
+                subscription_info={k: v for k, v in sub.items() if k != "_username"},
                 data=payload,
                 vapid_private_key=VAPID_PRIVATE_KEY,
                 vapid_claims={"sub": VAPID_CLAIMS_EMAIL},
@@ -155,6 +162,67 @@ def send_push_notification(title: str, body: str, url: str = "/", icon: str = "/
             pass
     for sub_id in dead:
         _delete_push_subscription(sub_id)
+
+
+def send_push_notification_to_user(username: str, title: str, body: str,
+                                    url: str = "/", icon: str = "/icon.png"):
+    """Same as send_push_notification, but only targets subscriptions that
+    belong to a specific (anonymous, per-browser) username. Used for
+    personalized re-engagement / streak notifications."""
+    if not _PUSH_AVAILABLE or not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
+        return
+    _load_push_subscriptions()
+    dead = []
+    payload = json.dumps({"title": title, "body": body, "url": url, "icon": icon})
+    for sub_id, sub in list(_push_subscriptions.items()):
+        if sub.get("_username") != username:
+            continue
+        try:
+            webpush(
+                subscription_info={k: v for k, v in sub.items() if k != "_username"},
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": VAPID_CLAIMS_EMAIL},
+            )
+        except WebPushException as ex:
+            if ex.response is not None and ex.response.status_code == 410:
+                dead.append(sub_id)
+        except Exception:
+            pass
+    for sub_id in dead:
+        _delete_push_subscription(sub_id)
+
+
+# ── Re-engagement notification message pool ──────────────────────────────────
+# Each tuple is (emoji, text). A category is chosen at random when a user has
+# gone quiet, and rendered as: "{emoji} Mythic AI: \"{text}\""
+NOTIFICATION_MESSAGES = {
+    "come_back": [
+        ("🤖", "Hey! I'm ready whenever you want to chat."),
+        ("💭", "It's been a while. Want to continue our last conversation?"),
+        ("✨", "I've got new ideas waiting for you. Let's chat!"),
+        ("😊", "Hi! Ask me anything—I'm here to help."),
+        ("🚀", "Need help with homework, coding, or anything else? I'm ready."),
+    ],
+    "study": [
+        ("📖", "Ready to study? Let's tackle today's homework together."),
+        ("🧠", "Let's learn something new today!"),
+    ],
+    "activity": [
+        ("💬", "You haven't chatted in a while. Come say hello!"),
+        ("🌟", "Your next great idea could start with one question."),
+    ],
+    "feature": [
+        ("🎨", "New AI features are available. Come check them out!"),
+        ("⚡", "Mythic AI just got smarter. Try it now!"),
+    ],
+}
+
+
+def _random_notification_body(category: str) -> str:
+    emoji, text = random.choice(NOTIFICATION_MESSAGES[category])
+    return f'{emoji} Mythic AI: "{text}"'
+
 
 # --- Model names -------------------------------------------------------------
 GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "llama-3.1-8b-instant")
@@ -474,6 +542,131 @@ def make_title(first_message):
     return title[:40] + ("…" if len(title) > 40 else "")
 
 
+# ── Daily chat streaks + re-engagement scheduling ────────────────────────────
+# Tracks, per (anonymous) username: current streak length, the last calendar
+# day they chatted, a raw last-active timestamp, and when they were last
+# nudged with a re-engagement push notification (so we don't spam anyone).
+_ACTIVITY_FILE = _os.path.join(_DATA_DIR, "user_activity.json")
+_activity_lock = threading.Lock()
+
+# How long a user must be quiet before we consider nudging them, and the
+# minimum gap between two nudges to the same person.
+_REENGAGEMENT_IDLE_HOURS = 20
+_REENGAGEMENT_MIN_GAP_HOURS = 20
+_REENGAGEMENT_CHECK_INTERVAL_SECONDS = 30 * 60  # scan every 30 minutes
+
+
+def _load_all_activity():
+    try:
+        if _os.path.exists(_ACTIVITY_FILE):
+            with open(_ACTIVITY_FILE, encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_all_activity(data):
+    try:
+        with open(_ACTIVITY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def _today_str():
+    return datetime.date.today().isoformat()
+
+
+def _update_user_activity(username):
+    """Call this whenever a user actually sends a chat message. Bumps their
+    streak by 1 if their last active day was yesterday, resets it to 1 if
+    they skipped a day (or more), and leaves it alone if they already
+    chatted today. Returns the updated record."""
+    with _activity_lock:
+        data = _load_all_activity()
+        rec = data.get(username) or {"streak": 0, "last_active_day": None,
+                                      "last_active_ts": 0, "last_notified_ts": 0}
+        today = _today_str()
+        last_day = rec.get("last_active_day")
+        if last_day != today:
+            gap_days = None
+            if last_day:
+                try:
+                    y, m, d = (int(x) for x in last_day.split("-"))
+                    gap_days = (datetime.date.today() - datetime.date(y, m, d)).days
+                except Exception:
+                    gap_days = None
+            if gap_days == 1:
+                rec["streak"] = rec.get("streak", 0) + 1
+            else:
+                rec["streak"] = 1
+            rec["last_active_day"] = today
+        rec["last_active_ts"] = time.time()
+        data[username] = rec
+        _save_all_activity(data)
+        return rec
+
+
+def _get_user_streak(username):
+    with _activity_lock:
+        data = _load_all_activity()
+    return (data.get(username) or {}).get("streak", 0)
+
+
+def _run_reengagement_pass():
+    """Scans every known user; if they've gone quiet long enough (and haven't
+    already been nudged recently), sends one push notification. Users with an
+    active streak get a "your streak is on hold" message so they don't lose
+    it; everyone else gets a random pick from the general message pool."""
+    if not _PUSH_AVAILABLE or not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
+        return
+    now = time.time()
+    with _activity_lock:
+        data = _load_all_activity()
+        changed = False
+        for username, rec in data.items():
+            last_active_ts = rec.get("last_active_ts", 0)
+            last_notified_ts = rec.get("last_notified_ts", 0)
+            if last_active_ts <= 0:
+                continue
+            hours_inactive = (now - last_active_ts) / 3600.0
+            hours_since_notified = (now - last_notified_ts) / 3600.0
+            if hours_inactive < _REENGAGEMENT_IDLE_HOURS:
+                continue
+            if last_notified_ts and hours_since_notified < _REENGAGEMENT_MIN_GAP_HOURS:
+                continue
+
+            streak = rec.get("streak", 0)
+            if streak >= 2:
+                title = "🔥 Mythic AI"
+                body = f"Your {streak}-day streak is on hold! Come chat with me to keep it going."
+            else:
+                category = random.choice(["come_back", "activity", "study", "feature"])
+                title = "Mythic AI"
+                body = _random_notification_body(category)
+
+            try:
+                send_push_notification_to_user(username, title, body, url="/")
+            except Exception:
+                pass
+            rec["last_notified_ts"] = now
+            changed = True
+        if changed:
+            _save_all_activity(data)
+
+
+def _reengagement_loop():
+    """Background daemon thread: periodically checks for quiet users and
+    sends them a re-engagement / streak-on-hold push notification."""
+    while True:
+        try:
+            _run_reengagement_pass()
+        except Exception as e:
+            print(f"[Reengagement] error: {e}")
+        time.sleep(_REENGAGEMENT_CHECK_INTERVAL_SECONDS)
+
+
 # --- HTML pages ----------------------------------------------------------
 
 PAGE = r"""<!DOCTYPE html>
@@ -548,6 +741,8 @@ PAGE = r"""<!DOCTYPE html>
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0; }
   #sidebar-toggle:hover { background:var(--panel); }
   header h1 { font-size:16px; font-weight:700; color:var(--accent); margin:0; }
+  #streak-badge { display:none; align-items:center; gap:4px; background:linear-gradient(135deg,#ff9d42,#ff5f6d);
+    color:#fff; font-size:11px; font-weight:800; padding:3px 9px; border-radius:12px; white-space:nowrap; }
   #name-btn { background:none; border:1px solid var(--border); color:var(--muted);
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
@@ -813,6 +1008,7 @@ PAGE = r"""<!DOCTYPE html>
         <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
         <h1>Ꮇʏᴛʜɪᴄ ᴀɪ</h1>
         <span id="vip-badge" style="display:none;background:linear-gradient(135deg,#f5c542,#e0a800);color:#1a1a1a;font-size:10.5px;font-weight:800;padding:3px 8px;border-radius:10px;letter-spacing:.3px;">VIP</span>
+        <span id="streak-badge" title="Daily chat streak">🔥 0</span>
       </div>
       <div class="right">
         <button id="install-btn" title="Install Mythic AI" style="display:none;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;touch-action:manipulation;align-items:center;gap:4px;">⬇ Install</button>
@@ -1159,6 +1355,7 @@ const sidebarToggle= document.getElementById('sidebar-toggle');
 const fullscreenBtn= document.getElementById('fullscreen-btn');
 const nameBtn       = document.getElementById('name-btn');
 const vipBtn        = document.getElementById('vip-btn');
+const streakBadge   = document.getElementById('streak-badge');
 
 let selectedModel = 'mythic-2';
 let vipUnlocked   = false;
@@ -1170,6 +1367,26 @@ function updateVipBtn() {
     ? (selectedModel === 'mythic-vip' ? 'Mythic VIP active — click to switch back' : 'Switch to Mythic VIP')
     : 'Unlock Mythic VIP';
 }
+
+// ─── STREAK BADGE ─────────────────────────────────────────────────────────────
+async function refreshStreakBadge() {
+  try {
+    const r = await fetch('/api/streak');
+    if (!r.ok) return;
+    const d = await r.json();
+    const streak = d.streak || 0;
+    if (streak > 0) {
+      streakBadge.textContent = '🔥 ' + streak;
+      streakBadge.style.display = 'inline-flex';
+      streakBadge.title = streak === 1
+        ? '1 day streak — chat again tomorrow to keep it going!'
+        : streak + ' day streak — chat again tomorrow to keep it going!';
+    } else {
+      streakBadge.style.display = 'none';
+    }
+  } catch {}
+}
+refreshStreakBadge();
 
 function showVipModal() {
   const existing = document.getElementById('vip-modal-overlay');
@@ -1558,7 +1775,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
     if (wantsImage) {
       hideTyping();
       const generated = await tryGenerateImage(message);
-      if (generated) { setGenerating(false); loadConversationList(); return; }
+      if (generated) { setGenerating(false); loadConversationList(); refreshStreakBadge(); return; }
       showTyping();
     }
   }
@@ -1602,6 +1819,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
     }
     speak(fullText);
     loadConversationList();
+    refreshStreakBadge();
     // Notify the user if they've switched away from the tab
     if (typeof window._notifyAiReply === 'function') {
       const preview = fullText.replace(/[#*`_~>]/g, '').trim().slice(0, 80);
@@ -3000,8 +3218,6 @@ _ICON_512_B64 = (
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     "AAAAAAAAAAAOA3ABMAAO2xbcQAAAAASUVORK5CYII="
 )
 
@@ -3315,6 +3531,17 @@ def api_vip_unlock():
     return jsonify({"success": False})
 
 
+# ── Streak endpoint ───────────────────────────────────────────────────────────
+
+@app.route("/api/streak", methods=["GET"])
+@login_required
+def api_streak():
+    """Returns the current user's daily chat streak length (0 if they've
+    never chatted or their streak has already lapsed)."""
+    username = current_username()
+    return jsonify({"streak": _get_user_streak(username)})
+
+
 # ── Push Notification Routes ──────────────────────────────────────────────────
 
 @app.route("/api/push/vapid-public-key", methods=["GET"])
@@ -3328,13 +3555,17 @@ def push_vapid_key():
 @app.route("/api/push/subscribe", methods=["POST"])
 @login_required
 def push_subscribe():
-    """Save (or update) a browser's push subscription."""
+    """Save (or update) a browser's push subscription, tagged with the
+    current (anonymous) username so re-engagement notifications can be
+    targeted at this specific person later."""
     data = request.get_json(force=True) or {}
     sub = data.get("subscription")
     if not sub or not sub.get("endpoint"):
         return jsonify({"error": "invalid subscription"}), 400
     # Use the endpoint URL as a stable ID (it's unique per browser/device)
     sub_id = str(uuid.uuid5(uuid.NAMESPACE_URL, sub["endpoint"]))
+    sub = dict(sub)
+    sub["_username"] = current_username()
     _save_push_subscription(sub_id, sub)
     return jsonify({"status": "subscribed", "id": sub_id})
 
@@ -3590,6 +3821,11 @@ def chat():
             user_entry["attachment_meta"] = attachment_meta
         messages.append(user_entry)
 
+        # A genuine chat message from this person — update their daily streak
+        # and reset their "quiet too long" clock so re-engagement notifications
+        # don't fire while they're actively chatting.
+        _update_user_activity(username)
+
     effective_system_prompt = SYSTEM_PROMPT
     if user_name:
         effective_system_prompt += (
@@ -3764,4 +4000,10 @@ if __name__ == "__main__":
     print(f"Starting Ꮇʏᴛʜɪᴄ ᴀɪ at http://localhost:5000")
     print(f"Providers (Groq primary, Cerebras fallback): {providers_str}")
     print(f"Image generation: {image_provider}")
+
+    # Background daemon thread: periodically nudges quiet users with a
+    # re-engagement / streak-on-hold push notification (only fires anything
+    # if VAPID_PRIVATE_KEY / VAPID_PUBLIC_KEY are configured).
+    threading.Thread(target=_reengagement_loop, daemon=True).start()
+
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
