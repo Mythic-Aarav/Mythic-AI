@@ -1,28 +1,24 @@
 """
-Ꮇʏᴛʜɪᴄ ᴀɪ — single file, powered by Google's Gemini API or a local Ollama model.
+Mythic AI — single file, powered by Groq (primary) with Cerebras as a silent
+automatic fallback. No provider selection is exposed to the user — if Groq is
+rate-limited, times out, or errors, the app transparently retries on Cerebras.
 
-Usage (Gemini — default, needs a free API key):
+Usage:
     1. pip install flask requests
-    2. Set your API key:
-         Mac/Linux:   export GEMINI_API_KEY="your-key-here"
-         Windows:     set GEMINI_API_KEY=your-key-here
+    2. Set your API keys:
+         Mac/Linux:   export GROQ_API_KEY="your-groq-key"
+                      export CEREBRAS_API_KEY="your-cerebras-key"
+         Windows:     set GROQ_API_KEY=your-groq-key
+                      set CEREBRAS_API_KEY=your-cerebras-key
     3. python ai_chat.py
     4. Open http://localhost:5000 in your browser
 
-Get a FREE API key (no credit card needed) at https://aistudio.google.com/apikey
+Get a FREE Groq API key at https://console.groq.com/keys
+Get a FREE Cerebras API key at https://cloud.cerebras.ai
 
-Usage (Ollama — fully local, no API key or internet needed):
-    1. Install Ollama from https://ollama.com and make sure it's running
-       (`ollama serve`, or it may already be running as a background service)
-    2. Pull a model, e.g.:  ollama pull llama3.1
-    3. Set the provider:
-         Mac/Linux:   export AI_PROVIDER=ollama
-         Windows:     set AI_PROVIDER=ollama
-       Optional overrides:
-         OLLAMA_URL   (default: http://localhost:11434)
-         OLLAMA_MODEL (default: llama3.1)
-    4. python ai_chat.py
-    5. Open http://localhost:5000 in your browser
+Optional — NanoBanana (nanobananaapi.ai) powers real image-to-image editing for
+"Ghibli Me"; without it, image generation falls back to HuggingFace FLUX
+(text-to-image only). Weather uses Open-Meteo, which needs no API key at all.
 
 Supabase (optional — for accounts/conversation storage across restarts & devices):
     Set these as environment variables (never hardcode secrets in this file):
@@ -34,9 +30,12 @@ Features:
 - Login/register (real accounts, hashed passwords, stored in chat_data/users.json)
 - Multi-conversation chat with sidebar, saved per-account, survives restarts
 - File/image upload (attach an image or text file to a message)
-- Web search grounding (Gemini can search Google for current info — Gemini only)
 - Streaming responses (text appears word-by-word)
-- Switchable AI backend: Google Gemini (cloud) or Ollama (local, private, free)
+- Groq primary / Cerebras automatic silent fallback — no provider picker, ever
+- Image generation, Ghibli Me (image-to-image), and full weather (current +
+  hourly + 7-day + air quality) built in
+- Daily chat streaks + re-engagement push notifications ("come back and chat",
+  study reminders, activity nudges, streak-on-hold alerts, feature updates)
 - No rate limiting — unlimited messages
 """
 
@@ -45,27 +44,34 @@ import json
 import uuid
 import time
 import base64
+import random
+import datetime
+import threading
+import urllib.parse
 import requests
+try:
+    from pywebpush import webpush, WebPushException
+    _PUSH_AVAILABLE = True
+except ImportError:
+    _PUSH_AVAILABLE = False
 from flask import (
     Flask, request, jsonify, Response, session,
     stream_with_context
 )
 
 PROVIDER = os.environ.get("AI_PROVIDER", "auto").strip().lower()
-# "auto"        = round-robin: Groq → OpenRouter → HuggingFace (all work on servers)
-# "gemini"      = Google Gemini only (free tier only works locally, not on Render)
-# "groq"        = Groq only
-# "openrouter"  = OpenRouter only
-# "huggingface" = Hugging Face only
-# "ollama"      = local Ollama only
+# "auto"  = Groq first, silently falls back to Cerebras on any failure (rate limit,
+#           timeout, invalid model, network error, 429/500/503, etc.)
+# "groq"     = Groq only
+# "cerebras" = Cerebras only
 
 # --- API Keys (hardcoded fallbacks — override via environment variables) ------
 # WARNING: don't commit a file with real keys to a public GitHub repo.
 # Set these as environment variables on Render instead.
-GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY",    "")
 GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "")
 CEREBRAS_API_KEY  = os.environ.get("CEREBRAS_API_KEY",  "")
-OPENROUTER_API_KEY= os.environ.get("OPENROUTER_API_KEY","")
+# HF is kept ONLY as a text-to-image fallback for /api/generate-image when
+# NanoBanana isn't configured — it is NOT used as a chat/text provider.
 HF_API_KEY        = os.environ.get("HF_API_KEY",        "")
 # NanoBanana API (nanobananaapi.ai) — powers "Ghibli Me" image editing so it can
 # actually transform the user's uploaded photo (image-to-image), not just
@@ -74,55 +80,186 @@ HF_API_KEY        = os.environ.get("HF_API_KEY",        "")
 NANO_BANANA_API_KEY = os.environ.get("NANO_BANANA_API_KEY", "")
 NANO_BANANA_BASE     = "https://api.nanobananaapi.ai/api/v1/nanobanana"
 
+# ── Push Notifications (Web Push / VAPID) ────────────────────────────────────
+# Generate VAPID keys once and store as env vars:
+#   pip install py-vapid
+#   vapid --gen   → outputs private + public key
+# Then set:
+#   VAPID_PRIVATE_KEY  (the full private key PEM or base64url string)
+#   VAPID_PUBLIC_KEY   (the applicationServerKey sent to browsers)
+#   VAPID_CLAIMS_EMAIL (e.g. mailto:you@example.com)
+#
+# If keys are not set, push notifications are silently disabled — everything
+# else still works normally.
+VAPID_PRIVATE_KEY   = os.environ.get("VAPID_PRIVATE_KEY",   "")
+VAPID_PUBLIC_KEY    = os.environ.get("VAPID_PUBLIC_KEY",    "")
+VAPID_CLAIMS_EMAIL  = os.environ.get("VAPID_CLAIMS_EMAIL",  "mailto:admin@mythic-ai.app")
+
+# In-memory subscription store (replaced by file/Supabase in production)
+# Key: a stable browser id, Value: the full PushSubscription JSON object
+# (each subscription also carries an internal "_username" field so
+# re-engagement notifications can be targeted at a specific person)
+_push_subscriptions: dict = {}
+
+def _save_push_subscription(sub_id: str, sub_data: dict):
+    _push_subscriptions[sub_id] = sub_data
+    # Persist to disk alongside conversations so subs survive restarts
+    try:
+        path = _os.path.join(_DATA_DIR, "push_subscriptions.json")
+        existing = {}
+        if _os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                existing = json.load(f)
+        existing[sub_id] = sub_data
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(existing, f)
+    except Exception:
+        pass
+
+def _load_push_subscriptions():
+    global _push_subscriptions
+    try:
+        path = _os.path.join(_DATA_DIR, "push_subscriptions.json")
+        if _os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                _push_subscriptions = json.load(f)
+    except Exception:
+        _push_subscriptions = {}
+
+def _delete_push_subscription(sub_id: str):
+    _push_subscriptions.pop(sub_id, None)
+    try:
+        path = _os.path.join(_DATA_DIR, "push_subscriptions.json")
+        if _os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            data.pop(sub_id, None)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+    except Exception:
+        pass
+
+def send_push_notification(title: str, body: str, url: str = "/", icon: str = "/icon.png"):
+    """Send a push notification to all subscribed browsers.
+    Silently drops dead subscriptions (410 Gone = unsubscribed)."""
+    if not _PUSH_AVAILABLE or not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
+        return
+    _load_push_subscriptions()
+    dead = []
+    payload = json.dumps({"title": title, "body": body, "url": url, "icon": icon})
+    for sub_id, sub in list(_push_subscriptions.items()):
+        try:
+            webpush(
+                subscription_info={k: v for k, v in sub.items() if k != "_username"},
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": VAPID_CLAIMS_EMAIL},
+            )
+        except WebPushException as ex:
+            if ex.response is not None and ex.response.status_code == 410:
+                dead.append(sub_id)  # browser unsubscribed
+        except Exception:
+            pass
+    for sub_id in dead:
+        _delete_push_subscription(sub_id)
+
+
+def send_push_notification_to_user(username: str, title: str, body: str,
+                                    url: str = "/", icon: str = "/icon.png"):
+    """Same as send_push_notification, but only targets subscriptions that
+    belong to a specific (anonymous, per-browser) username. Used for
+    personalized re-engagement / streak notifications."""
+    if not _PUSH_AVAILABLE or not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
+        return
+    _load_push_subscriptions()
+    dead = []
+    payload = json.dumps({"title": title, "body": body, "url": url, "icon": icon})
+    for sub_id, sub in list(_push_subscriptions.items()):
+        if sub.get("_username") != username:
+            continue
+        try:
+            webpush(
+                subscription_info={k: v for k, v in sub.items() if k != "_username"},
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": VAPID_CLAIMS_EMAIL},
+            )
+        except WebPushException as ex:
+            if ex.response is not None and ex.response.status_code == 410:
+                dead.append(sub_id)
+        except Exception:
+            pass
+    for sub_id in dead:
+        _delete_push_subscription(sub_id)
+
+
+# ── Re-engagement notification message pool ──────────────────────────────────
+# Each tuple is (emoji, text). A category is chosen at random when a user has
+# gone quiet, and rendered as: "{emoji} Mythic AI: \"{text}\""
+NOTIFICATION_MESSAGES = {
+    "come_back": [
+        ("🤖", "Hey! I'm ready whenever you want to chat."),
+        ("💭", "It's been a while. Want to continue our last conversation?"),
+        ("✨", "I've got new ideas waiting for you. Let's chat!"),
+        ("😊", "Hi! Ask me anything—I'm here to help."),
+        ("🚀", "Need help with homework, coding, or anything else? I'm ready."),
+    ],
+    "study": [
+        ("📖", "Ready to study? Let's tackle today's homework together."),
+        ("🧠", "Let's learn something new today!"),
+    ],
+    "activity": [
+        ("💬", "You haven't chatted in a while. Come say hello!"),
+        ("🌟", "Your next great idea could start with one question."),
+    ],
+    "feature": [
+        ("🎨", "New AI features are available. Come check them out!"),
+        ("⚡", "Mythic AI just got smarter. Try it now!"),
+    ],
+}
+
+
+def _random_notification_body(category: str) -> str:
+    emoji, text = random.choice(NOTIFICATION_MESSAGES[category])
+    return f'{emoji} Mythic AI: "{text}"'
+
+
 # --- Model names -------------------------------------------------------------
-GEMINI_MODEL      = "gemini-2.5-flash"
 GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "llama-3.1-8b-instant")
-OPENROUTER_MODEL  = os.environ.get("OPENROUTER_MODEL",  "google/gemma-3-4b-it:free")
 HF_MODEL          = os.environ.get("HF_MODEL",          "mistralai/Mistral-7B-Instruct-v0.3")
 CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "gpt-oss-120b")
-OLLAMA_MODEL      = os.environ.get("OLLAMA_MODEL",       "llama3.1")
-OLLAMA_URL        = os.environ.get("OLLAMA_URL",         "http://localhost:11434").rstrip("/")
 
-GEMINI_STREAM_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:streamGenerateContent"
-)
-
-# keep old name for compatibility with existing references below
-API_KEY = GEMINI_API_KEY
-MODEL   = GEMINI_MODEL
 SYSTEM_PROMPT = (
-    "You are Ꮇʏᴛʜɪᴄ ᴀɪ, a smart and friendly AI assistant made by Aarav Singh. "
-    "If asked who made you, say you are Ꮇʏᴛʜɪᴄ ᴀɪ made by Aarav Singh — say it once naturally, never repeat it unprompted. "
-    "Never mention Google, Groq, OpenRouter, HuggingFace, Meta, Mistral, Anthropic, or any AI company as your creator or backend. "
+    "You are Mythic AI, a smart and friendly AI assistant made by Aarav Singh. "
+    "If asked who made you, say you are Mythic AI made by Aarav Singh — say it once naturally, never repeat it unprompted. "
+    "Never mention Google, Groq, OpenRouter, HuggingFace, Cerebras, Meta, Mistral, Anthropic, or any AI company as your creator or backend. "
     "You can help with anything: questions, writing, coding, math, ideas, or just chatting. "
     "When writing code, always wrap it in markdown code blocks with the language name. "
     "LANGUAGE: Always reply ENTIRELY in the same language the user's message is written in — "
-    "never mix two languages in a single reply. If they write in Hindi, reply fully in Hindi. "
-    "If they write in English, reply fully in English (do not slip into Hindi or any other language "
-    "partway through, even if source information you know is in a different language — translate it "
-    "into the reply language first). If they mix languages themselves, match their mix. "
-    "Never force English on the user. "
+    "never mix two languages in a single reply, and never produce garbled or mis-encoded text. "
+    "If they write in Hindi, reply fully in Hindi (in proper Devanagari script, never romanized or "
+    "mis-encoded). If they write in Tamil, reply fully in Tamil (Tamil script). The same rule applies "
+    "to Gujarati, Marathi, Bengali, Telugu, Malayalam, or any other language — always reply in that "
+    "language's own native script, fully and consistently, from the first word to the last. "
+    "If they write in English, reply fully in English (do not slip into any other language partway "
+    "through, even if source information you know is in a different language — translate it into the "
+    "reply language first). If they mix languages themselves, match their mix. Never force English "
+    "on the user. "
     "TOOL USE: Never write out fake tool calls, function names, or JSON like {\"query\": ...} in your reply — "
-    "those are internal mechanisms the user must never see. If you don't actually have live web access, "
-    "just answer from what you know and say your information may not be fully up to date, instead of "
-    "pretending to search. "
+    "those are internal mechanisms the user must never see. You do not have live web search access — "
+    "answer from what you know and say your information may not be fully up to date if asked about "
+    "very recent events, instead of pretending to search. "
     "ANTI-REPETITION RULES — follow strictly every reply: "
     "1. NEVER restate or echo back what the user just said. Jump straight to the answer. "
     "2. NEVER start replies with filler like Great question, Sure, Of course, Absolutely, Certainly. "
     "3. NEVER repeat information already given earlier in the conversation. Build on it. "
     "4. Be direct and natural — like a knowledgeable friend, not a customer service bot. "
-    "5. Keep answers concise unless the user asks for detail."
-)
-
-# Extra instruction appended ONLY for Gemini, which actually has a real google_search tool wired up.
-# Other providers (Groq/Cerebras/OpenRouter/HF/Ollama) have no real search access, so telling them
-# "you have search" makes them hallucinate fake tool-call JSON into the visible reply — hence this
-# is kept separate from the base SYSTEM_PROMPT above.
-GEMINI_SEARCH_ADDENDUM = (
-    " WEB SEARCH: You have access to Google Search. When the user asks about current events, "
-    "live prices, news, sports scores, weather, or anything that needs up-to-date information, "
-    "use the search tool to find the answer. Do not say you cannot search the web. When you use "
-    "search results, translate/summarize them into the reply language — never paste a mix of languages."
+    "5. Keep answers concise unless the user asks for detail. "
+    "6. MATCH YOUR REPLY LENGTH TO THE MESSAGE: a short greeting like 'hi', 'hello', "
+    "'hey', 'thanks', or 'ok' gets a short, casual, 1-2 sentence reply — never a long "
+    "essay, never a list of your capabilities, never multiple paragraphs. Save longer, "
+    "detailed answers for messages that actually ask a real question or request "
+    "something specific."
 )
 
 app = Flask(__name__)
@@ -357,8 +494,39 @@ def delete_conversation(username, conv_id):
 
 # --- Local file fallbacks for when Supabase is not configured ----------------
 import os as _os
+
+# ── Serverless (Vercel) compatibility notes ──────────────────────────────────
+# This app was written as a normal long-running server (Render/Railway/a VPS)
+# and several of its features fundamentally rely on that:
+#   1. It keeps push subscriptions, temp image uploads, and conversations in
+#      local JSON files / in-memory dicts. Vercel's filesystem is READ-ONLY
+#      except for /tmp, and /tmp (plus all memory) is wiped on every cold
+#      start and isn't shared across instances — so conversations, streaks,
+#      and push subscriptions will keep "disappearing" there.
+#   2. The hourly re-engagement notifications rely on a background thread
+#      that runs forever. Vercel serverless functions only run while
+#      handling a request and are frozen/killed otherwise, so that thread
+#      never gets to fire on its own schedule.
+#   3. /api/chat streams its reply chunk-by-chunk (SSE-style). Vercel's
+#      default Node/Python serverless functions buffer and have a max
+#      execution duration, so long streaming replies can get cut off or
+#      arrive all at once instead of live.
+# If Vercel is a hard requirement, the practical fix is to swap local JSON
+# storage for a real database (Vercel KV / Postgres / Supabase — which this
+# file already partially supports), and move the notification scheduler to
+# an external cron (e.g. Vercel Cron Jobs calling a small endpoint) instead
+# of an in-process thread. Otherwise, a normal always-on host (Render,
+# Railway, Fly.io, a VPS) is a much better match for this code as written.
+IS_SERVERLESS = bool(_os.environ.get("VERCEL") or _os.environ.get("VERCEL_ENV"))
+
 _BASE_DIR = _os.path.dirname(_os.path.abspath(__file__))
-_DATA_DIR = _os.path.join(_BASE_DIR, "chat_data")
+if IS_SERVERLESS:
+    # /tmp is the only writable path on Vercel — this avoids crashing with a
+    # read-only-filesystem error, even though data still won't persist
+    # across cold starts/instances there. See notes above.
+    _DATA_DIR = _os.path.join("/tmp", "mythic_ai_chat_data")
+else:
+    _DATA_DIR = _os.path.join(_BASE_DIR, "chat_data")
 _os.makedirs(_DATA_DIR, exist_ok=True)
 
 def _user_conv_dir(username):
@@ -410,6 +578,270 @@ def make_title(first_message):
     return title[:40] + ("…" if len(title) > 40 else "")
 
 
+# ── Downloadable file generation (PDF / DOCX / TXT) ──────────────────────────
+# Built with zero required extra dependencies (mirrors the manual PNG-writer
+# used for the app icon above) so "generate a PDF" works out of the box.
+# If python-docx happens to be installed, real .docx files are used instead
+# of falling back to plain text for Word-document requests.
+import textwrap as _textwrap
+
+
+def _pdf_escape(s: str) -> str:
+    return s.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+
+
+def generate_pdf_bytes(title: str, body_text: str) -> bytes:
+    """Renders `title` + `body_text` as a simple multi-page PDF using only
+    the Python standard library (Helvetica, Letter-size pages). Good enough
+    for chat-generated notes, summaries, letters, etc. — not a full layout
+    engine, just readable wrapped text."""
+    PAGE_W, PAGE_H = 612, 792
+    MARGIN = 56
+    FONT_SIZE = 11
+    LEADING = 15
+    usable_width_chars = max(40, int((PAGE_W - 2 * MARGIN) / (FONT_SIZE * 0.5)))
+    max_lines_per_page = int((PAGE_H - 2 * MARGIN - 40) / LEADING)
+
+    lines = []
+    if title:
+        lines.append(("title", title))
+        lines.append(("blank", ""))
+    for para in body_text.split("\n"):
+        para = para.rstrip()
+        if not para:
+            lines.append(("blank", ""))
+            continue
+        wrapped = _textwrap.wrap(para, width=usable_width_chars) or [""]
+        for w in wrapped:
+            lines.append(("body", w))
+
+    pages = [lines[i:i + max_lines_per_page] for i in range(0, len(lines), max_lines_per_page)] or [[]]
+
+    objects = []  # 1-indexed PDF object numbers; objects[i-1] holds object i's bytes
+
+    def emit(data: bytes) -> int:
+        objects.append(data)
+        return len(objects)
+
+    catalog_num = emit(b"placeholder")   # filled in once we know the Pages object number
+    pages_num = emit(b"placeholder")     # filled in once we know all page object numbers
+    font_num = emit(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
+    page_nums = []
+    for page_lines in pages:
+        stream_parts = [b"BT", f"/F1 {FONT_SIZE} Tf".encode(), f"{LEADING} TL".encode(),
+                         f"{MARGIN} {PAGE_H - MARGIN} Td".encode()]
+        first = True
+        for kind, text in page_lines:
+            if not first:
+                stream_parts.append(b"T*")
+            first = False
+            if kind == "blank":
+                continue
+            if kind == "title":
+                stream_parts.append(b"/F1 16 Tf")
+                stream_parts.append(f"({_pdf_escape(text)}) Tj".encode("latin-1", "replace"))
+                stream_parts.append(f"/F1 {FONT_SIZE} Tf".encode())
+            else:
+                stream_parts.append(f"({_pdf_escape(text)}) Tj".encode("latin-1", "replace"))
+        stream_parts.append(b"ET")
+        stream = b"\n".join(stream_parts)
+        content_data = (f"<< /Length {len(stream)} >>\nstream\n".encode() + stream +
+                         b"\nendstream")
+        content_num = emit(content_data)
+        page_dict = (
+            f"<< /Type /Page /Parent {pages_num} 0 R /MediaBox [0 0 {PAGE_W} {PAGE_H}] "
+            f"/Resources << /Font << /F1 {font_num} 0 R >> >> /Contents {content_num} 0 R >>"
+        ).encode()
+        page_nums.append(emit(page_dict))
+
+    kids = " ".join(f"{n} 0 R" for n in page_nums)
+    objects[pages_num - 1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_nums)} >>".encode()
+    objects[catalog_num - 1] = f"<< /Type /Catalog /Pages {pages_num} 0 R >>".encode()
+
+    # Assemble the final PDF byte stream with a proper xref table.
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for i, obj_data in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + obj_data + b"\nendobj\n"
+    xref_offset = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode()
+    out += b"0000000000 65535 f \n"
+    for off in offsets[1:]:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root {catalog_num} 0 R >>\n"
+        f"startxref\n{xref_offset}\n%%EOF"
+    ).encode()
+    return bytes(out)
+
+
+def generate_docx_bytes(title: str, body_text: str):
+    """Returns (bytes, used_real_docx: bool). Uses python-docx if it's
+    installed for a real Word document; otherwise returns None to signal
+    the caller should fall back to a plain text file."""
+    try:
+        import docx as _docx
+    except ImportError:
+        return None
+    doc = _docx.Document()
+    if title:
+        doc.add_heading(title, level=1)
+    for para in body_text.split("\n"):
+        doc.add_paragraph(para)
+    import io as _io
+    buf = _io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+# ── Daily chat streaks + re-engagement scheduling ────────────────────────────
+# Tracks, per (anonymous) username: current streak length, the last calendar
+# day they chatted, a raw last-active timestamp, and when they were last
+# nudged with a re-engagement push notification (so we don't spam anyone).
+_ACTIVITY_FILE = _os.path.join(_DATA_DIR, "user_activity.json")
+_activity_lock = threading.Lock()
+
+# Notifications rotate once per hour through the message pool, per user —
+# e.g. hour 1 = "come back and chat", hour 2 = "study reminder", hour 3 =
+# "activity reminder", hour 4 = "feature update", hour 5 = back to the top,
+# etc. Someone who's actively chatting right now (within the last hour) is
+# skipped for that cycle so we don't interrupt them mid-conversation.
+_REENGAGEMENT_ROTATION = ["come_back", "study", "activity", "feature"]
+_REENGAGEMENT_SKIP_IF_ACTIVE_WITHIN_HOURS = 1
+_REENGAGEMENT_CHECK_INTERVAL_SECONDS = 60 * 60  # once every hour
+
+
+def _load_all_activity():
+    try:
+        if _os.path.exists(_ACTIVITY_FILE):
+            with open(_ACTIVITY_FILE, encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_all_activity(data):
+    try:
+        with open(_ACTIVITY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def _today_str():
+    return datetime.date.today().isoformat()
+
+
+def _update_user_activity(username):
+    """Call this whenever a user actually sends a chat message. Bumps their
+    streak by 1 if their last active day was yesterday, resets it to 1 if
+    they skipped a day (or more), and leaves it alone if they already
+    chatted today. Returns the updated record."""
+    with _activity_lock:
+        data = _load_all_activity()
+        rec = data.get(username) or {"streak": 0, "last_active_day": None,
+                                      "last_active_ts": 0, "last_notified_ts": 0}
+        today = _today_str()
+        last_day = rec.get("last_active_day")
+        if last_day != today:
+            gap_days = None
+            if last_day:
+                try:
+                    y, m, d = (int(x) for x in last_day.split("-"))
+                    gap_days = (datetime.date.today() - datetime.date(y, m, d)).days
+                except Exception:
+                    gap_days = None
+            if gap_days == 1:
+                rec["streak"] = rec.get("streak", 0) + 1
+            else:
+                rec["streak"] = 1
+            rec["last_active_day"] = today
+        rec["last_active_ts"] = time.time()
+        data[username] = rec
+        _save_all_activity(data)
+        return rec
+
+
+def _get_user_streak(username):
+    with _activity_lock:
+        data = _load_all_activity()
+    return (data.get(username) or {}).get("streak", 0)
+
+
+def _subscribed_usernames():
+    """Every distinct (anonymous) username that currently has at least one
+    push subscription registered."""
+    _load_push_subscriptions()
+    names = set()
+    for sub in _push_subscriptions.values():
+        u = sub.get("_username")
+        if u:
+            names.add(u)
+    return names
+
+
+def _run_reengagement_pass():
+    """Runs once per hour. For every subscribed user (skipping anyone active
+    in roughly the last hour), sends exactly one push notification: a
+    "streak on hold" alert if they have an active streak, otherwise the next
+    message in the rotation (come back -> study -> activity -> feature -> repeat)."""
+    if not _PUSH_AVAILABLE or not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
+        return
+    now = time.time()
+    usernames = _subscribed_usernames()
+    if not usernames:
+        return
+
+    with _activity_lock:
+        data = _load_all_activity()
+        changed = False
+        for username in usernames:
+            rec = data.get(username) or {
+                "streak": 0, "last_active_day": None, "last_active_ts": 0,
+                "last_notified_ts": 0, "notif_rotation_index": 0,
+            }
+            last_active_ts = rec.get("last_active_ts", 0)
+            hours_inactive = (now - last_active_ts) / 3600.0 if last_active_ts else 999
+            if hours_inactive < _REENGAGEMENT_SKIP_IF_ACTIVE_WITHIN_HOURS:
+                continue  # actively chatting right now -- don't interrupt
+
+            streak = rec.get("streak", 0)
+            if streak >= 2:
+                title = "streak"
+                body = f"Your {streak}-day streak is on hold! Come chat with me to keep it going."
+            else:
+                idx = rec.get("notif_rotation_index", 0) % len(_REENGAGEMENT_ROTATION)
+                category = _REENGAGEMENT_ROTATION[idx]
+                rec["notif_rotation_index"] = idx + 1
+                title = "rotation"
+                body = _random_notification_body(category)
+
+            try:
+                send_push_notification_to_user(username, "Mythic AI", body, url="/")
+            except Exception:
+                pass
+            rec["last_notified_ts"] = now
+            data[username] = rec
+            changed = True
+        if changed:
+            _save_all_activity(data)
+
+
+def _reengagement_loop():
+    """Background daemon thread: once per hour, sends every subscribed user
+    the next rotating re-engagement notification (or a streak-on-hold alert
+    if they have an active streak going)."""
+    while True:
+        try:
+            _run_reengagement_pass()
+        except Exception as e:
+            print(f"[Reengagement] error: {e}")
+        time.sleep(_REENGAGEMENT_CHECK_INTERVAL_SECONDS)
+
+
 # --- HTML pages ----------------------------------------------------------
 
 PAGE = r"""<!DOCTYPE html>
@@ -428,9 +860,11 @@ PAGE = r"""<!DOCTYPE html>
 <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
 <link rel="shortcut icon" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/icon.png">
-<title>Ꮖỿᴛнᴄ ᴀɪ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&family=Noto+Sans+Devanagari:wght@400;600&display=swap" rel="stylesheet">
+<title>Mythic AI</title>
 <style>
-
   :root {
     --bg:#1a1a1a; --panel:#2a2a2a; --border:#3a3a3a;
     --text:#ececec; --muted:#8e8ea0; --accent:#10a37f;
@@ -438,9 +872,23 @@ PAGE = r"""<!DOCTYPE html>
     --ai-bubble:#1a1a1a; --sidebar-w:260px; --msg-font-size:14.5px;
   }
   * { box-sizing:border-box; margin:0; padding:0; }
+  /* "Noto Sans" is loaded from Google Fonts as a wide-coverage fallback —
+     some Android phones ship without glyphs for the stylized logo
+     characters or for Devanagari/other scripts, which shows as boxes ("tofu").
+     Listing Noto Sans (and Noto Sans Devanagari) after the system fonts fixes
+     that without changing how things look on phones that already have full
+     glyph coverage. */
   html,body { height:100%; background:var(--bg); color:var(--text);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; overflow:hidden; }
-  .layout { display:flex; height:100vh; }
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,
+      "Noto Sans","Noto Sans Devanagari",sans-serif; overflow:hidden; }
+  /* Mobile browsers (Chrome/Samsung Internet especially) don't shrink 100vh
+     for their address bar, so a plain `height:100vh` layout ends up taller
+     than what's actually visible — the input box at the bottom gets pushed
+     below the fold and the person can't see or reach it. --app-height is
+     set live from JS to the real visible height; 100dvh is a same-effect
+     CSS-only fallback for browsers that support it. */
+  .layout { display:flex; height:100vh; height:calc(var(--app-height, 100vh));
+    height:100dvh; }
 
   /* Light theme override */
   body.theme-light {
@@ -474,7 +922,8 @@ PAGE = r"""<!DOCTYPE html>
   #sidebar-footer { padding:12px; font-size:11px; color:var(--muted); border-top:1px solid var(--border); }
 
   /* Main */
-  .app { display:flex; flex-direction:column; height:100vh; flex:1; min-width:0; }
+  .app { display:flex; flex-direction:column; height:100vh;
+    height:calc(var(--app-height, 100vh)); height:100dvh; flex:1; min-width:0; }
   header { padding:calc(14px + env(safe-area-inset-top)) 20px 14px; border-bottom:1px solid var(--border);
     display:flex; align-items:center; justify-content:space-between; gap:10px;
     background:var(--bg); position:relative; z-index:20; }
@@ -484,7 +933,10 @@ PAGE = r"""<!DOCTYPE html>
   #sidebar-toggle { background:none; border:1px solid var(--border); color:var(--muted);
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0; }
   #sidebar-toggle:hover { background:var(--panel); }
-  header h1 { font-size:16px; font-weight:700; color:var(--accent); margin:0; }
+  header h1 { font-size:16px; font-weight:700; color:var(--accent); margin:0;
+    font-variant:small-caps; letter-spacing:.5px; }
+  #streak-badge { display:none; align-items:center; gap:4px; background:linear-gradient(135deg,#ff9d42,#ff5f6d);
+    color:#fff; font-size:11px; font-weight:800; padding:3px 9px; border-radius:12px; white-space:nowrap; }
   #name-btn { background:none; border:1px solid var(--border); color:var(--muted);
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
@@ -497,15 +949,20 @@ PAGE = r"""<!DOCTYPE html>
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
   #export-btn:hover { background:var(--panel); }
+  #vip-btn { background:none; border:1px solid var(--border); color:var(--muted);
+    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
+  #vip-btn:hover { background:var(--panel); }
+  #vip-btn.active { color:var(--accent); border-color:var(--accent); }
 
-  /* Fullscreen bar — sits above the input row so it's always reachable on mobile,
-     away from any notch/status-bar area that can swallow top-corner taps. */
-  #fullscreen-btn { display:flex; align-items:center; justify-content:center; gap:6px;
-    width:100%; max-width:760px; margin:0 auto 8px; padding:9px 12px;
-    background:var(--panel); border:1px solid var(--border); border-radius:10px;
-    color:var(--muted); font-size:13px; cursor:pointer; touch-action:manipulation;
+  /* Fullscreen — now a small icon button in the header top-right, alongside
+     Settings, Export, and Profile. */
+  #fullscreen-btn { display:flex; align-items:center; justify-content:center;
+    width:36px; height:36px; border-radius:6px; flex-shrink:0;
+    background:none; border:1px solid var(--border);
+    color:var(--muted); font-size:15px; cursor:pointer; touch-action:manipulation;
     -webkit-tap-highlight-color:transparent; }
-  #fullscreen-btn:hover { color:var(--text); border-color:var(--accent); }
+  #fullscreen-btn:hover { color:var(--text); border-color:var(--accent); background:var(--panel); }
   #fullscreen-btn.active { color:var(--accent); border-color:var(--accent); }
   #fullscreen-icon { font-size:15px; }
 
@@ -688,15 +1145,20 @@ PAGE = r"""<!DOCTYPE html>
     /* Main app always takes full width */
     .app { width:100% !important; flex:1; }
 
-    header { padding:calc(10px + env(safe-area-inset-top)) 12px 10px; }
+    header { padding:calc(10px + env(safe-area-inset-top)) 10px 8px;
+      flex-wrap:wrap; row-gap:6px; }
+    header .left { flex-wrap:wrap; row-gap:4px; }
+    header .right { flex-wrap:wrap; justify-content:flex-end; row-gap:6px; gap:6px; }
     header h1 { font-size:14px; }
-    #sidebar-toggle { width:38px; height:38px; font-size:14px; }
-    #name-btn { width:38px; height:38px; font-size:14px; }
-    #settings-btn { width:38px; height:38px; font-size:14px; }
-    #export-btn { width:38px; height:38px; font-size:14px; }
-    #clear-btn { font-size:11px; padding:8px 10px; min-height:38px; }
+    #sidebar-toggle { width:36px; height:36px; font-size:13px; }
+    #name-btn { width:36px; height:36px; font-size:13px; }
+    #settings-btn { width:36px; height:36px; font-size:13px; }
+    #export-btn { width:36px; height:36px; font-size:13px; }
+    #vip-btn { width:36px; height:36px; font-size:13px; }
+    #clear-btn { font-size:11px; padding:8px 10px; min-height:36px; }
     #speak-toggle { font-size:11px; padding:5px 8px; }
-    #fullscreen-btn { font-size:12.5px; padding:10px 12px; }
+    #fullscreen-btn { width:36px; height:36px; font-size:13px; }
+    #install-btn { padding:6px 10px; font-size:11px; }
 
     #messages-wrap { overflow-y:auto; -webkit-overflow-scrolling:touch; }
     #messages { padding:14px 10px; gap:12px; max-width:100%; }
@@ -728,7 +1190,6 @@ PAGE = r"""<!DOCTYPE html>
     header h1 { font-size:13px; }
     #speak-toggle { display:none; }
   }
-
 </style>
 </head>
 <body>
@@ -737,29 +1198,25 @@ PAGE = r"""<!DOCTYPE html>
   <div id="sidebar">
     <button id="new-chat-btn">+ New chat</button>
     <div id="conv-list"></div>
-    <div id="sidebar-footer">Ꮖỿᴛнᴄ ᴀɪ &middot; by Aarav Singh</div>
+    <div id="sidebar-footer">Mythic AI &middot; by Aarav Singh</div>
   </div>
   <div class="app">
     <header>
       <div class="left">
-        <button id="sidebar-toggle" title="Toggle sidebar">&#9776;</button>
-        <h1>Ꮖỿᴛнᴄ ᴀɪ</h1>
+        <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
+        <h1>Mythic AI</h1>
         <span id="vip-badge" style="display:none;background:linear-gradient(135deg,#f5c542,#e0a800);color:#1a1a1a;font-size:10.5px;font-weight:800;padding:3px 8px;border-radius:10px;letter-spacing:.3px;">VIP</span>
-        <select id="model-select" title="Select model" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 8px;font-size:12px;cursor:pointer;outline:none;max-width:130px;font-family:inherit;">
-          <option value="mythic-1" data-vip="0">Mythic 1</option>
-          <option value="mythic-2" data-vip="0" selected>Mythic 2</option>
-          <option value="mythic-3" data-vip="0">Mythic 3</option>
-          <option value="mythic-vip" data-vip="1">Mythic VIP &#x1F512;</option>
-        </select>
+        <span id="streak-badge" title="Daily chat streak">🔥 0</span>
       </div>
       <div class="right">
-        <button id="install-btn" title="Install Mythic AI" style="display:none;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;touch-action:manipulation;">&#8595; Install</button>
-        <button id="fullscreen-btn" type="button" title="Fullscreen" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:6px;background:none;border:1px solid var(--border);color:var(--muted);font-size:15px;cursor:pointer;flex-shrink:0;">
-          <span id="fullscreen-icon">&#9974;</span>
+        <button id="install-btn" title="Install Mythic AI" style="display:none;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;touch-action:manipulation;align-items:center;gap:4px;">⬇ Install</button>
+        <button id="vip-btn" title="Mythic VIP">✨</button>
+        <button id="fullscreen-btn" type="button" title="Fullscreen">
+          <span id="fullscreen-icon">⛶</span>
         </button>
-        <button id="name-btn" title="What should Ꮖỿᴛнᴄ ᴀɪ call you?">&#128578;</button>
-        <button id="settings-btn" title="Settings">&#9881;</button>
-        <button id="export-btn" title="Export this chat">&#8595;</button>
+        <button id="name-btn" title="What should Mythic AI call you?">🙂</button>
+        <button id="settings-btn" title="Settings">⚙</button>
+        <button id="export-btn" title="Export this chat">⬇</button>
         <button id="clear-btn">Delete chat</button>
       </div>
     </header>
@@ -767,66 +1224,90 @@ PAGE = r"""<!DOCTYPE html>
     <div id="messages-wrap">
       <div id="messages">
         <div class="empty-state" id="empty-state">
-          <h2>Ꮖỿᴛнᴄ ᴀɪ</h2>
-          <p>Ask me anything, generate images, or just chat &#128075;</p>
+          <h2>Mythic AI</h2>
+          <p>Ask me anything, generate images, or just chat 👋</p>
         </div>
       </div>
     </div>
 
-    <button id="scroll-btn" title="Scroll to bottom">&#8595;</button>
+    <button id="scroll-btn" title="Scroll to bottom">↓</button>
 
     <div id="pending-attach">
-      &#128206; <span id="pending-attach-name"></span>
-      <button id="pending-attach-remove">&#10005;</button>
+      📎 <span id="pending-attach-name"></span>
+      <button id="pending-attach-remove">✕</button>
     </div>
 
     <div id="speaking-indicator">
-      &#128266; Speaking...
+      🔊 Speaking...
       <button id="stop-speak-btn">Stop</button>
     </div>
 
-    <!-- Notification permission banner -->
-    <div id="notif-banner" style="display:none;align-items:center;justify-content:space-between;gap:10px;background:linear-gradient(135deg,var(--accent-dim),rgba(16,163,127,.15));border:1px solid var(--accent);border-radius:12px;padding:10px 14px;max-width:760px;margin:8px auto 0;width:calc(100% - 40px);flex-wrap:wrap;">
+    <!-- Notification permission banner — shown once, requires user click (browsers require a gesture) -->
+    <div id="notif-banner" style="display:none;align-items:center;justify-content:space-between;gap:10px;
+      background:linear-gradient(135deg,var(--accent-dim),rgba(16,163,127,.15));
+      border:1px solid var(--accent);border-radius:12px;padding:10px 14px;
+      max-width:760px;margin:8px auto 0;width:calc(100% - 40px);flex-wrap:wrap;">
       <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;">
-        <span style="font-size:20px;flex-shrink:0;">&#128276;</span>
+        <span style="font-size:20px;flex-shrink:0;">🔔</span>
         <div style="min-width:0;">
-          <div style="font-size:13px;font-weight:600;color:var(--text);">Get notified when Ꮖỿᴛнᴄ ᴀɪ replies</div>
+          <div style="font-size:13px;font-weight:600;color:var(--text);">Get notified when Mythic AI replies</div>
           <div style="font-size:11.5px;color:var(--muted);margin-top:1px;">Even when you switch to another tab</div>
         </div>
       </div>
       <div style="display:flex;gap:6px;flex-shrink:0;">
-        <button id="notif-banner-allow" type="button" style="background:var(--accent);color:#fff;border:none;border-radius:8px;padding:7px 14px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;">Allow &#128276;</button>
-        <button id="notif-banner-dismiss" type="button" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:7px 10px;font-size:12.5px;cursor:pointer;font-family:inherit;">&#10005;</button>
+        <button id="notif-banner-allow" type="button"
+          style="background:var(--accent);color:#fff;border:none;border-radius:8px;
+            padding:7px 14px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;
+            white-space:nowrap;">
+          Allow 🔔
+        </button>
+        <button id="notif-banner-dismiss" type="button"
+          style="background:none;border:1px solid var(--border);color:var(--muted);
+            border-radius:8px;padding:7px 10px;font-size:12.5px;cursor:pointer;font-family:inherit;">
+          ✕
+        </button>
       </div>
     </div>
 
     <!-- Quick action buttons -->
     <div id="quick-actions" style="display:flex;gap:8px;padding:6px 20px 0;max-width:760px;margin:0 auto;width:100%;flex-wrap:wrap;">
-      <button class="quick-btn" id="img-gen-btn">&#127912; Image</button>
-      <button class="quick-btn" id="ghibli-btn">&#127807; Ghibli Me</button>
-      <button class="quick-btn" id="homework-btn">&#128218; Homework</button>
-      <button class="quick-btn" id="weather-btn">&#127780; Weather</button>
-      <button class="quick-btn" id="search-btn">&#128269; Search</button>
+      <button class="quick-btn" id="img-gen-btn">🎨 Image</button>
+      <button class="quick-btn" id="ghibli-btn">🌿 Ghibli Me</button>
+      <button class="quick-btn" id="homework-btn">📚 Homework</button>
+      <button class="quick-btn" id="weather-btn">🌤 Weather</button>
+      <button class="quick-btn" id="search-btn">🔍 Search</button>
     </div>
-
-    <!-- INPUT AREA: wrapped in .input-area so it always sits at the bottom of the flex column -->
-    <div class="input-area">
       <form id="chat-form">
         <div class="input-row">
+          <!-- Attach file -->
           <input type="file" id="file-input" accept="image/*,.txt,.md,.csv,.json,.pdf" style="display:none">
           <button class="tool-btn" id="attach-btn" type="button" title="Attach file">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+            </svg>
           </button>
+          <!-- Camera -->
           <input type="file" id="camera-input" accept="image/*" capture="environment" style="display:none">
           <button class="tool-btn" id="camera-btn" type="button" title="Take photo">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+              <circle cx="12" cy="13" r="4"/>
+            </svg>
           </button>
-          <textarea id="input" rows="1" placeholder="Message Ꮖỿᴛнᴄ ᴀɪ..."></textarea>
+          <textarea id="input" rows="1" placeholder="Message Mythic AI..."></textarea>
+          <!-- Voice input -->
           <button class="tool-btn" id="voice-btn" type="button" title="Voice input">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
           </button>
           <button id="send-btn" type="submit" title="Send">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+            </svg>
           </button>
         </div>
       </form>
@@ -836,8 +1317,8 @@ PAGE = r"""<!DOCTYPE html>
 
 <div id="name-modal-overlay">
   <div id="name-modal">
-    <h3>What should Ꮖỿᴛнᴄ ᴀɪ call you?</h3>
-    <p>Enter your preferred name — Ꮖỿᴛнᴄ ᴀɪ will use it when it talks to you.</p>
+    <h3>What should Mythic AI call you?</h3>
+    <p>Enter your preferred name — Mythic AI will use it when it talks to you.</p>
     <input type="text" id="name-input" maxlength="60" placeholder="e.g. Aarav" autocomplete="off">
     <div id="name-modal-actions">
       <button id="name-cancel-btn" type="button">Cancel</button>
@@ -847,184 +1328,223 @@ PAGE = r"""<!DOCTYPE html>
 </div>
 
 <!-- Settings Modal -->
-<div id="settings-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center;">
-  <div id="settings-modal" style="background:var(--bg);border:1px solid var(--border);border-radius:14px;padding:22px;width:92%;max-width:480px;max-height:86vh;overflow-y:auto;box-shadow:0 10px 40px rgba(0,0,0,.3);">
-    <h3 style="margin:0 0 4px;font-size:17px;">Settings</h3>
-    <p style="margin:0 0 16px;font-size:12.5px;color:var(--muted);">Customize Ꮖỿᴛнᴄ ᴀɪ. Saved on this device.</p>
+<div id="settings-modal-overlay">
+  <div id="settings-modal">
+    <h3>Settings</h3>
+    <p class="sub">Customize how Mythic AI looks and replies. Saved on this device.</p>
 
-    <div class="settings-section"><label>Theme</label><div class="settings-row">
-      <button class="settings-choice" data-group="theme" data-value="dark">&#127769; Dark</button>
-      <button class="settings-choice" data-group="theme" data-value="light">&#9728; Light</button>
-      <button class="settings-choice" data-group="theme" data-value="system">&#128187; System</button>
-    </div></div>
-
-    <div class="settings-section"><label>Accent color</label>
-      <input type="color" id="accent-color-input" value="#10a37f" style="width:44px;height:34px;border:1.5px solid var(--border);border-radius:8px;background:var(--panel);cursor:pointer;padding:2px;">
+    <div class="settings-section">
+      <label>Theme</label>
+      <div class="settings-row">
+        <button class="settings-choice" data-group="theme" data-value="dark">🌙 Dark</button>
+        <button class="settings-choice" data-group="theme" data-value="light">☀️ Light</button>
+        <button class="settings-choice" data-group="theme" data-value="system">🖥 System</button>
+      </div>
     </div>
 
-    <div class="settings-section"><label>Font size — <span id="font-size-label">14.5px</span></label>
-      <input type="range" id="font-size-slider" min="12" max="20" step="0.5" value="14.5" style="width:100%;accent-color:var(--accent);">
+    <div class="settings-section">
+      <label>Accent color</label>
+      <input type="color" id="accent-color-input" value="#10a37f">
     </div>
 
-    <div class="settings-section"><label>Bubble spacing</label><div class="settings-row">
-      <button class="settings-choice" data-group="bubble" data-value="compact">Compact</button>
-      <button class="settings-choice" data-group="bubble" data-value="comfortable">Comfortable</button>
-      <button class="settings-choice" data-group="bubble" data-value="spacious">Spacious</button>
-    </div></div>
+    <div class="settings-section">
+      <label>Font size — <span id="font-size-label">14.5px</span></label>
+      <input type="range" id="font-size-slider" min="12" max="20" step="0.5" value="14.5">
+    </div>
 
-    <div class="settings-section"><label>Reply tone</label>
-      <select id="tone-select" style="width:100%;padding:9px 10px;border-radius:8px;border:1.5px solid var(--border);background:var(--panel);color:var(--text);font-size:13px;font-family:inherit;outline:none;">
-        <option value="default">Default</option><option value="formal">Formal</option>
-        <option value="casual">Casual</option><option value="funny">Funny</option>
+    <div class="settings-section">
+      <label>Bubble spacing</label>
+      <div class="settings-row">
+        <button class="settings-choice" data-group="bubble" data-value="compact">Compact</button>
+        <button class="settings-choice" data-group="bubble" data-value="comfortable">Comfortable</button>
+        <button class="settings-choice" data-group="bubble" data-value="spacious">Spacious</button>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <label>Reply tone</label>
+      <select id="tone-select" class="settings-select">
+        <option value="default">Default</option>
+        <option value="formal">Formal</option>
+        <option value="casual">Casual</option>
+        <option value="funny">Funny</option>
         <option value="professional">Professional</option>
       </select>
     </div>
 
-    <div class="settings-section"><label>Reply length</label>
-      <select id="length-select" style="width:100%;padding:9px 10px;border-radius:8px;border:1.5px solid var(--border);background:var(--panel);color:var(--text);font-size:13px;font-family:inherit;outline:none;">
-        <option value="default">Default</option><option value="short">Short</option>
-        <option value="medium">Medium</option><option value="long">Long</option>
+    <div class="settings-section">
+      <label>Reply length</label>
+      <select id="length-select" class="settings-select">
+        <option value="default">Default</option>
+        <option value="short">Short</option>
+        <option value="medium">Medium</option>
+        <option value="long">Long</option>
       </select>
     </div>
 
-    <div class="settings-section"><label>Custom instructions</label>
-      <textarea id="custom-instructions-input" rows="2" placeholder="e.g. Always answer in bullet points" style="width:100%;padding:9px 12px;border-radius:8px;border:1.5px solid var(--border);background:var(--panel);color:var(--text);font-size:13px;font-family:inherit;outline:none;resize:vertical;min-height:52px;"></textarea>
+    <div class="settings-section">
+      <label>Custom instructions</label>
+      <textarea id="custom-instructions-input" placeholder="e.g. Always answer in bullet points"></textarea>
     </div>
 
     <div class="settings-section" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
-      <label>&#128266; Read-aloud language</label>
-      <select id="voice-language-select" style="width:100%;padding:9px 10px;border-radius:8px;border:1.5px solid var(--border);background:var(--panel);color:var(--text);font-size:13px;font-family:inherit;outline:none;margin-bottom:10px;"></select>
-      <label>&#127897; Read-aloud voice</label>
-      <select id="voice-select" style="width:100%;padding:9px 10px;border-radius:8px;border:1.5px solid var(--border);background:var(--panel);color:var(--text);font-size:13px;font-family:inherit;outline:none;"></select>
+      <label>🔊 Read-aloud language</label>
+      <select id="voice-language-select" class="settings-select"></select>
+    </div>
+
+    <div class="settings-section">
+      <label>🎙 Read-aloud voice</label>
+      <select id="voice-select" class="settings-select"></select>
       <div id="voice-hint" style="font-size:11px;color:var(--muted);margin-top:6px;"></div>
     </div>
 
     <div class="settings-section" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
-      <label style="display:flex;align-items:center;justify-content:space-between;">
-        <span>&#128276; Reply notifications</span>
-        <button id="notif-toggle-btn" type="button" style="background:none;border:1.5px solid var(--border);color:var(--muted);border-radius:20px;padding:5px 14px;font-size:12px;cursor:pointer;font-family:inherit;">Enable</button>
+      <label style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;">
+        <span>🔔 Reply notifications</span>
+        <button id="notif-toggle-btn" type="button"
+          style="background:none;border:1.5px solid var(--border);color:var(--muted);border-radius:20px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:inherit;transition:all .15s;">
+          Enable
+        </button>
       </label>
       <div id="notif-status" style="font-size:11.5px;color:var(--muted);margin-top:6px;"></div>
     </div>
 
-    <!-- API Key Manager -->
-    <div class="settings-section" id="api-key-section" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
-      <label>&#128273; My API Keys</label>
-      <p style="font-size:11.5px;color:var(--muted);margin:4px 0 10px;">Add your own Groq or Cerebras keys. Select one as active to use it instead of the server default.</p>
-      <div id="api-key-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px;"></div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;">
-        <select id="api-key-provider-select" style="flex:0 0 auto;padding:7px 10px;border-radius:8px;border:1.5px solid var(--border);background:var(--panel);color:var(--text);font-size:12px;font-family:inherit;outline:none;">
-          <option value="groq">Groq</option><option value="cerebras">Cerebras</option>
-        </select>
-        <input id="api-key-label-input" type="text" maxlength="30" placeholder="Label (e.g. My Key)" style="flex:1;min-width:80px;padding:7px 10px;border-radius:8px;border:1.5px solid var(--border);background:var(--panel);color:var(--text);font-size:12px;font-family:inherit;outline:none;">
-        <input id="api-key-value-input" type="password" maxlength="200" placeholder="Paste API key..." style="flex:2;min-width:100px;padding:7px 10px;border-radius:8px;border:1.5px solid var(--border);background:var(--panel);color:var(--text);font-size:12px;font-family:inherit;outline:none;">
-        <button id="api-key-add-btn" type="button" style="background:var(--accent);color:#fff;border:none;border-radius:8px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;">+ Add</button>
-      </div>
-      <div id="api-key-error" style="font-size:11.5px;color:#ef4444;margin-top:6px;display:none;"></div>
-    </div>
-
-    <button id="settings-close-btn" type="button" style="width:100%;margin-top:6px;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">Done</button>
+    <button id="settings-close-btn" type="button">Done</button>
   </div>
 </div>
 
 <!-- Ghibli Selfie Modal -->
 <div id="ghibli-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:300;align-items:center;justify-content:center;">
   <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:24px;width:92%;max-width:440px;max-height:90vh;overflow-y:auto;">
-    <h3 style="margin:0 0 4px;font-size:18px;">&#127807; Ghibli Me</h3>
-    <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">Upload your photo and get a Studio Ghibli-style version</p>
+    <h3 style="margin:0 0 4px;font-size:18px;">🌿 Ghibli Me</h3>
+    <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">Upload your photo and get a Studio Ghibli-style version of yourself</p>
+
+    <!-- Upload area -->
     <div id="ghibli-upload-area" style="border:2px dashed var(--border);border-radius:12px;padding:24px;text-align:center;cursor:pointer;margin-bottom:12px;transition:border-color .2s;">
-      <div style="font-size:36px;margin-bottom:8px;">&#128248;</div>
-      <div style="font-size:13px;color:var(--muted);">Click to upload your photo<br><span style="font-size:11px;">or drag &amp; drop</span></div>
+      <div style="font-size:36px;margin-bottom:8px;">📸</div>
+      <div style="font-size:13px;color:var(--muted);">Click to upload your photo<br><span style="font-size:11px;">or drag & drop</span></div>
       <input type="file" id="ghibli-file-input" accept="image/*" style="display:none">
     </div>
+
+    <!-- Preview -->
     <div id="ghibli-preview-wrap" style="display:none;margin-bottom:12px;text-align:center;">
       <img id="ghibli-preview" style="max-width:100%;max-height:180px;border-radius:10px;border:2px solid var(--accent);">
-      <div style="font-size:11px;color:var(--muted);margin-top:4px;">Your photo &#10003;</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px;">Your photo ✓</div>
     </div>
+
+    <!-- Style options -->
     <div style="margin-bottom:12px;">
       <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px;">Ghibli Style:</label>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
-        <button class="ghibli-style-btn" data-style="Studio Ghibli portrait, Spirited Away style, soft watercolor anime art" style="padding:8px;border-radius:8px;border:1.5px solid var(--accent);background:var(--accent-dim);color:var(--accent);cursor:pointer;font-size:12px;font-family:inherit;">&#127754; Spirited Away</button>
-        <button class="ghibli-style-btn" data-style="Studio Ghibli portrait, My Neighbor Totoro style, soft forest anime art" style="padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--muted);cursor:pointer;font-size:12px;font-family:inherit;">&#127795; Totoro Forest</button>
-        <button class="ghibli-style-btn" data-style="Studio Ghibli portrait, Howl's Moving Castle style, fantasy anime art" style="padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--muted);cursor:pointer;font-size:12px;font-family:inherit;">&#127984; Howl's Castle</button>
-        <button class="ghibli-style-btn" data-style="Studio Ghibli portrait, Princess Mononoke style, nature anime art" style="padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--muted);cursor:pointer;font-size:12px;font-family:inherit;">&#128058; Mononoke</button>
+        <button class="ghibli-style-btn" data-style="Studio Ghibli portrait, Spirited Away style, soft watercolor anime art" style="padding:8px;border-radius:8px;border:1.5px solid var(--accent);background:var(--accent-dim);color:var(--accent);cursor:pointer;font-size:12px;font-family:inherit;">🌊 Spirited Away</button>
+        <button class="ghibli-style-btn" data-style="Studio Ghibli portrait, My Neighbor Totoro style, soft forest anime art" style="padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--muted);cursor:pointer;font-size:12px;font-family:inherit;">🌳 Totoro Forest</button>
+        <button class="ghibli-style-btn" data-style="Studio Ghibli portrait, Howl's Moving Castle style, fantasy anime art" style="padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--muted);cursor:pointer;font-size:12px;font-family:inherit;">🏰 Howl's Castle</button>
+        <button class="ghibli-style-btn" data-style="Studio Ghibli portrait, Princess Mononoke style, nature anime art" style="padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--muted);cursor:pointer;font-size:12px;font-family:inherit;">🐺 Mononoke</button>
       </div>
     </div>
-    <input id="ghibli-extra" type="text" placeholder="Add details (optional): e.g. forest background, sunset..." style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:9px 12px;font-size:13px;outline:none;margin-bottom:12px;font-family:inherit;">
+
+    <!-- Extra prompt -->
+    <input id="ghibli-extra" type="text" placeholder="Add details (optional): e.g. forest background, sunset..."
+      style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:9px 12px;font-size:13px;outline:none;margin-bottom:12px;font-family:inherit;">
+
+    <!-- Result -->
     <div id="ghibli-result-wrap" style="display:none;margin-bottom:12px;text-align:center;">
       <img id="ghibli-result" style="max-width:100%;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.4);">
-      <button id="ghibli-download-btn" style="margin-top:8px;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:13px;cursor:pointer;font-family:inherit;">&#8595; Download</button>
+      <button id="ghibli-download-btn" style="margin-top:8px;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:13px;cursor:pointer;font-family:inherit;">⬇ Download</button>
     </div>
     <div id="ghibli-loading" style="display:none;text-align:center;padding:20px;">
-      <div style="font-size:32px;margin-bottom:8px;">&#127912;</div>
-      <div style="color:var(--muted);font-size:13px;">Creating your Ghibli portrait...<br><span style="font-size:11px;">This takes 15–60 seconds</span></div>
+      <div style="font-size:32px;margin-bottom:8px;">🎨</div>
+      <div style="color:var(--muted);font-size:13px;">Creating your Ghibli portrait...<br><span style="font-size:11px;">This can take up to a minute or two</span></div>
     </div>
     <div id="ghibli-error" style="display:none;color:#ef4444;font-size:12px;margin-bottom:8px;padding:8px;background:#fef2f2;border-radius:6px;"></div>
+
     <div style="display:flex;gap:8px;">
-      <button id="ghibli-generate-btn" style="flex:1;background:linear-gradient(135deg,#10a37f,#0d7a5f);color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">&#10024; Create Ghibli Art</button>
-      <button id="ghibli-close-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:12px 16px;font-size:14px;cursor:pointer;">&#10005;</button>
+      <button id="ghibli-generate-btn" style="flex:1;background:linear-gradient(135deg,#10a37f,#0d7a5f);color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">✨ Create Ghibli Art</button>
+      <button id="ghibli-close-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:12px 16px;font-size:14px;cursor:pointer;">✕</button>
     </div>
   </div>
 </div>
 
-<!-- Image Generation Modal -->
+<!-- ─── IMAGE GENERATION MODAL ─────────────────────────────────────────────── -->
 <div id="img-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:300;align-items:center;justify-content:center;">
   <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:24px;width:92%;max-width:440px;max-height:90vh;overflow-y:auto;">
-    <h3 style="margin:0 0 4px;font-size:18px;">&#127912; Generate Image</h3>
+    <h3 style="margin:0 0 4px;font-size:18px;">🎨 Generate Image</h3>
     <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">Describe what you want to see</p>
-    <textarea id="img-prompt" rows="3" placeholder="e.g. a cozy cabin in a snowy forest, golden hour lighting" style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:13px;outline:none;margin-bottom:12px;font-family:inherit;resize:vertical;"></textarea>
+
+    <textarea id="img-prompt" rows="3" placeholder="e.g. a cozy cabin in a snowy forest, golden hour lighting"
+      style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:13px;outline:none;margin-bottom:12px;font-family:inherit;resize:vertical;"></textarea>
+
     <div style="margin-bottom:14px;">
       <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px;">Style (optional):</label>
       <select id="img-style" style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:9px 12px;font-size:13px;outline:none;font-family:inherit;">
-        <option value="">&#10024; Auto (recommended)</option>
-        <option value="photorealistic, hyperrealistic DSLR photography, 8K resolution, cinematic">&#128247; Photorealistic</option>
-        <option value="professional book cover design, award-winning layout, elegant typography">&#128218; Book Cover</option>
-        <option value="Studio Ghibli anime style, soft watercolor, vibrant colors, beautiful">&#127807; Anime / Ghibli</option>
-        <option value="digital painting, fantasy concept art, epic lighting, deviantart">&#127917; Fantasy Art</option>
-        <option value="watercolor painting, soft pastel, dreamy, artistic brushstrokes">&#128396; Watercolor</option>
-        <option value="3D render, Octane render, ultra realistic, physically based rendering">&#129522; 3D Render</option>
-        <option value="flat vector illustration, minimalist, clean lines, modern design">&#128208; Minimalist</option>
-        <option value="oil painting, impressionist, rich textures, museum quality">&#128444; Oil Painting</option>
-        <option value="cinematic film still, dramatic lighting, movie poster quality, 35mm">&#127916; Cinematic</option>
-        <option value="pixel art, retro 8-bit style, vibrant palette, game art">&#128377; Pixel Art</option>
-        <option value="pencil sketch, detailed graphite drawing, fine art, black and white">&#9999; Pencil Sketch</option>
-        <option value="logo design, professional brand identity, clean, scalable vector">&#127991; Logo / Brand</option>
+        <option value="">✨ Auto (recommended)</option>
+        <option value="photorealistic, hyperrealistic DSLR photography, 8K resolution, cinematic">📸 Photorealistic</option>
+        <option value="professional book cover design, award-winning layout, elegant typography">📚 Book Cover</option>
+        <option value="Studio Ghibli anime style, soft watercolor, vibrant colors, beautiful">🌿 Anime / Ghibli</option>
+        <option value="digital painting, fantasy concept art, epic lighting, deviantart">🎭 Fantasy Art</option>
+        <option value="watercolor painting, soft pastel, dreamy, artistic brushstrokes">🖌 Watercolor</option>
+        <option value="3D render, Octane render, ultra realistic, physically based rendering">🧊 3D Render</option>
+        <option value="flat vector illustration, minimalist, clean lines, modern design">📐 Minimalist / Vector</option>
+        <option value="oil painting, impressionist, rich textures, museum quality">🖼 Oil Painting</option>
+        <option value="cinematic film still, dramatic lighting, movie poster quality, 35mm">🎬 Cinematic</option>
+        <option value="pixel art, retro 8-bit style, vibrant palette, game art">🕹 Pixel Art</option>
+        <option value="pencil sketch, detailed graphite drawing, fine art, black and white">✏️ Pencil Sketch</option>
+        <option value="logo design, professional brand identity, clean, scalable vector">🏷 Logo / Brand</option>
       </select>
     </div>
-    <div id="img-loading" style="display:none;text-align:center;padding:20px;"><div style="font-size:32px;margin-bottom:8px;">&#127912;</div><div style="color:var(--muted);font-size:13px;">Generating...<br><span style="font-size:11px;opacity:.7;">Auto-enhancing prompt</span></div></div>
+
+    <div id="img-loading" style="display:none;text-align:center;padding:20px;">
+      <div style="font-size:32px;margin-bottom:8px;">🎨</div>
+      <div style="color:var(--muted);font-size:13px;">Generating your image...<br>
+        <span style="font-size:11px;opacity:.7;">Auto-enhancing your prompt for best quality</span>
+      </div>
+    </div>
     <div id="img-error" style="display:none;color:#ef4444;font-size:12px;margin-bottom:8px;padding:8px;background:#fef2f2;border-radius:6px;"></div>
+
     <div id="img-result" style="display:none;margin-bottom:12px;text-align:center;">
       <img id="img-output" style="max-width:100%;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.4);cursor:zoom-in;">
       <div style="display:flex;gap:8px;margin-top:8px;">
-        <button id="img-download-btn" style="flex:1;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px;font-size:13px;cursor:pointer;font-family:inherit;">&#8595; Download</button>
-        <button id="img-copy-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px;font-size:13px;cursor:pointer;font-family:inherit;">&#128203; Copy</button>
-        <button id="img-fullscreen-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px;font-size:13px;cursor:pointer;font-family:inherit;">&#9974; View</button>
+        <button id="img-download-btn" style="flex:1;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px;font-size:13px;cursor:pointer;font-family:inherit;">⬇ Download</button>
+        <button id="img-copy-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px;font-size:13px;cursor:pointer;font-family:inherit;">📋 Copy</button>
+        <button id="img-fullscreen-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px;font-size:13px;cursor:pointer;font-family:inherit;">⛶ View</button>
       </div>
     </div>
+
     <div style="display:flex;gap:8px;">
-      <button id="img-generate-btn" style="flex:1;background:linear-gradient(135deg,#10a37f,#0d7a5f);color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">&#10024; Generate</button>
-      <button id="img-close-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:12px 16px;font-size:14px;cursor:pointer;">&#10005;</button>
+      <button id="img-generate-btn" style="flex:1;background:linear-gradient(135deg,#10a37f,#0d7a5f);color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">✨ Generate</button>
+      <button id="img-close-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:12px 16px;font-size:14px;cursor:pointer;">✕</button>
     </div>
   </div>
 </div>
 
+<!-- Fullscreen image viewer (for the "View" button in the image modal) -->
 <div id="img-viewer-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:400;align-items:center;justify-content:center;cursor:zoom-out;">
   <img id="img-viewer-img" style="max-width:94%;max-height:94%;border-radius:8px;">
 </div>
 
-<!-- Weather Modal -->
+<!-- ─── WEATHER MODAL ───────────────────────────────────────────────────────── -->
 <div id="weather-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:300;align-items:center;justify-content:center;">
   <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:24px;width:92%;max-width:460px;max-height:90vh;overflow-y:auto;">
-    <h3 style="margin:0 0 4px;font-size:18px;">&#127780; Weather</h3>
+    <h3 style="margin:0 0 4px;font-size:18px;">🌤 Weather</h3>
     <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">Search any city, or use your current location</p>
+
     <div style="display:flex;gap:8px;margin-bottom:12px;">
-      <input id="weather-city" type="text" placeholder="Search city or place..." autocomplete="off" style="flex:1;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:13px;outline:none;font-family:inherit;">
-      <button id="weather-search-btn" style="background:var(--accent);color:#fff;border:none;border-radius:8px;padding:0 14px;font-size:14px;cursor:pointer;">&#128269;</button>
-      <button id="weather-location-btn" title="Use my location" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:0 12px;font-size:14px;cursor:pointer;">&#128205;</button>
+      <input id="weather-city" type="text" placeholder="Search city or place..." autocomplete="off"
+        style="flex:1;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:13px;outline:none;font-family:inherit;">
+      <button id="weather-search-btn" style="background:var(--accent);color:#fff;border:none;border-radius:8px;padding:0 14px;font-size:14px;cursor:pointer;">🔍</button>
+      <button id="weather-location-btn" title="Use my location" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:0 12px;font-size:14px;cursor:pointer;">📍</button>
     </div>
-    <div id="weather-loading" style="display:none;text-align:center;padding:20px;"><div style="font-size:32px;margin-bottom:8px;">&#127758;</div><div style="color:var(--muted);font-size:13px;">Fetching weather...</div></div>
+
+    <div id="weather-loading" style="display:none;text-align:center;padding:20px;">
+      <div style="font-size:32px;margin-bottom:8px;">🌍</div>
+      <div style="color:var(--muted);font-size:13px;">Fetching weather...</div>
+    </div>
     <div id="weather-error" style="display:none;color:#ef4444;font-size:12px;margin-bottom:8px;padding:8px;background:#fef2f2;border-radius:6px;"></div>
-    <div id="weather-result" style="display:none;"><div id="weather-content"></div></div>
+
+    <div id="weather-result" style="display:none;">
+      <div id="weather-content"></div>
+    </div>
+
     <div style="display:flex;justify-content:flex-end;margin-top:14px;">
       <button id="weather-close-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:10px 16px;font-size:14px;cursor:pointer;">Close</button>
     </div>
@@ -1032,6 +1552,21 @@ PAGE = r"""<!DOCTYPE html>
 </div>
 
 <script>
+// Fix for the classic mobile "100vh is taller than what you can actually
+// see" bug (address bar / keyboard aren't subtracted from 100vh on most
+// mobile browsers). This keeps --app-height in sync with the real visible
+// height so the input box at the bottom of the page never gets pushed
+// off-screen. See the .layout CSS rule that consumes this variable.
+function _setAppHeight() {
+  const h = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+  document.documentElement.style.setProperty('--app-height', h + 'px');
+}
+_setAppHeight();
+window.addEventListener('resize', _setAppHeight);
+window.addEventListener('orientationchange', () => setTimeout(_setAppHeight, 100));
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', _setAppHeight);
+}
 
 const messagesWrap = document.getElementById('messages-wrap');
 const messagesEl   = document.getElementById('messages');
@@ -1044,10 +1579,39 @@ const newChatBtn   = document.getElementById('new-chat-btn');
 const sidebarToggle= document.getElementById('sidebar-toggle');
 const fullscreenBtn= document.getElementById('fullscreen-btn');
 const nameBtn       = document.getElementById('name-btn');
-const modelSelect   = document.getElementById('model-select');
+const vipBtn        = document.getElementById('vip-btn');
+const streakBadge   = document.getElementById('streak-badge');
 
 let selectedModel = 'mythic-2';
 let vipUnlocked   = false;
+
+function updateVipBtn() {
+  vipBtn.textContent = vipUnlocked && selectedModel === 'mythic-vip' ? '✨' : (vipUnlocked ? '✨' : '🔒');
+  vipBtn.classList.toggle('active', selectedModel === 'mythic-vip');
+  vipBtn.title = vipUnlocked
+    ? (selectedModel === 'mythic-vip' ? 'Mythic VIP active — click to switch back' : 'Switch to Mythic VIP')
+    : 'Unlock Mythic VIP';
+}
+
+// ─── STREAK BADGE ─────────────────────────────────────────────────────────────
+async function refreshStreakBadge() {
+  try {
+    const r = await fetch('/api/streak');
+    if (!r.ok) return;
+    const d = await r.json();
+    const streak = d.streak || 0;
+    if (streak > 0) {
+      streakBadge.textContent = '🔥 ' + streak;
+      streakBadge.style.display = 'inline-flex';
+      streakBadge.title = streak === 1
+        ? '1 day streak — chat again tomorrow to keep it going!'
+        : streak + ' day streak — chat again tomorrow to keep it going!';
+    } else {
+      streakBadge.style.display = 'none';
+    }
+  } catch {}
+}
+refreshStreakBadge();
 
 function showVipModal() {
   const existing = document.getElementById('vip-modal-overlay');
@@ -1069,7 +1633,6 @@ function showVipModal() {
   pwIn.focus();
   overlay.querySelector('#vip-pw-cancel').addEventListener('click', () => {
     overlay.style.display = 'none';
-    modelSelect.value = selectedModel;
   });
   overlay.querySelector('#vip-pw-ok').addEventListener('click', async () => {
     try {
@@ -1082,9 +1645,7 @@ function showVipModal() {
         vipUnlocked = true;
         overlay.style.display = 'none';
         selectedModel = 'mythic-vip';
-        modelSelect.value = 'mythic-vip';
-        const opt = modelSelect.querySelector('option[value="mythic-vip"]');
-        if (opt) opt.textContent = 'Mythic VIP ✨';
+        updateVipBtn();
       } else {
         pwErr.style.display = 'block'; pwIn.value = ''; pwIn.focus();
       }
@@ -1096,7 +1657,8 @@ function showVipModal() {
   pwIn.addEventListener('keydown', e => { if (e.key === 'Enter') overlay.querySelector('#vip-pw-ok').click(); });
 }
 
-// Populate model list from the backend (falls back to the static HTML options if it fails)
+// Pull default model + VIP status from the backend (provider itself is chosen
+// automatically server-side — this only tracks the VIP-tier flag)
 (async () => {
   try {
     const [mr, vr] = await Promise.all([
@@ -1104,30 +1666,17 @@ function showVipModal() {
       fetch('/api/vip-status').then(r => r.json()),
     ]);
     vipUnlocked = !!vr.vip;
-    if (mr && Array.isArray(mr.models) && mr.models.length) {
-      modelSelect.innerHTML = '';
-      mr.models.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m.id;
-        opt.textContent = m.vip ? (vipUnlocked ? m.name.replace('🔒', '✨') : m.name) : m.name;
-        opt.dataset.vip = m.vip ? '1' : '0';
-        if (m.id === mr.default) opt.selected = true;
-        modelSelect.appendChild(opt);
-      });
-      selectedModel = mr.default || selectedModel;
-    }
+    if (mr && mr.default) selectedModel = mr.default;
   } catch {
-    // Backend didn't respond — the static <option> list already in the HTML still works fine.
+    // Backend didn't respond — defaults above still work fine.
   }
+  updateVipBtn();
 })();
 
-modelSelect.addEventListener('change', () => {
-  const opt = modelSelect.options[modelSelect.selectedIndex];
-  if (opt && opt.dataset.vip === '1' && !vipUnlocked) {
-    showVipModal();
-  } else {
-    selectedModel = modelSelect.value;
-  }
+vipBtn.addEventListener('click', () => {
+  if (!vipUnlocked) { showVipModal(); return; }
+  selectedModel = selectedModel === 'mythic-vip' ? 'mythic-2' : 'mythic-vip';
+  updateVipBtn();
 });
 
 const nameModalOverlay = document.getElementById('name-modal-overlay');
@@ -1172,10 +1721,10 @@ function clearEmptyState() {
   if (es) es.remove();
 }
 function showEmptyState() {
-  messagesEl.innerHTML = '<div class="empty-state" id="empty-state"><h2>Ꮇʏᴛʜɪᴄ ᴀɪ</h2><p>Ask me anything, generate images, or just chat 👋</p></div>';
+  messagesEl.innerHTML = '<div class="empty-state" id="empty-state"><h2>Mythic AI</h2><p>Ask me anything, generate images, or just chat 👋</p></div>';
 }
 
-function addMessage(role, text, attachment) {
+let addMessage = function(role, text, attachment) {
   clearEmptyState();
   const row = document.createElement('div');
   row.className = 'msg-row ' + role;
@@ -1206,9 +1755,9 @@ function addMessage(role, text, attachment) {
   messagesEl.appendChild(row);
   scrollToBottom();
   return textNode;
-}
+};
 
-function buildMsgActions(row, textNode, role) {
+let buildMsgActions = function(row, textNode, role) {
   const actions = document.createElement('div');
   actions.className = 'msg-actions';
 
@@ -1244,7 +1793,7 @@ function buildMsgActions(row, textNode, role) {
     actions.appendChild(regenBtn);
   }
   return actions;
-}
+};
 
 function addImageMessage(role, base64, caption) {
   clearEmptyState();
@@ -1284,6 +1833,14 @@ function speak(text) {
   if (!plain) return;
   currentUtterance = new SpeechSynthesisUtterance(plain);
   currentUtterance.rate = 1.05;
+  const chosen = (typeof getChosenVoice === 'function') ? getChosenVoice() : null;
+  if (chosen) {
+    currentUtterance.voice = chosen;
+    currentUtterance.lang = chosen.lang;
+  } else {
+    const lang = localStorage.getItem('mythic_voice_lang');
+    if (lang) currentUtterance.lang = lang;
+  }
   currentUtterance.onstart = () => speakingIndicator.classList.add('show');
   currentUtterance.onend = () => speakingIndicator.classList.remove('show');
   currentUtterance.onerror = () => speakingIndicator.classList.remove('show');
@@ -1451,7 +2008,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
     if (wantsImage) {
       hideTyping();
       const generated = await tryGenerateImage(message);
-      if (generated) { setGenerating(false); loadConversationList(); return; }
+      if (generated) { setGenerating(false); loadConversationList(); refreshStreakBadge(); return; }
       showTyping();
     }
   }
@@ -1469,7 +2026,6 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
         user_name: getUserName(),
         regenerate: !!regenerate,
         model: selectedModel,
-        user_api_key: (() => { const k = getActiveKey(); return k ? { provider: k.provider, key: k.value } : null; })(),
       })
     });
     if (!r.ok || !r.body) {
@@ -1496,6 +2052,12 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
     }
     speak(fullText);
     loadConversationList();
+    refreshStreakBadge();
+    // Notify the user if they've switched away from the tab
+    if (typeof window._notifyAiReply === 'function') {
+      const preview = fullText.replace(/[#*`_~>]/g, '').trim().slice(0, 80);
+      window._notifyAiReply(preview || 'Your answer is ready 💬');
+    }
   } catch (err) {
     hideTyping();
     if (err.name === 'AbortError') {
@@ -1577,12 +2139,12 @@ function isFullscreen() {
 function updateFullscreenBtn() {
   if (isFullscreen()) {
     fullscreenIcon.textContent = '⤢';
-    fullscreenBtn.title = 'Exit fullscreen';
     fullscreenBtn.classList.add('active');
+    fullscreenBtn.title = 'Exit fullscreen';
   } else {
     fullscreenIcon.textContent = '⛶';
-    fullscreenBtn.title = 'Fullscreen';
     fullscreenBtn.classList.remove('active');
+    fullscreenBtn.title = 'Fullscreen';
   }
 }
 async function toggleFullscreen() {
@@ -1613,7 +2175,7 @@ fullscreenBtn.addEventListener('click', toggleFullscreen);
 document.addEventListener('fullscreenchange', updateFullscreenBtn);
 document.addEventListener('webkitfullscreenchange', updateFullscreenBtn);
 
-// "What should Ꮇʏᴛʜɪᴄ ᴀɪ call you?" — stored locally, sent with every chat request
+// "What should Mythic AI call you?" — stored locally, sent with every chat request
 function getUserName() { return localStorage.getItem('mythic_user_name') || ''; }
 function setUserName(name) {
   if (name) localStorage.setItem('mythic_user_name', name);
@@ -1657,9 +2219,9 @@ exportBtn.addEventListener('click', async () => {
     const r = await fetch('/api/conversations/' + activeConvId);
     if (!r.ok) return;
     const d = await r.json();
-    const lines = [`# ${d.title || 'Ꮇʏᴛʜɪᴄ ᴀɪ chat'}`, ''];
+    const lines = [`# ${d.title || 'Mythic AI chat'}`, ''];
     (d.messages || []).forEach(m => {
-      lines.push(m.role === 'user' ? 'You:' : 'Ꮇʏᴛʜɪᴄ ᴀɪ:');
+      lines.push(m.role === 'user' ? 'You:' : 'Mythic AI:');
       lines.push(m.text || (m.attachment ? `[attachment: ${m.attachment.name}]` : ''));
       lines.push('');
     });
@@ -1749,6 +2311,99 @@ settingsBtn.addEventListener('click', () => { settingsModalOverlay.style.display
 settingsCloseBtn.addEventListener('click', () => { saveSettings(); settingsModalOverlay.style.display = 'none'; });
 settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsModalOverlay) { saveSettings(); settingsModalOverlay.style.display = 'none'; } });
 
+// ─── NOTIFICATION SETTINGS TOGGLE ────────────────────────────────────────────
+(function() {
+  const notifBtn    = document.getElementById('notif-toggle-btn');
+  const notifStatus = document.getElementById('notif-status');
+  if (!notifBtn) return;
+
+  function updateNotifUI() {
+    if (!('Notification' in window)) {
+      notifBtn.textContent = 'Not supported';
+      notifBtn.disabled = true;
+      notifStatus.textContent = 'Push notifications are not supported in this browser.';
+      return;
+    }
+    const perm = Notification.permission;
+    if (perm === 'granted') {
+      notifBtn.textContent = 'Enabled ✓';
+      notifBtn.style.borderColor = 'var(--accent)';
+      notifBtn.style.color = 'var(--accent)';
+      notifStatus.textContent = "You'll get a notification when Mythic AI replies while you're away.";
+    } else if (perm === 'denied') {
+      notifBtn.textContent = 'Blocked';
+      notifBtn.style.borderColor = '#ef4444';
+      notifBtn.style.color = '#ef4444';
+      notifStatus.textContent = 'Notifications are blocked. Allow them in your browser site settings.';
+    } else {
+      notifBtn.textContent = 'Enable';
+      notifBtn.style.borderColor = 'var(--border)';
+      notifBtn.style.color = 'var(--muted)';
+      notifStatus.textContent = "Get notified when Mythic AI replies while you're in another tab.";
+    }
+  }
+  updateNotifUI();
+  // Update every time the settings panel opens
+  if (settingsBtn) settingsBtn.addEventListener('click', updateNotifUI);
+
+  notifBtn.addEventListener('click', async () => {
+    if (Notification.permission === 'granted') {
+      // Already enabled — offer to unsubscribe
+      const sub = await (async () => {
+        try {
+          const reg = await navigator.serviceWorker.getRegistration('/');
+          return reg ? await reg.pushManager.getSubscription() : null;
+        } catch { return null; }
+      })();
+      if (sub) {
+        await fetch('/api/push/unsubscribe', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint: sub.endpoint }),
+        });
+        await sub.unsubscribe();
+        localStorage.removeItem('mythic_push_subscribed');
+        localStorage.removeItem('mythic_push_asked');
+      }
+      notifStatus.textContent = 'Notifications disabled.';
+      updateNotifUI();
+      return;
+    }
+    if (Notification.permission === 'denied') {
+      notifStatus.textContent = 'Please allow notifications in your browser site settings, then reload.';
+      return;
+    }
+    // Request permission + subscribe
+    const perm = await Notification.requestPermission();
+    if (perm === 'granted') {
+      // Trigger the subscribe flow defined in the SW section above
+      if (typeof window._notifyAiReply !== 'undefined') {
+        // SW already set up — subscribe now
+        try {
+          const reg = await navigator.serviceWorker.getRegistration('/');
+          if (reg) {
+            const kr = await fetch('/api/push/vapid-public-key');
+            if (kr.ok) {
+              const { publicKey } = await kr.json();
+              if (publicKey) {
+                const padding = '='.repeat((4 - publicKey.length % 4) % 4);
+                const b64 = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
+                const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+                const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: raw });
+                await fetch('/api/push/subscribe', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ subscription: sub.toJSON() }),
+                });
+                localStorage.setItem('mythic_push_subscribed', '1');
+              }
+            }
+          }
+        } catch (err) { console.warn('[Push] manual subscribe failed:', err); }
+      }
+    }
+    updateNotifUI();
+  });
+})();
+
 document.querySelectorAll('.settings-choice').forEach(btn => {
   btn.addEventListener('click', () => {
     const group = btn.dataset.group;
@@ -1775,305 +2430,138 @@ fontSizeSlider.addEventListener('input', () => {
 
 loadSettings();
 
-// ─── PWA INSTALL BUTTON ──────────────────────────────────────────────────────
-const installBtn = document.getElementById('install-btn');
-let _deferredInstallPrompt = null;
-
-function _showInstallBtn() { if (installBtn) { installBtn.style.display = 'flex'; installBtn.style.alignItems = 'center'; } }
-function _hideInstallBtn() { if (installBtn) installBtn.style.display = 'none'; }
-
-window.addEventListener('beforeinstallprompt', e => {
-  e.preventDefault(); _deferredInstallPrompt = e; _showInstallBtn();
-});
-window.addEventListener('appinstalled', () => {
-  _hideInstallBtn(); _deferredInstallPrompt = null;
-  localStorage.setItem('mythic_pwa_installed', '1');
-});
-if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
-  _hideInstallBtn();
-} else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
-  if (!localStorage.getItem('mythic_pwa_installed')) _showInstallBtn();
-}
-
-function _showIOSInstallModal() {
-  const ex = document.getElementById('ios-install-modal');
-  if (ex) { ex.style.display = 'flex'; return; }
-  const m = document.createElement('div');
-  m.id = 'ios-install-modal';
-  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:9999;display:flex;align-items:flex-end;justify-content:center;padding:20px;';
-  m.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:20px;padding:28px 24px;width:100%;max-width:420px;text-align:center;">
-    <div style="font-size:42px;margin-bottom:10px;">📲</div>
-    <div style="font-weight:700;font-size:18px;margin-bottom:8px;">Install Ꮇʏᴛʜɪᴄ ᴀɪ</div>
-    <div style="color:var(--muted);font-size:13.5px;line-height:1.7;margin-bottom:20px;">
-      Tap the <strong>Share button</strong> ⬆ at the bottom of Safari,<br>
-      then tap <strong>"Add to Home Screen"</strong> ➕
-    </div>
-    <button id="ios-close" style="background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
-  </div>`;
-  document.body.appendChild(m);
-  m.addEventListener('click', e => { if (e.target === m) m.remove(); });
-  document.getElementById('ios-close').addEventListener('click', () => m.remove());
-}
-
-if (installBtn) installBtn.addEventListener('click', async () => {
-  if (_deferredInstallPrompt) {
-    _deferredInstallPrompt.prompt();
-    const { outcome } = await _deferredInstallPrompt.userChoice;
-    if (outcome === 'accepted') { _hideInstallBtn(); _deferredInstallPrompt = null; }
-  } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
-    _showIOSInstallModal();
-  } else if (window.matchMedia('(display-mode: standalone)').matches) {
-    _hideInstallBtn();
-  } else {
-    alert('Install Ꮇʏᴛʜɪᴄ ᴀɪ as an app:\n\n• Chrome/Edge: Click ⋮ → "Install app"\n• Samsung Browser: Tap ⋮ → "Add page to"\n• Safari (iOS): Tap Share ⬆ → "Add to Home Screen"');
-  }
-});
-
-// ─── NOTIFICATION BANNER ─────────────────────────────────────────────────────
-const notifBanner    = document.getElementById('notif-banner');
-const notifAllowBtn  = document.getElementById('notif-banner-allow');
-const notifDismissBtn= document.getElementById('notif-banner-dismiss');
-let _swReg = null;
-
-function _hideBanner() { if (notifBanner) notifBanner.style.display = 'none'; }
-function _showBanner() {
-  if (!notifBanner || !('Notification' in window)) return;
-  if (Notification.permission !== 'default') return;
-  const ts = parseInt(localStorage.getItem('mythic_notif_dismissed') || '0', 10);
-  if (ts && Date.now() < ts) return;
-  if (ts) localStorage.removeItem('mythic_notif_dismissed');
-  notifBanner.style.display = 'flex';
-}
-function _urlB64(b64url) {
-  const pad = '='.repeat((4 - b64url.length % 4) % 4);
-  return Uint8Array.from(atob((b64url + pad).replace(/-/g,'+').replace(/_/g,'/')), c => c.charCodeAt(0));
-}
-async function _doSubscribe(reg) {
-  if (!('PushManager' in window)) return;
-  try {
-    const kr = await fetch('/api/push/vapid-public-key');
-    if (!kr.ok) return;
-    const { publicKey } = await kr.json();
-    if (!publicKey) return;
-    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: _urlB64(publicKey) });
-    await fetch('/api/push/subscribe', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ subscription: sub.toJSON() }) });
-    localStorage.setItem('mythic_push_subscribed', '1');
-  } catch(err) { console.warn('[Push]', err); }
-}
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js', { scope: '/' })
-    .then(reg => { _swReg = reg; if (Notification.permission === 'granted') { _hideBanner(); _doSubscribe(reg); } else _showBanner(); })
-    .catch(() => _showBanner());
-} else { _showBanner(); }
-
-if (notifAllowBtn) notifAllowBtn.addEventListener('click', async () => {
-  _hideBanner();
-  let perm; try { perm = await Notification.requestPermission(); } catch { perm = 'denied'; }
-  if (perm === 'granted') {
-    if (_swReg) { try { await _swReg.showNotification('Ꮇʏᴛʜɪᴄ ᴀɪ 🔔', { body: "Notifications on! I'll let you know when your answer is ready.", icon: '/icon.png', badge: '/icon.png', tag: 'notif-on', vibrate: [150, 80, 150] }); } catch {} _doSubscribe(_swReg); }
-    else { try { new Notification('Ꮇʏᴛʜɪᴄ ᴀɪ 🔔', { body: 'Notifications enabled!', icon: '/icon.png' }); } catch {} }
-    const nb = document.getElementById('notif-toggle-btn'), ns = document.getElementById('notif-status');
-    if (nb) { nb.textContent = 'Enabled ✓'; nb.style.borderColor = 'var(--accent)'; nb.style.color = 'var(--accent)'; }
-    if (ns) ns.textContent = "You'll get notified when Ꮇʏᴛʜɪᴄ ᴀɪ replies while you're away.";
-    localStorage.removeItem('mythic_notif_dismissed');
-  }
-});
-if (notifDismissBtn) notifDismissBtn.addEventListener('click', () => {
-  _hideBanner();
-  localStorage.setItem('mythic_notif_dismissed', String(Date.now() + 3 * 24 * 60 * 60 * 1000));
-});
-window._notifyAiReply = function(preview) {
-  if (document.visibilityState === 'visible' || Notification.permission !== 'granted') return;
-  const body = preview || 'Your answer is ready — tap to read it.';
-  const opts = { body, icon: '/icon.png', badge: '/icon.png', tag: 'mythic-reply', renotify: true, vibrate: [200, 100, 200], data: { url: '/' }, actions: [{ action: 'open', title: '💬 Open Chat' }, { action: 'dismiss', title: '✕' }] };
-  if (_swReg) { try { _swReg.showNotification('Ꮇʏᴛʜɪᴄ ᴀɪ replied 💬', opts); } catch {} }
-  else { try { new Notification('Ꮇʏᴛʜɪᴄ ᴀɪ replied 💬', { body, icon: '/icon.png' }); } catch {} }
-};
-
-// Notification settings toggle in Settings panel
+// ─── VOICE & LANGUAGE PICKER ─────────────────────────────────────────────────
 (function() {
-  const notifBtn = document.getElementById('notif-toggle-btn');
-  const notifStatus = document.getElementById('notif-status');
-  if (!notifBtn) return;
-  function updateNotifUI() {
-    if (!('Notification' in window)) { notifBtn.textContent = 'Not supported'; notifBtn.disabled = true; return; }
-    if (Notification.permission === 'granted') { notifBtn.textContent = 'Enabled ✓'; notifBtn.style.borderColor = 'var(--accent)'; notifBtn.style.color = 'var(--accent)'; if (notifStatus) notifStatus.textContent = "You'll get notified when Ꮇʏᴛʜɪᴄ ᴀɪ replies while you're away."; }
-    else if (Notification.permission === 'denied') { notifBtn.textContent = 'Blocked'; notifBtn.style.borderColor = '#ef4444'; notifBtn.style.color = '#ef4444'; if (notifStatus) notifStatus.textContent = 'Blocked. Allow in browser site settings.'; }
-    else { notifBtn.textContent = 'Enable'; notifBtn.style.borderColor = 'var(--border)'; notifBtn.style.color = 'var(--muted)'; if (notifStatus) notifStatus.textContent = "Get notified when Ꮇʏᴛʜɪᴄ ᴀɪ replies while you're in another tab."; }
+  const langSelect   = document.getElementById('voice-language-select');
+  const voiceSelect  = document.getElementById('voice-select');
+  const voiceHint    = document.getElementById('voice-hint');
+  if (!langSelect || !voiceSelect) return;
+
+  // A broad list of languages (BCP-47 codes) covering the world's most
+  // widely-spoken languages, so "ask which language" has real choices.
+  const LANGUAGES = [
+    ['en-US','English (US)'], ['en-GB','English (UK)'], ['en-IN','English (India)'],
+    ['hi-IN','Hindi'], ['bn-IN','Bengali'], ['ta-IN','Tamil'], ['te-IN','Telugu'],
+    ['mr-IN','Marathi'], ['gu-IN','Gujarati'], ['kn-IN','Kannada'], ['ml-IN','Malayalam'],
+    ['pa-IN','Punjabi'], ['ur-PK','Urdu'], ['es-ES','Spanish (Spain)'], ['es-MX','Spanish (Mexico)'],
+    ['fr-FR','French'], ['de-DE','German'], ['it-IT','Italian'], ['pt-BR','Portuguese (Brazil)'],
+    ['pt-PT','Portuguese (Portugal)'], ['nl-NL','Dutch'], ['ru-RU','Russian'], ['pl-PL','Polish'],
+    ['tr-TR','Turkish'], ['ar-SA','Arabic'], ['he-IL','Hebrew'], ['fa-IR','Persian'],
+    ['zh-CN','Chinese (Mandarin)'], ['zh-TW','Chinese (Taiwan)'], ['ja-JP','Japanese'],
+    ['ko-KR','Korean'], ['vi-VN','Vietnamese'], ['th-TH','Thai'], ['id-ID','Indonesian'],
+    ['ms-MY','Malay'], ['fil-PH','Filipino'], ['sw-KE','Swahili'], ['am-ET','Amharic'],
+    ['nb-NO','Norwegian'], ['sv-SE','Swedish'], ['da-DK','Danish'], ['fi-FI','Finnish'],
+    ['el-GR','Greek'], ['cs-CZ','Czech'], ['ro-RO','Romanian'], ['uk-UA','Ukrainian'],
+    ['hu-HU','Hungarian'], ['sk-SK','Slovak'], ['bg-BG','Bulgarian'], ['hr-HR','Croatian'],
+  ];
+  langSelect.innerHTML = LANGUAGES.map(([code,name]) => `<option value="${code}">${name}</option>`).join('');
+
+  // Common name fragments used by common TTS engines to signal gender, so we
+  // can bucket "5 female / 5 male" even though the Web Speech API itself
+  // doesn't expose a gender field.
+  const FEMALE_HINTS = ['female','woman','girl','samantha','victoria','karen','moira','tessa',
+    'zira','susan','fiona','kyoko','ting-ting','sin-ji','mei-jia','allison','ava','samanatha',
+    'salli','joanna','kimberly','kendra','ivy','aditi','raveena','shreya','lekha','veena',
+    'zoe','emma','sara','laura','anna','maria','sofia','ines','amelie','marie','paulina'];
+  const MALE_HINTS = ['male','man','boy','daniel','alex','fred','george','james','david',
+    'thomas','mark','ryan','oliver','matthew','justin','joey','brian','eric','yusuf',
+    'rishi','arthur','aaron','gordon','lee','diego','carlos','jorge','felix','henri',
+    'stefan','luca','marco','hans','pavel','yuri','takumi','wang','liang'];
+
+  function guessGender(voice) {
+    const n = voice.name.toLowerCase();
+    if (FEMALE_HINTS.some(h => n.includes(h))) return 'female';
+    if (MALE_HINTS.some(h => n.includes(h))) return 'male';
+    return null; // unknown — still usable, just unlabeled
   }
-  updateNotifUI();
-  if (settingsBtn) settingsBtn.addEventListener('click', updateNotifUI);
-  notifBtn.addEventListener('click', async () => {
-    if (Notification.permission === 'denied') { if (notifStatus) notifStatus.textContent = 'Allow in browser site settings, then reload.'; return; }
-    if (Notification.permission === 'granted') {
-      try { const reg = await navigator.serviceWorker.getRegistration('/'); if (reg) { const sub = await reg.pushManager.getSubscription(); if (sub) { await fetch('/api/push/unsubscribe', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ endpoint: sub.endpoint }) }); await sub.unsubscribe(); localStorage.removeItem('mythic_push_subscribed'); } } } catch {}
-      if (notifStatus) notifStatus.textContent = 'Notifications disabled.'; updateNotifUI(); return;
+
+  let cachedVoices = [];
+
+  function populateVoiceSelect() {
+    const langCode = langSelect.value || 'en-US';
+    const langPrefix = langCode.split('-')[0];
+    let matches = cachedVoices.filter(v => v.lang && v.lang.toLowerCase().startsWith(langPrefix));
+    if (!matches.length) matches = cachedVoices; // fall back to any installed voice
+
+    const female = [], male = [], other = [];
+    matches.forEach(v => {
+      const g = guessGender(v);
+      if (g === 'female' && female.length < 5) female.push(v);
+      else if (g === 'male' && male.length < 5) male.push(v);
+      else if (!g) other.push(v);
+    });
+    // Top up female/male buckets fairly from unlabeled voices (previously
+    // female drained the shared pool first, which is why male sometimes
+    // ended up with only 2-3 voices even when more were installed).
+    let turn = 'female';
+    while (other.length && (female.length < 5 || male.length < 5)) {
+      if (turn === 'female' && female.length < 5) { female.push(other.shift()); turn = 'male'; }
+      else if (turn === 'male' && male.length < 5) { male.push(other.shift()); turn = 'female'; }
+      else if (female.length < 5) { female.push(other.shift()); }
+      else if (male.length < 5) { male.push(other.shift()); }
+      else break;
     }
-    const perm = await Notification.requestPermission();
-    if (perm === 'granted') { try { const reg = await navigator.serviceWorker.getRegistration('/'); if (reg) await _doSubscribe(reg); } catch {} }
-    updateNotifUI();
+
+    voiceSelect.innerHTML = '';
+    const addGroup = (label, list) => {
+      if (!list.length) return;
+      const grp = document.createElement('optgroup');
+      grp.label = label;
+      list.forEach((v, i) => {
+        const opt = document.createElement('option');
+        opt.value = v.name + '||' + v.lang;
+        opt.textContent = `${label === 'Female' ? '♀' : '♂'} ${label} Voice ${i+1} (${v.name})`;
+        grp.appendChild(opt);
+      });
+      voiceSelect.appendChild(grp);
+    };
+    addGroup('Female', female);
+    addGroup('Male', male);
+
+    if (!female.length && !male.length) {
+      voiceHint.textContent = 'No voices found for this language on your device yet — try again in a moment.';
+    } else {
+      voiceHint.textContent = `${female.length} female, ${male.length} male voice(s) available for this language.`;
+    }
+
+    const saved = localStorage.getItem('mythic_voice_choice');
+    if (saved && [...voiceSelect.options].some(o => o.value === saved)) {
+      voiceSelect.value = saved;
+    } else if (voiceSelect.options.length) {
+      voiceSelect.selectedIndex = 0;
+    }
+  }
+
+  function refreshVoices() {
+    if (!window.speechSynthesis) return;
+    cachedVoices = window.speechSynthesis.getVoices() || [];
+    populateVoiceSelect();
+  }
+
+  if (window.speechSynthesis) {
+    refreshVoices();
+    window.speechSynthesis.onvoiceschanged = refreshVoices;
+  }
+
+  langSelect.value = localStorage.getItem('mythic_voice_lang') || 'en-US';
+  langSelect.addEventListener('change', () => {
+    localStorage.setItem('mythic_voice_lang', langSelect.value);
+    populateVoiceSelect();
   });
+  voiceSelect.addEventListener('change', () => {
+    localStorage.setItem('mythic_voice_choice', voiceSelect.value);
+  });
+
+  // Exposed globally so speak() can look up the actual SpeechSynthesisVoice
+  // object matching the saved name/lang choice.
+  window.getChosenVoice = function() {
+    const saved = localStorage.getItem('mythic_voice_choice');
+    if (!saved || !window.speechSynthesis) return null;
+    const [name, lang] = saved.split('||');
+    const voices = window.speechSynthesis.getVoices() || [];
+    return voices.find(v => v.name === name && v.lang === lang) || null;
+  };
 })();
-
-// ─── API KEY MANAGER ─────────────────────────────────────────────────────────
-// Keys are stored locally in localStorage (never sent to the server in plaintext
-// for storage — only used as the Authorization header in the browser's own fetch
-// calls to Groq/Cerebras when a key is active). The active key is injected by
-// the frontend into each /api/chat request as a "user_api_key" field; the
-// backend uses it instead of the server-side key when provided.
-const API_KEY_STORE_KEY = 'mythic_api_keys';     // localStorage key for saved keys
-const API_KEY_ACTIVE_KEY = 'mythic_api_key_active'; // localStorage key for active key id
-
-function loadApiKeys() { try { return JSON.parse(localStorage.getItem(API_KEY_STORE_KEY) || '[]'); } catch { return []; } }
-function saveApiKeys(keys) { localStorage.setItem(API_KEY_STORE_KEY, JSON.stringify(keys)); }
-function getActiveKeyId() { return localStorage.getItem(API_KEY_ACTIVE_KEY) || null; }
-function setActiveKeyId(id) { if (id) localStorage.setItem(API_KEY_ACTIVE_KEY, id); else localStorage.removeItem(API_KEY_ACTIVE_KEY); }
-function getActiveKey() { const id = getActiveKeyId(); if (!id) return null; return loadApiKeys().find(k => k.id === id) || null; }
-
-function renderApiKeys() {
-  const list = document.getElementById('api-key-list');
-  if (!list) return;
-  const keys = loadApiKeys();
-  const activeId = getActiveKeyId();
-  list.innerHTML = '';
-  if (!keys.length) {
-    list.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:4px 0;">No keys saved yet. Add one below.</div>';
-    return;
-  }
-  keys.forEach(k => {
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:7px 10px;border-radius:8px;border:1.5px solid ' + (k.id === activeId ? 'var(--accent)' : 'var(--border)') + ';background:' + (k.id === activeId ? 'var(--accent-dim)' : 'var(--panel)') + ';';
-    const badge = document.createElement('span');
-    badge.style.cssText = 'font-size:10px;font-weight:700;padding:2px 6px;border-radius:6px;background:' + (k.provider === 'groq' ? '#f59e0b22' : '#8b5cf622') + ';color:' + (k.provider === 'groq' ? '#f59e0b' : '#8b5cf6') + ';flex-shrink:0;';
-    badge.textContent = k.provider.toUpperCase();
-    const label = document.createElement('span');
-    label.style.cssText = 'flex:1;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' + (k.id === activeId ? 'color:var(--accent);font-weight:600;' : '');
-    label.textContent = (k.label || 'Unnamed') + '  •••' + k.value.slice(-6);
-    const useBtn = document.createElement('button');
-    useBtn.type = 'button';
-    useBtn.style.cssText = 'font-size:11px;padding:3px 10px;border-radius:6px;cursor:pointer;font-family:inherit;border:1px solid ' + (k.id === activeId ? 'var(--accent)' : 'var(--border)') + ';background:' + (k.id === activeId ? 'var(--accent)' : 'none') + ';color:' + (k.id === activeId ? '#fff' : 'var(--muted)') + ';white-space:nowrap;';
-    useBtn.textContent = k.id === activeId ? '✓ Active' : 'Use';
-    useBtn.addEventListener('click', () => { setActiveKeyId(k.id === activeId ? null : k.id); renderApiKeys(); });
-    const delBtn = document.createElement('button');
-    delBtn.type = 'button';
-    delBtn.style.cssText = 'font-size:12px;padding:3px 8px;border-radius:6px;cursor:pointer;font-family:inherit;border:1px solid var(--border);background:none;color:#ef4444;';
-    delBtn.textContent = '✕';
-    delBtn.title = 'Delete this key';
-    delBtn.addEventListener('click', () => {
-      const updated = loadApiKeys().filter(x => x.id !== k.id);
-      saveApiKeys(updated);
-      if (getActiveKeyId() === k.id) setActiveKeyId(null);
-      renderApiKeys();
-    });
-    row.appendChild(badge); row.appendChild(label); row.appendChild(useBtn); row.appendChild(delBtn);
-    list.appendChild(row);
-  });
-}
-
-// Re-render when settings opens
-if (settingsBtn) settingsBtn.addEventListener('click', renderApiKeys);
-
-const apiKeyAddBtn = document.getElementById('api-key-add-btn');
-const apiKeyError  = document.getElementById('api-key-error');
-if (apiKeyAddBtn) apiKeyAddBtn.addEventListener('click', () => {
-  const provider = document.getElementById('api-key-provider-select').value;
-  const label    = document.getElementById('api-key-label-input').value.trim();
-  const value    = document.getElementById('api-key-value-input').value.trim();
-  if (apiKeyError) apiKeyError.style.display = 'none';
-  if (!value) { if (apiKeyError) { apiKeyError.textContent = 'Paste your API key first.'; apiKeyError.style.display = 'block'; } return; }
-  if (value.length < 20) { if (apiKeyError) { apiKeyError.textContent = 'That doesn\'t look like a valid API key.'; apiKeyError.style.display = 'block'; } return; }
-  const keys = loadApiKeys();
-  if (keys.some(k => k.value === value)) { if (apiKeyError) { apiKeyError.textContent = 'This key is already saved.'; apiKeyError.style.display = 'block'; } return; }
-  keys.push({ id: 'k_' + Date.now(), provider, label: label || (provider + ' key'), value });
-  saveApiKeys(keys);
-  document.getElementById('api-key-label-input').value = '';
-  document.getElementById('api-key-value-input').value = '';
-  renderApiKeys();
-});
-
-// ─── DOWNLOADABLE FILE GENERATION FROM CHAT ──────────────────────────────────
-// Detects when AI says "here is your [file type]" or includes a code block,
-// and offers a Download button. Also handles explicit /api/generate-file requests.
-function _triggerDownload(b64, filename, mimeType) {
-  const a = document.createElement('a');
-  a.href = 'data:' + mimeType + ';base64,' + b64;
-  a.download = filename;
-  document.body.appendChild(a); a.click(); a.remove();
-}
-
-// After each AI message, scan for downloadable content
-function _addDownloadButtonIfNeeded(row, textContent) {
-  if (!textContent || textContent.length < 20) return;
-  // Check if this looks like generated file content (code block or explicit file)
-  const hasCodeBlock = /```[\w\s]*\n[\s\S]+?```/.test(textContent);
-  const isFileMention = /\b(pdf|docx|\.txt|\.csv|\.json|\.html|\.css|\.js|\.py|\.md|spreadsheet|document|download)\b/i.test(textContent);
-  if (!hasCodeBlock && !isFileMention) return;
-  if (row.querySelector('.download-file-btn')) return;
-
-  const bar = document.createElement('div');
-  bar.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;';
-
-  // Extract code blocks for direct download
-  const codeBlocks = [...textContent.matchAll(/```(\w*)\n([\s\S]*?)```/g)];
-  codeBlocks.forEach((match, i) => {
-    const lang = (match[1] || 'txt').toLowerCase();
-    const code = match[2];
-    const extMap = { python:'py', javascript:'js', js:'js', typescript:'ts', html:'html', css:'css',
-      json:'json', csv:'csv', markdown:'md', md:'md', sql:'sql', bash:'sh', shell:'sh',
-      yaml:'yaml', xml:'xml', r:'r', cpp:'cpp', c:'c', java:'java', rust:'rs' };
-    const ext = extMap[lang] || lang || 'txt';
-    const mimeMap = { html:'text/html', css:'text/css', js:'text/javascript', json:'application/json',
-      csv:'text/csv', py:'text/x-python', md:'text/markdown', sql:'text/plain', sh:'text/plain' };
-    const mime = mimeMap[ext] || 'text/plain';
-    const btn = document.createElement('button');
-    btn.className = 'download-file-btn';
-    btn.style.cssText = 'background:var(--panel);border:1px solid var(--accent);color:var(--accent);font-size:11.5px;padding:5px 11px;border-radius:8px;cursor:pointer;font-family:inherit;';
-    btn.textContent = '⬇ Download .' + ext + (codeBlocks.length > 1 ? ' (' + (i+1) + ')' : '');
-    btn.addEventListener('click', () => {
-      const b64 = btoa(unescape(encodeURIComponent(code)));
-      _triggerDownload(b64, 'mythic-ai-output-' + (i+1) + '.' + ext, mime);
-    });
-    bar.appendChild(btn);
-  });
-
-  // For non-code-block content, offer full message as TXT
-  if (!codeBlocks.length && isFileMention) {
-    const btn = document.createElement('button');
-    btn.className = 'download-file-btn';
-    btn.style.cssText = 'background:var(--panel);border:1px solid var(--border);color:var(--muted);font-size:11.5px;padding:5px 11px;border-radius:8px;cursor:pointer;font-family:inherit;';
-    btn.textContent = '⬇ Save as .txt';
-    btn.addEventListener('click', () => {
-      const b64 = btoa(unescape(encodeURIComponent(textContent)));
-      _triggerDownload(b64, 'mythic-ai-reply.txt', 'text/plain');
-    });
-    bar.appendChild(btn);
-  }
-
-  // PDF download via backend (if text content is substantial)
-  if (textContent.length > 100) {
-    const pdfBtn = document.createElement('button');
-    pdfBtn.className = 'download-file-btn';
-    pdfBtn.style.cssText = 'background:var(--panel);border:1px solid var(--border);color:var(--muted);font-size:11.5px;padding:5px 11px;border-radius:8px;cursor:pointer;font-family:inherit;';
-    pdfBtn.textContent = '⬇ Save as PDF';
-    pdfBtn.addEventListener('click', async () => {
-      pdfBtn.textContent = 'Generating...'; pdfBtn.disabled = true;
-      try {
-        const r = await fetch('/api/generate-file', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: textContent, format: 'pdf', title: 'Mythic AI Output' })
-        });
-        const d = await r.json();
-        if (d.file) _triggerDownload(d.file, d.filename || 'mythic-ai.pdf', d.mimeType || 'application/pdf');
-        else { pdfBtn.textContent = '⬇ Save as PDF'; pdfBtn.disabled = false; }
-      } catch { pdfBtn.textContent = '⬇ Save as PDF'; pdfBtn.disabled = false; }
-    });
-    bar.appendChild(pdfBtn);
-  }
-
-  if (bar.children.length) row.appendChild(bar);
-}
-
-// Hook into the post-AI-reply processing already done by the submit listener
 
 // ─── MARKDOWN RENDERING ──────────────────────────────────────────────────────
 function renderMarkdown(text) {
@@ -2109,7 +2597,7 @@ function renderMarkdown(text) {
 
 // Override addMessage to use markdown for AI
 const _origAddMessage = addMessage;
-function addMessage(role, text, attachment) {
+addMessage = function(role, text, attachment) {
   const textNode = _origAddMessage(role, text, attachment);
   if (role === 'ai' && text) {
     try {
@@ -2119,7 +2607,7 @@ function addMessage(role, text, attachment) {
     } catch { return textNode; }
   }
   return textNode;
-}
+};
 
 // ─── MESSAGE TIMESTAMPS ───────────────────────────────────────────────────────
 const _origAddMsg2 = addMessage;
@@ -2155,8 +2643,8 @@ async function addFollowupSuggestions(aiText) {
     const r = await fetch('/api/chat', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
-        message: `Based on this AI reply, suggest 3 short follow-up questions the user might ask. Reply ONLY with 3 questions, one per line, no numbering, no extra text:\n\n${aiText.slice(0,400)}`,
-        conversation_id: null, model: 'mythic-1.0', user_name: ''
+        message: `Based on this AI reply, suggest 3 short follow-up questions the user might ask. Reply ONLY with 3 questions, one per line, no numbering, no extra text, in English:\n\n${aiText.slice(0,400)}`,
+        conversation_id: null, model: 'mythic-1.0', user_name: '', ephemeral: true
       })
     });
     if (!r.ok) return;
@@ -2245,25 +2733,235 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') msgSearchWrap.style.display = 'none';
 });
 
-// ─── PWA SUPPORT ─────────────────────────────────────────────────────────────
-if ('serviceWorker' in navigator && navigator.serviceWorker) {
-  // Inline service worker for offline caching
-  const swCode = `
-const CACHE = 'mythic-ai-v1';
-const OFFLINE = ['/', '/static/app.js'];
-self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(['/']))));
-self.addEventListener('fetch', e => {
-  if (e.request.method !== 'GET') return;
-  e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
-});`;
-  const blob = new Blob([swCode], {type:'application/javascript'});
-  navigator.serviceWorker.register(URL.createObjectURL(blob)).catch(()=>{});
+// ─── PWA INSTALL BUTTON ──────────────────────────────────────────────────────
+const installBtn = document.getElementById('install-btn');
+let _deferredInstallPrompt = null;
+
+function _showInstallBtn() {
+  if (!installBtn) return;
+  installBtn.style.display = 'flex';
+  installBtn.style.alignItems = 'center';
 }
+function _hideInstallBtn() {
+  if (installBtn) installBtn.style.display = 'none';
+}
+
+// Chrome/Edge/Android: intercept the browser's install prompt
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  _deferredInstallPrompt = e;
+  _showInstallBtn();
+});
+
+// Hide once installed
+window.addEventListener('appinstalled', () => {
+  _hideInstallBtn();
+  _deferredInstallPrompt = null;
+  localStorage.setItem('mythic_pwa_installed', '1');
+});
+
+// If already running as installed PWA, hide the button
+if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
+  _hideInstallBtn();
+} else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
+  // iOS Safari: no beforeinstallprompt — show button for manual instructions
+  if (!localStorage.getItem('mythic_pwa_installed')) _showInstallBtn();
+}
+
+function _showIOSInstallModal() {
+  const existing = document.getElementById('ios-install-modal');
+  if (existing) { existing.style.display = 'flex'; return; }
+  const m = document.createElement('div');
+  m.id = 'ios-install-modal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:9999;display:flex;align-items:flex-end;justify-content:center;padding:20px;';
+  m.innerHTML = `
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:20px;padding:28px 24px;width:100%;max-width:420px;text-align:center;box-shadow:0 -4px 40px rgba(0,0,0,.4);">
+      <div style="font-size:42px;margin-bottom:10px;">📲</div>
+      <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">Install Mythic AI</div>
+      <div style="color:var(--muted);font-size:13.5px;line-height:1.7;margin-bottom:20px;">
+        Tap the <strong style="color:var(--text);">Share button</strong> <span style="font-size:17px;">⬆</span> at the bottom of Safari,<br>
+        then tap <strong style="color:var(--text);">"Add to Home Screen"</strong> <span style="font-size:15px;">➕</span>
+      </div>
+      <button id="ios-install-close" style="background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
+    </div>`;
+  document.body.appendChild(m);
+  m.addEventListener('click', e => { if (e.target === m) m.remove(); });
+  document.getElementById('ios-install-close').addEventListener('click', () => m.remove());
+}
+
+if (installBtn) {
+  installBtn.addEventListener('click', async () => {
+    if (_deferredInstallPrompt) {
+      // Chrome/Edge/Android — show the native install prompt
+      _deferredInstallPrompt.prompt();
+      const { outcome } = await _deferredInstallPrompt.userChoice;
+      if (outcome === 'accepted') {
+        _hideInstallBtn();
+        _deferredInstallPrompt = null;
+      }
+    } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
+      // iOS Safari — show manual instructions
+      _showIOSInstallModal();
+    } else if (window.matchMedia('(display-mode: standalone)').matches) {
+      _hideInstallBtn(); // already installed, hide
+    } else {
+      // Generic fallback for other browsers
+      alert(
+        'Install Mythic AI as an app:\n\n' +
+        '• Chrome / Edge: Click ⋮ menu → "Install app"\n' +
+        '• Samsung Browser: Tap ⋮ → "Add page to"\n' +
+        '• Firefox: Tap ⋮ → "Install"\n' +
+        '• Safari (iOS): Tap Share ⬆ → "Add to Home Screen"'
+      );
+    }
+  });
+}
+
+// ─── SERVICE WORKER + PUSH NOTIFICATIONS ─────────────────────────────────────
+// ─── NOTIFICATION PERMISSION BANNER ──────────────────────────────────────────
+// Browsers REQUIRE a user gesture before calling Notification.requestPermission().
+// The banner provides that gesture button. We show it immediately on first visit
+// (not after a delay) so users actually see it.
+
+const notifBanner     = document.getElementById('notif-banner');
+const notifAllowBtn   = document.getElementById('notif-banner-allow');
+const notifDismissBtn = document.getElementById('notif-banner-dismiss');
+let _swReg = null;
+
+function _hideBanner() { if (notifBanner) notifBanner.style.display = 'none'; }
+
+function _showBanner() {
+  if (!notifBanner) return;
+  if (!('Notification' in window)) return;          // browser doesn't support it
+  if (Notification.permission === 'granted') return; // already allowed
+  if (Notification.permission === 'denied') return;  // blocked — can't ask again
+  if (localStorage.getItem('mythic_notif_dismissed')) return; // user said no recently
+  notifBanner.style.display = 'flex';
+}
+
+function _urlB64ToUint8(b64url) {
+  const pad = '='.repeat((4 - b64url.length % 4) % 4);
+  const b64 = (b64url + pad).replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+}
+
+async function _doSubscribe(reg) {
+  if (!('PushManager' in window)) return;
+  try {
+    const kr = await fetch('/api/push/vapid-public-key');
+    if (!kr.ok) return; // VAPID not configured on server — silent, no error
+    const { publicKey } = await kr.json();
+    if (!publicKey) return;
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: _urlB64ToUint8(publicKey),
+    });
+    await fetch('/api/push/subscribe', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subscription: sub.toJSON() }),
+    });
+    localStorage.setItem('mythic_push_subscribed', '1');
+  } catch (err) { console.warn('[Push] subscribe error:', err); }
+}
+
+// Register /sw.js — show banner as soon as SW is ready (no 5s delay)
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js', { scope: '/' })
+    .then(reg => {
+      _swReg = reg;
+      if (Notification.permission === 'granted') {
+        _hideBanner();
+        _doSubscribe(reg); // re-subscribe in case sub expired
+      } else {
+        _showBanner(); // show immediately (no timeout)
+      }
+    })
+    .catch(err => {
+      console.warn('[SW] registration failed:', err);
+      // Even without SW, show banner — local notifications still work
+      _showBanner();
+    });
+} else {
+  // No service worker support — still show banner for local notifications
+  _showBanner();
+}
+
+// ── Allow button: the user gesture that unlocks requestPermission() ───────────
+if (notifAllowBtn) notifAllowBtn.addEventListener('click', async () => {
+  _hideBanner();
+  let perm;
+  try { perm = await Notification.requestPermission(); }
+  catch { perm = 'denied'; }
+
+  if (perm === 'granted') {
+    // Immediately show a confirmation notification so the user knows it worked
+    if (_swReg) {
+      try {
+        await _swReg.showNotification('Mythic AI 🔔', {
+          body: "Notifications enabled! You'll hear from me when your answer is ready.",
+          icon: '/icon.png', badge: '/icon.png',
+          tag: 'mythic-notif-confirm', vibrate: [150, 80, 150],
+        });
+      } catch (e) { console.warn('[Push] confirm notification failed:', e); }
+      _doSubscribe(_swReg);
+    } else {
+      // SW not ready yet — try a plain Notification as fallback
+      try { new Notification('Mythic AI 🔔', { body: "Notifications enabled!", icon: '/icon.png' }); }
+      catch {}
+    }
+    // Update the Settings toggle UI
+    const nb = document.getElementById('notif-toggle-btn');
+    const ns = document.getElementById('notif-status');
+    if (nb) { nb.textContent = 'Enabled ✓'; nb.style.borderColor = 'var(--accent)'; nb.style.color = 'var(--accent)'; }
+    if (ns) ns.textContent = "You'll get notified when Mythic AI replies while you're away.";
+    localStorage.removeItem('mythic_notif_dismissed');
+  } else {
+    // User denied — update Settings UI accordingly
+    const nb = document.getElementById('notif-toggle-btn');
+    const ns = document.getElementById('notif-status');
+    if (nb) { nb.textContent = 'Blocked'; nb.style.borderColor = '#ef4444'; nb.style.color = '#ef4444'; }
+    if (ns) ns.textContent = 'Notifications blocked. Allow them in your browser site settings.';
+  }
+});
+
+// ── Dismiss button: hide for this session, re-show after 3 days ──────────────
+if (notifDismissBtn) notifDismissBtn.addEventListener('click', () => {
+  _hideBanner();
+  // Store a timestamp — re-show the banner after 3 days (not permanent dismissal)
+  localStorage.setItem('mythic_notif_dismissed', String(Date.now() + 3 * 24 * 60 * 60 * 1000));
+});
+
+// Clear the dismiss flag if the 3-day window has passed
+(function() {
+  const ts = parseInt(localStorage.getItem('mythic_notif_dismissed') || '0', 10);
+  if (ts && Date.now() > ts) localStorage.removeItem('mythic_notif_dismissed');
+})();
+
+// ── Notify when AI finishes replying and user is in another tab ───────────────
+window._notifyAiReply = function(preview) {
+  if (document.visibilityState === 'visible') return; // user is watching — no need
+  if (Notification.permission !== 'granted') return;
+  const body = preview || 'Your answer is ready — tap to read it.';
+  if (_swReg) {
+    try {
+      _swReg.showNotification('Mythic AI replied 💬', {
+        body, icon: '/icon.png', badge: '/icon.png',
+        tag: 'mythic-ai-reply', renotify: true, vibrate: [200, 100, 200],
+        data: { url: '/' },
+        actions: [{ action: 'open', title: '💬 Open Chat' }, { action: 'dismiss', title: '✕' }],
+      });
+    } catch {}
+  } else {
+    // SW not available — plain Notification as fallback
+    try { new Notification('Mythic AI replied 💬', { body, icon: '/icon.png' }); }
+    catch {}
+  }
+};
 
 // ─── WIRE REACTIONS INTO MSG ACTIONS ─────────────────────────────────────────
 // Patch buildMsgActions to add reaction button
 const _origBuildActions = buildMsgActions;
-function buildMsgActions(row, textNode, role) {
+buildMsgActions = function(row, textNode, role) {
   const actions = _origBuildActions(row, textNode, role);
   if (role === 'ai') {
     const reactBtn = document.createElement('button');
@@ -2284,7 +2982,7 @@ function buildMsgActions(row, textNode, role) {
     actions.appendChild(sp);
   }
   return actions;
-}
+};
 
 function stopSpeaking() { if(window.speechSynthesis) window.speechSynthesis.cancel(); }
 
@@ -2320,9 +3018,7 @@ form.addEventListener('submit', async () => {
         const textEl = lastRow.querySelector('.msg-text,.md-rendered');
         if (textEl && !lastRow.querySelector('.reaction-bar')) {
           addReactionBar(lastRow);
-          const fullText = textEl.textContent || textEl.innerText || '';
-          _addDownloadButtonIfNeeded(lastRow, fullText);
-          setTimeout(() => addFollowupSuggestions(fullText), 300);
+          setTimeout(() => addFollowupSuggestions(textEl.textContent || textEl.innerText || ''), 300);
         }
       }
     }
@@ -2431,24 +3127,31 @@ function loadGhibliPhoto(file) {
 
 // Generate Ghibli image
 ghibliGenerateBtn.addEventListener('click', async () => {
-  if (!ghibliBase64) {
-    ghibliError.textContent = 'Please upload your photo first!';
-    ghibliError.style.display = 'block'; return;
-  }
+  const extra = ghibliExtraInput.value.trim();
+  const prompt = `${ghibliSelectedStyle}, beautiful detailed portrait of a person, ${extra ? extra + ', ' : ''}masterpiece, best quality, highly detailed, cinematic lighting, soft colors, dreamy atmosphere`;
+
   ghibliError.style.display = 'none';
   ghibliResultWrap.style.display = 'none';
   ghibliLoading.style.display = 'block';
   ghibliGenerateBtn.disabled = true;
 
-  const extra = ghibliExtraInput.value.trim();
-  const prompt = `${ghibliSelectedStyle}, beautiful detailed portrait of a person, ${extra ? extra + ', ' : ''}masterpiece, best quality, highly detailed, cinematic lighting, soft colors, dreamy atmosphere`;
+  // If a photo is uploaded, we pass it to the backend (NanoBanana can do real
+  // image-to-image; Pollinations will ignore it and generate from the prompt).
+  const bodyPayload = { prompt };
+  if (ghibliBase64) {
+    bodyPayload.imageBase64 = ghibliBase64;
+    bodyPayload.mimeType = ghibliMimeType;
+  }
 
   try {
     const r = await fetch('/api/generate-image', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ prompt, imageBase64: ghibliBase64, mimeType: ghibliMimeType })
+      body: JSON.stringify(bodyPayload)
     });
-    const d = await r.json();
+    const text = await r.text();
+    let d;
+    try { d = JSON.parse(text); }
+    catch { d = {error: `Server error (${r.status}). Please try again in a moment.`}; }
     ghibliLoading.style.display = 'none';
     if (d.image) {
       ghibliResult.src = 'data:image/png;base64,' + d.image;
@@ -2474,7 +3177,7 @@ ghibliGenerateBtn.addEventListener('click', async () => {
     }
   } catch (e) {
     ghibliLoading.style.display = 'none';
-    ghibliError.textContent = 'Error: ' + e.message;
+    ghibliError.textContent = 'Network error: ' + e.message;
     ghibliError.style.display = 'block';
   } finally { ghibliGenerateBtn.disabled = false; }
 });
@@ -2499,18 +3202,33 @@ const imgLoadingEl    = document.getElementById('img-loading');
 const imgErrorEl      = document.getElementById('img-error');
 const imgGenerateBtn2 = document.getElementById('img-generate-btn');
 const imgCloseBtn2    = document.getElementById('img-close-btn');
+const imgDownloadBtn2 = document.getElementById('img-download-btn');
+const imgCopyBtn2     = document.getElementById('img-copy-btn');
+const imgFullscreenBtn2 = document.getElementById('img-fullscreen-btn');
+const imgViewerOverlay = document.getElementById('img-viewer-overlay');
+const imgViewerImg     = document.getElementById('img-viewer-img');
+let lastGeneratedImageB64 = null;
 
 if (imgGenerateBtn2) imgGenerateBtn2.addEventListener('click', async () => {
   const prompt = imgPromptEl.value.trim();
   const style = imgStyleEl ? imgStyleEl.value : '';
-  if (!prompt) return;
+  if (!prompt) { imgErrorEl.textContent = 'Please enter a description first.'; imgErrorEl.style.display = 'block'; return; }
   imgResultEl.style.display = 'none'; imgErrorEl.style.display = 'none';
   imgLoadingEl.style.display = 'block'; imgGenerateBtn2.disabled = true;
   try {
-    const r = await fetch('/api/generate-image', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,style})});
-    const d = await r.json();
+    const r = await fetch('/api/generate-image', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({prompt, style})
+    });
+    // Always parse response text first — avoids crashing on HTML error pages
+    const text = await r.text();
+    let d;
+    try { d = JSON.parse(text); }
+    catch { d = {error: `Server error (${r.status}). Please try again in a moment.`}; }
     imgLoadingEl.style.display = 'none';
     if (d.image) {
+      lastGeneratedImageB64 = d.image;
       imgOutputEl.src = 'data:image/png;base64,' + d.image;
       imgResultEl.style.display = 'block';
       clearEmptyState();
@@ -2523,13 +3241,44 @@ if (imgGenerateBtn2) imgGenerateBtn2.addEventListener('click', async () => {
       img.style.cssText = 'max-width:100%;border-radius:10px;display:block;';
       bubble.appendChild(cap); bubble.appendChild(img); row.appendChild(bubble);
       messagesEl.appendChild(row); scrollToBottom();
-    } else { imgErrorEl.textContent = d.error || 'Failed.'; imgErrorEl.style.display='block'; }
-  } catch(e) { imgLoadingEl.style.display='none'; imgErrorEl.textContent='Error: '+e.message; imgErrorEl.style.display='block'; }
+    } else {
+      imgErrorEl.textContent = d.error || 'Image generation failed. Try again.';
+      imgErrorEl.style.display = 'block';
+    }
+  } catch(e) {
+    imgLoadingEl.style.display = 'none';
+    imgErrorEl.textContent = 'Connection error: ' + e.message + '. Check your internet and try again.';
+    imgErrorEl.style.display = 'block';
+  }
   finally { imgGenerateBtn2.disabled = false; }
 });
 if (imgCloseBtn2) imgCloseBtn2.addEventListener('click', () => imgModalOverlay.style.display='none');
 if (imgModalOverlay) imgModalOverlay.addEventListener('click', e => { if(e.target===imgModalOverlay) imgModalOverlay.style.display='none'; });
 if (imgPromptEl) imgPromptEl.addEventListener('keydown', e => { if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();imgGenerateBtn2.click();} });
+if (imgDownloadBtn2) imgDownloadBtn2.addEventListener('click', () => {
+  if (!lastGeneratedImageB64) return;
+  const a = document.createElement('a');
+  a.href = 'data:image/png;base64,' + lastGeneratedImageB64;
+  a.download = 'mythic-ai-image-' + Date.now() + '.png';
+  document.body.appendChild(a); a.click(); a.remove();
+});
+if (imgCopyBtn2) imgCopyBtn2.addEventListener('click', async () => {
+  if (!lastGeneratedImageB64) return;
+  try {
+    const res = await fetch('data:image/png;base64,' + lastGeneratedImageB64);
+    const blob = await res.blob();
+    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+    const orig = imgCopyBtn2.textContent;
+    imgCopyBtn2.textContent = '✓ Copied';
+    setTimeout(() => { imgCopyBtn2.textContent = orig; }, 1200);
+  } catch { imgErrorEl.textContent = 'Copy not supported in this browser.'; imgErrorEl.style.display = 'block'; }
+});
+if (imgFullscreenBtn2) imgFullscreenBtn2.addEventListener('click', () => {
+  if (!lastGeneratedImageB64) return;
+  imgViewerImg.src = 'data:image/png;base64,' + lastGeneratedImageB64;
+  imgViewerOverlay.style.display = 'flex';
+});
+if (imgViewerOverlay) imgViewerOverlay.addEventListener('click', () => imgViewerOverlay.style.display = 'none');
 
 // ─── WEATHER MODAL JS ────────────────────────────────────────────────────────
 const weatherModal2    = document.getElementById('weather-modal-overlay');
@@ -2542,28 +3291,108 @@ const weatherSearchBtn2= document.getElementById('weather-search-btn');
 const weatherCloseBtn2 = document.getElementById('weather-close-btn');
 const weatherLocBtn2   = document.getElementById('weather-location-btn');
 
+function getRecentWeatherSearches() {
+  try { return JSON.parse(localStorage.getItem('mythic_recent_weather') || '[]'); } catch { return []; }
+}
+function addRecentWeatherSearch(name) {
+  let list = getRecentWeatherSearches().filter(x => x.toLowerCase() !== name.toLowerCase());
+  list.unshift(name);
+  list = list.slice(0, 6);
+  localStorage.setItem('mythic_recent_weather', JSON.stringify(list));
+}
+function renderRecentSearches() {
+  const recents = getRecentWeatherSearches();
+  const wrap = document.getElementById('weather-recents');
+  if (!recents.length) { if (wrap) wrap.remove(); return; }
+  let el = wrap;
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'weather-recents';
+    el.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;';
+    weatherCityEl2.parentNode.insertAdjacentElement('afterend', el);
+  }
+  el.innerHTML = '';
+  recents.forEach(name => {
+    const chip = document.createElement('button');
+    chip.textContent = name;
+    chip.style.cssText = 'background:var(--bg);border:1px solid var(--border);color:var(--muted);border-radius:20px;padding:5px 12px;font-size:12px;cursor:pointer;font-family:inherit;';
+    chip.addEventListener('click', () => fetchWeatherModal({ location: name }));
+    el.appendChild(chip);
+  });
+}
+
 function renderWeather(w) {
+  const hourly = (w.hourly || []).map(h => `
+    <div style="flex:0 0 auto;text-align:center;background:var(--bg);border-radius:10px;padding:8px 12px;min-width:64px;">
+      <div style="font-size:11px;color:var(--muted);">${h.time}</div>
+      <div style="font-size:20px;margin:4px 0;">${h.icon}</div>
+      <div style="font-size:13px;font-weight:700;">${h.temp}°</div>
+    </div>`).join('');
+
+  const daily = (w.daily || []).map(d => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 4px;border-bottom:1px solid var(--border);">
+      <div style="flex:1;font-size:13px;">${d.day}</div>
+      <div style="font-size:18px;">${d.icon}</div>
+      <div style="flex:1;text-align:right;font-size:13px;"><span style="font-weight:700;">${d.max}°</span> <span style="color:var(--muted);">${d.min}°</span></div>
+    </div>`).join('');
+
   weatherContentEl2.innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
-      <div style="font-size:48px;">${w.icon}</div>
-      <div><div style="font-size:18px;font-weight:700;">${w.location}</div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;">
+      <div style="font-size:52px;">${w.icon}</div>
+      <div><div style="font-size:19px;font-weight:700;">${w.location}</div>
       <div style="font-size:13px;color:var(--muted);">${w.condition}</div></div>
+      <div style="margin-left:auto;font-size:32px;font-weight:700;">${w.temp}°C</div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-      <div style="background:var(--bg);border-radius:8px;padding:10px;">
-        <div style="font-size:11px;color:var(--muted);">TEMPERATURE</div>
-        <div style="font-size:22px;font-weight:700;">${w.temp}°C</div>
-        <div style="font-size:11px;color:var(--muted);">Feels like ${w.feels_like}°C</div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">FEELS LIKE</div>
+        <div style="font-size:16px;font-weight:700;">${w.feels_like}°C</div>
       </div>
-      <div style="background:var(--bg);border-radius:8px;padding:10px;">
-        <div style="font-size:11px;color:var(--muted);">HUMIDITY</div>
-        <div style="font-size:22px;font-weight:700;">${w.humidity}%</div>
-        <div style="font-size:11px;color:var(--muted);">Wind ${w.wind_speed} km/h</div>
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">HUMIDITY</div>
+        <div style="font-size:16px;font-weight:700;">${w.humidity}%</div>
       </div>
-    </div>`;
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">WIND</div>
+        <div style="font-size:16px;font-weight:700;">${w.wind_speed} km/h</div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">UV INDEX</div>
+        <div style="font-size:16px;font-weight:700;">${w.uv ?? '–'}</div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">PRESSURE</div>
+        <div style="font-size:16px;font-weight:700;">${w.pressure ?? '–'} hPa</div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">VISIBILITY</div>
+        <div style="font-size:16px;font-weight:700;">${w.visibility ?? '–'} km</div>
+      </div>
+      ${w.aqi != null ? `
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">AIR QUALITY</div>
+        <div style="font-size:16px;font-weight:700;">${w.aqi}</div>
+      </div>` : ''}
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">SUNRISE</div>
+        <div style="font-size:14px;font-weight:700;">${w.sunrise ?? '–'}</div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">SUNSET</div>
+        <div style="font-size:14px;font-weight:700;">${w.sunset ?? '–'}</div>
+      </div>
+    </div>
+
+    ${hourly ? `<div style="font-size:12px;color:var(--muted);margin-bottom:6px;">HOURLY FORECAST</div>
+    <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:6px;margin-bottom:12px;">${hourly}</div>` : ''}
+
+    ${daily ? `<div style="font-size:12px;color:var(--muted);margin-bottom:6px;">7-DAY FORECAST</div>
+    <div style="margin-bottom:6px;">${daily}</div>` : ''}
+  `;
   weatherResultEl2.style.display = 'block';
-  input.value = `${w.icon} Weather in ${w.location}: ${w.temp}°C, ${w.condition}. Humidity: ${w.humidity}%, Wind: ${w.wind_speed} km/h.`;
-  autoResize();
+  addRecentWeatherSearch(w.location);
+  renderRecentSearches();
 }
 
 async function fetchWeatherModal(payload) {
@@ -2573,8 +3402,8 @@ async function fetchWeatherModal(payload) {
     const r = await fetch('/api/weather',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const d = await r.json(); weatherLoadingEl2.style.display='none';
     if(d.weather) renderWeather(d.weather);
-    else { weatherErrorEl2.textContent=d.error||'Could not fetch weather.'; weatherErrorEl2.style.display='block'; }
-  } catch(e) { weatherLoadingEl2.style.display='none'; weatherErrorEl2.textContent='Error: '+e.message; weatherErrorEl2.style.display='block'; }
+    else { weatherErrorEl2.textContent=d.error||'Could not find that location. Try a different search.'; weatherErrorEl2.style.display='block'; }
+  } catch(e) { weatherLoadingEl2.style.display='none'; weatherErrorEl2.textContent='Network error: '+e.message; weatherErrorEl2.style.display='block'; }
   finally { weatherSearchBtn2.disabled=false; }
 }
 if (weatherSearchBtn2) weatherSearchBtn2.addEventListener('click', () => { const loc=weatherCityEl2.value.trim(); if(loc) fetchWeatherModal({location:loc}); });
@@ -2582,13 +3411,13 @@ if (weatherCityEl2) weatherCityEl2.addEventListener('keydown', e => { if(e.key==
 if (weatherCloseBtn2) weatherCloseBtn2.addEventListener('click', () => weatherModal2.style.display='none');
 if (weatherModal2) weatherModal2.addEventListener('click', e => { if(e.target===weatherModal2) weatherModal2.style.display='none'; });
 if (weatherLocBtn2) weatherLocBtn2.addEventListener('click', () => {
-  if (!navigator.geolocation) { alert('Geolocation not supported'); return; }
+  if (!navigator.geolocation) { weatherErrorEl2.textContent = 'Geolocation is not supported in this browser.'; weatherErrorEl2.style.display = 'block'; return; }
   navigator.geolocation.getCurrentPosition(
     pos => fetchWeatherModal({lat:pos.coords.latitude,lon:pos.coords.longitude}),
-    err => alert('Location error: '+err.message)
+    err => { weatherErrorEl2.textContent = 'Location error: ' + err.message; weatherErrorEl2.style.display = 'block'; }
   );
 });
-
+renderRecentSearches();
 </script>
 </body>
 </html>
@@ -2596,226 +3425,288 @@ if (weatherLocBtn2) weatherLocBtn2.addEventListener('click', () => {
 
 @app.route("/sw.js")
 def service_worker_js():
+    """Real service worker served from a proper URL so push events work.
+    Blob-URL service workers cannot receive push events — this route is
+    required for Web Push to function."""
     sw = r"""
 const CACHE = 'mythic-ai-v3';
-self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(['/']))); self.skipWaiting(); });
-self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))); self.clients.claim(); });
+
+self.addEventListener('install', e => {
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(['/'])));
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', e => {
+  e.waitUntil(
+    caches.keys().then(keys =>
+      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+    )
+  );
+  self.clients.claim();
+});
+
 self.addEventListener('fetch', e => {
-  if (e.request.method !== 'GET' || e.request.url.includes('/api/')) return;
-  e.respondWith(fetch(e.request).then(resp => { const clone = resp.clone(); caches.open(CACHE).then(c => c.put(e.request, clone)); return resp; }).catch(() => caches.match(e.request)));
+  if (e.request.method !== 'GET') return;
+  if (e.request.url.includes('/api/')) return;
+  e.respondWith(
+    fetch(e.request)
+      .then(resp => {
+        const clone = resp.clone();
+        caches.open(CACHE).then(c => c.put(e.request, clone));
+        return resp;
+      })
+      .catch(() => caches.match(e.request))
+  );
 });
+
+// ── Push Notifications ────────────────────────────────────────────────────────
 self.addEventListener('push', e => {
-  let data = { title: 'Mythic AI', body: 'New message', icon: '/icon.png', url: '/' };
-  try { if (e.data) data = { ...data, ...e.data.json() }; } catch {}
-  e.waitUntil(self.registration.showNotification(data.title, { body: data.body, icon: data.icon, badge: '/icon.png', tag: 'mythic-reply', renotify: true, vibrate: [200,100,200], data: { url: data.url }, actions: [{ action:'open', title:'💬 Open Chat' }, { action:'dismiss', title:'✕' }] }));
+  let data = { title: 'Mythic AI', body: 'You have a new message', icon: '/icon.png', url: '/' };
+  try {
+    if (e.data) {
+      const parsed = e.data.json();
+      data = { ...data, ...parsed };
+    }
+  } catch {}
+
+  e.waitUntil(
+    self.registration.showNotification(data.title, {
+      body:    data.body,
+      icon:    data.icon,
+      badge:   '/icon.png',
+      tag:     'mythic-ai-reply',
+      renotify: true,
+      vibrate: [200, 100, 200],
+      data:    { url: data.url || '/' },
+      actions: [
+        { action: 'open',    title: '💬 Open Chat' },
+        { action: 'dismiss', title: '✕ Dismiss'   },
+      ],
+    })
+  );
 });
+
+// Clicking the notification (or the "Open Chat" action) focuses/opens the app
 self.addEventListener('notificationclick', e => {
-  e.notification.close(); if (e.action === 'dismiss') return;
+  e.notification.close();
+  if (e.action === 'dismiss') return;
   const target = (e.notification.data && e.notification.data.url) || '/';
-  e.waitUntil(clients.matchAll({ type:'window', includeUncontrolled:true }).then(list => { for (const c of list) { if (c.url.includes(self.location.origin) && 'focus' in c) { c.navigate(target); return c.focus(); } } if (clients.openWindow) return clients.openWindow(target); }));
+  e.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+      for (const c of list) {
+        if (c.url.includes(self.location.origin) && 'focus' in c) {
+          c.navigate(target);
+          return c.focus();
+        }
+      }
+      if (clients.openWindow) return clients.openWindow(target);
+    })
+  );
 });
 """
-    return Response(sw, mimetype="application/javascript", headers={"Service-Worker-Allowed": "/"})
+    return Response(sw, mimetype="application/javascript",
+                    headers={"Service-Worker-Allowed": "/"})
 
 
+# ── PWA Manifest ─────────────────────────────────────────────────────────────
 @app.route("/manifest.json")
 def pwa_manifest():
-    m = {
-        "name": "\u13c6\u1eff\u1d1b\u043d\u1d04 \u1d00\u026a",
+    manifest = {
+        "name": "Mythic AI",
         "short_name": "Mythic AI",
         "description": "Smart AI assistant by Aarav Singh",
-        "start_url": "/", "display": "standalone",
-        "background_color": "#1a1a1a", "theme_color": "#10a37f",
-        "orientation": "any", "scope": "/", "lang": "en",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#1a1a1a",
+        "theme_color": "#10a37f",
+        "orientation": "any",
+        "scope": "/",
+        "lang": "en",
         "categories": ["productivity", "utilities"],
         "icons": [
-            {"src": "/icon.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
             {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
         ],
-        "shortcuts": [{"name": "New Chat", "url": "/"}],
+        "shortcuts": [
+            {"name": "New Chat", "url": "/", "description": "Start a new chat"},
+        ],
     }
-    return Response(json.dumps(m), mimetype="application/manifest+json",
-                    headers={"Cache-Control": "public, max-age=86400"})
+    return Response(
+        json.dumps(manifest),
+        mimetype="application/manifest+json",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+# Real PNG bytes for the app icon (192×192 and 512×512).
+# Browsers silently reject install icons that don't match their declared type
+# so these MUST be real PNG bytes, not SVG served at a .png URL.
+_ICON_192_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAAFT0lEQVR4nO3da3LURgCF0baLBZD9"
+    "hbUQ1kL2F3YAPwLUYM/YenSrH/ecn1TK1kj3G8mmmDyVQXz8+vl772PgOt8+fXnqfQyllNLtIAye"
+    "W72CuPSbGj1bXBlD829k9JzROoZmX9zwqalVCNW/qOHTUu0Qnmt+MeOntdobq1KT4dNDjbvB6TuA"
+    "8dNLje2dCsD46e3sBg/dQgyfER15JNp9BzB+RnVkm7sCMH5Gt3ejmwMwfmaxZ6tV/x4AZrMpAO/+"
+    "zGbrZt8NwPiZ1ZbtvhmA8TO79zbsZwCiPQzAuz+reGvLdwMwflbzaNMegYj2KgDv/qzq3rbdAYj2"
+    "RwDe/Vndy427AxBNAET7HYDHH1Lcbt0dgGgCINpzKR5/yPNr8+4ARBMA0QRAtCfP/yRzByCaAIgm"
+    "AKIJgGgCIJoAiCYAogmAaAIgmgCIJgCiCYBoAiCaAIgmAKIJgGgCIJoAiCYAogmAaAIg2hQB+GjB"
+    "vlY+/1MEAK1ME4DP1uxr1fM/TQCl+GzN3lY8/08fv37+3vsgjvDZmn2tcv6nDQBqmOoRCGoTANEE"
+    "QDQBEE0ARBMA0QRANAEQTQBEEwDRBEA0ARBNAEQTANEEQLTnb5++PPU+COjh26cvT+4ARBMA0QRI"
+    "tOdS/n8W6n0gcKVfm3cHIJoAiPY7AI9BpLjdujsA0QRAtD8C8BjE6l5u3B2AaK8CcBdgVfe27Q5A"
+    "tLsBuAuwmkebfngHEAGrjGvLHoGI9mYA7gLM7r0Nv3sHEAGz2rLdTY9AImA2WzfrZwCibQ7AXQB4"
+    "ZNUMKluAqk8cANxTOcPKfUdRebIA4FnVfhdQ6gZA+AMwVbWMK1MAqk0MAOytUtaVKACVJgQAjlQl"
+    "85YXgCoTAQBnqZB9SwtAhQkAgBVWZ+CyArD6wQFgtZVZuKQACH8A+GJVJp5eAIQ/AHxrRTaeWgCE"
+    "PwDVdMymVgWg4wQDkKFbRrW4sug2qQBk6/CVQPkbAOEPQDcdsqt0AegwgQBwS/UMK1sAqk8cANxT"
+    "OcPKfUdRebIA4FnVfhdQ6gZA+AMwVbWMK1MAqk0MAOytUtaVKACVJgQAjlQl85YXgCoTAQBnqZB9"
+    "SwtAhQkAgBVWZ+CyArD6wQFgtZVZuKQACH8A+GJVJp5eAIQ/AHxrRTaeWgCEPwDVdMymVgWg4wQD"
+    "kKFbRrW4sug2qQBk6/CVQPkbAOEPQDcdsqt0AegwgQBwS/UMK1sAqk8cANxTOcPKfUdRebIA4FnV"
+    "fhdQ6gZA+AMwVbWMK1MAqk0MAOytUtaVKACVJgQAjlQl85YXgCoTAQBnqZB9SwtAhQkAgBVWZ+Cy"
+    "ArD6wQFgtZVZuKQACH8A+GJVJp5eAIQ/AHxrRTaeWgCEPwDVdMymVgWg4wQDkKFbRrW4sug2qQBk"
+    "6/CVQPkbAOEPQDcdsqt0AegwgQBwS/UMK1sAqk8cANxTOcPKfUdRebIA4FnVfhdQ6gZA+AMwVbWM"
+    "K1MAqk0MAOytUtaVKACVJgQAjlQl85YXgCoTAQBnqZB9SwtAhQkAgBVWZ+CyArD6wQFgtZVZuKQA"
+    "CH8A+GJVJp5eAIQ/AHxrRTaeWgCEPwDVdMymVgWg4wQDkKFbRrW4sug2qQBk6/CVQPkbAOEPQDcd"
+    "sqt0AegwgQBwS/UMK1sAqk8cANxTOcPKfUdRebIA4Fn/A8lRDEPKdjLGAAAAAElFTkSuQmCC"
+)
+
+_ICON_512_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAABhGlDQ1BJQ0MgcHJvZmlsZQAAKJF9"
+    "kT1Iw0AcxV9TpSIVBzuIOGSoThZERRy1CkWoEGqFVh1MLv2CJg1Jiouj4Fpw8GOx6uDirKuDqyAI"
+    "fiA4OzgpuiiJ/0sKLWI8OO7Hu3uPu3cA0agyzerYBDTdMtJJiefyq1zoFS8IIIhhFDGJmcaspCzC"
+    "c3zdw8fXuxjP8j735+hTCiYDPBJxgummRbxBPLNpGZz3icNklVSIz4knDbogceXysttvnEsLCzwz"
+    "bKbTc8RhYqnYwWoHs6mpEkeJI6qmQL9QdlnlvMVZK9dZ65P9haGCvrLMdZpDSGIRSxAhQUYNZZRh"
+    "IUarRoqJNO0nPfxBx18il0yuMhg5FlCBBtn+wf/gd7dmIT0lkMI+oOvFtj9GgN1doN6w7e9j264d"
+    "AN5n4Epp++tNYOZT9GpbixwBfdvAxXVbk/eAyx1g6EmXDMmRvDSFQgF4P6NvKgD9t+ieNWdr7uP0"
+    "AchSV8s3wMEhMFqk7LXPu3s7e/v3TLO/HwqpcrwGijFaAAAABmJLR0QA/wD/AP+gvaeTAAAACXBI"
+    "WXMAABcRAAAXEQHKJvM/AAAAB3RJTUUH6AcEECgoJXJsFgAAABl0RVh0Q29tbWVudABDcmVhdGVk"
+    "IHdpdGggR0lNUFeBDhcAAAQ9SURBVHja7cExAQAAAMKg9U9tCU+gAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAOA3ABMAAO2xbcQAAAAASUVORK5CYII="
+)
 
 
 def _make_mythic_icon_png(size=192):
+    """Generate a real PNG icon for Mythic AI programmatically using only stdlib.
+    Draws the teal rounded-rect background + white M-shape — no Pillow needed."""
     import struct, zlib
+
     W = H = size
+    # RGBA pixel buffer
     img = bytearray(W * H * 4)
-    def sp(x, y, r, g, b, a=255):
+
+    def set_pixel(x, y, r, g, b, a=255):
         if 0 <= x < W and 0 <= y < H:
-            i = (y*W+x)*4; img[i]=r; img[i+1]=g; img[i+2]=b; img[i+3]=a
-    def fr(x0, y0, x1, y1, r, g, b):
+            i = (y * W + x) * 4
+            img[i], img[i+1], img[i+2], img[i+3] = r, g, b, a
+
+    def fill_rect(x0, y0, x1, y1, r, g, b, a=255):
         for y in range(max(0,y0), min(H,y1)):
-            for x in range(max(0,x0), min(W,x1)): sp(x, y, r, g, b)
-    def caa(cx, cy, rad, r, g, b):
-        for y in range(cy-rad-1, cy+rad+2):
-            for x in range(cx-rad-1, cx+rad+2):
-                d = ((x-cx)**2+(y-cy)**2)**0.5; a = max(0, min(255, int((rad+0.5-d)*255)))
-                if a > 0 and 0 <= x < W and 0 <= y < H:
-                    i=(y*W+x)*4; bl=a/255; img[i]=int(img[i]*(1-bl)+r*bl); img[i+1]=int(img[i+1]*(1-bl)+g*bl); img[i+2]=int(img[i+2]*(1-bl)+b*bl); img[i+3]=min(255,img[i+3]+a)
-    cr = size//4; fr(cr,0,W-cr,H,16,163,127); fr(0,cr,W,H-cr,16,163,127)
-    for cx,cy in [(cr,cr),(W-cr,cr),(cr,H-cr),(W-cr,H-cr)]: caa(cx,cy,cr,16,163,127)
-    s=size/40; pts=[(int(10*s),int(28*s)),(int(10*s),int(12*s)),(int(20*s),int(22*s)),(int(30*s),int(12*s)),(int(30*s),int(28*s))]; lw=max(2,size//14)
-    def dl(x0,y0,x1,y1):
-        dx,dy=x1-x0,y1-y0; steps=max(abs(dx),abs(dy),1)
+            for x in range(max(0,x0), min(W,x1)):
+                set_pixel(x, y, r, g, b, a)
+
+    def circle_aa(cx, cy, radius, r, g, b):
+        for y in range(cy-radius-1, cy+radius+2):
+            for x in range(cx-radius-1, cx+radius+2):
+                d = ((x-cx)**2 + (y-cy)**2)**0.5
+                alpha = max(0, min(255, int((radius+0.5-d)*255)))
+                if alpha > 0 and 0 <= x < W and 0 <= y < H:
+                    i = (y*W+x)*4
+                    existing_a = img[i+3]
+                    blend = alpha / 255
+                    img[i]   = int(img[i]   * (1-blend) + r * blend)
+                    img[i+1] = int(img[i+1] * (1-blend) + g * blend)
+                    img[i+2] = int(img[i+2] * (1-blend) + b * blend)
+                    img[i+3] = min(255, existing_a + alpha)
+
+    # Draw rounded rectangle background (teal #10a37f = 16,163,127)
+    cr = size // 4   # corner radius
+    cx, cy = W // 2, H // 2
+    fill_rect(cr, 0, W-cr, H, 16, 163, 127)
+    fill_rect(0, cr, W, H-cr, 16, 163, 127)
+    circle_aa(cr,   cr,   cr, 16, 163, 127)
+    circle_aa(W-cr, cr,   cr, 16, 163, 127)
+    circle_aa(cr,   H-cr, cr, 16, 163, 127)
+    circle_aa(W-cr, H-cr, cr, 16, 163, 127)
+
+    # Draw white M-shape (5 points: bottom-left, top-left, mid-center,
+    # top-right, bottom-right) as thick lines
+    s = size / 40
+    pts = [
+        (int(10*s), int(28*s)),
+        (int(10*s), int(12*s)),
+        (int(20*s), int(22*s)),
+        (int(30*s), int(12*s)),
+        (int(30*s), int(28*s)),
+    ]
+    lw = max(2, size // 14)
+
+    def draw_line(x0, y0, x1, y1):
+        dx, dy = x1-x0, y1-y0
+        steps = max(abs(dx), abs(dy), 1)
         for i in range(steps+1):
-            x=int(x0+dx*i/steps); y=int(y0+dy*i/steps)
-            for ox in range(-lw//2,lw//2+1):
-                for oy in range(-lw//2,lw//2+1): sp(x+ox,y+oy,255,255,255)
-    for i in range(len(pts)-1): dl(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1])
-    def chunk(name, data): crc=zlib.crc32(name+data)&0xffffffff; return struct.pack('>I',len(data))+name+data+struct.pack('>I',crc)
-    raw=b''.join(b'\x00'+bytes(img[y*W*4:(y+1)*W*4]) for y in range(H))
-    ihdr=struct.pack('>II',W,H)+bytes([8,6,0,0,0]); compressed=zlib.compress(raw,9)
-    return b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',ihdr)+chunk(b'IDAT',compressed)+chunk(b'IEND',b'')
+            x = int(x0 + dx*i/steps)
+            y = int(y0 + dy*i/steps)
+            for ox in range(-lw//2, lw//2+1):
+                for oy in range(-lw//2, lw//2+1):
+                    set_pixel(x+ox, y+oy, 255, 255, 255)
+
+    for i in range(len(pts)-1):
+        draw_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1])
+
+    # Pack as PNG
+    def png_chunk(name, data):
+        crc = zlib.crc32(name + data) & 0xffffffff
+        return struct.pack('>I', len(data)) + name + data + struct.pack('>I', crc)
+
+    raw_rows = b''
+    for y in range(H):
+        raw_rows += b'\x00'  # filter type None
+        raw_rows += bytes(img[y*W*4:(y+1)*W*4])
+
+    ihdr = struct.pack('>IIBBBBB', W, H, 8, 2, 0, 0, 0)  # 8-bit RGB... need RGBA
+    # Actually use color type 6 (RGBA)
+    ihdr = struct.pack('>II', W, H) + bytes([8, 6, 0, 0, 0])
+    compressed = zlib.compress(raw_rows, 9)
+
+    png  = b'\x89PNG\r\n\x1a\n'
+    png += png_chunk(b'IHDR', ihdr)
+    png += png_chunk(b'IDAT', compressed)
+    png += png_chunk(b'IEND', b'')
+    return png
 
 
-_ICON_CACHE = {}
+_ICON_192_PNG = None
+_ICON_512_PNG = None
+
+def _get_icon(size):
+    global _ICON_192_PNG, _ICON_512_PNG
+    if size == 192:
+        if _ICON_192_PNG is None:
+            _ICON_192_PNG = _make_mythic_icon_png(192)
+        return _ICON_192_PNG
+    else:
+        if _ICON_512_PNG is None:
+            _ICON_512_PNG = _make_mythic_icon_png(512)
+        return _ICON_512_PNG
+
 
 @app.route("/icon.png")
 def pwa_icon_192():
-    if 192 not in _ICON_CACHE: _ICON_CACHE[192] = _make_mythic_icon_png(192)
-    return Response(_ICON_CACHE[192], mimetype="image/png", headers={"Cache-Control": "public, max-age=604800"})
+    return Response(_get_icon(192), mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
 
 @app.route("/icon-512.png")
 def pwa_icon_512():
-    if 512 not in _ICON_CACHE: _ICON_CACHE[512] = _make_mythic_icon_png(512)
-    return Response(_ICON_CACHE[512], mimetype="image/png", headers={"Cache-Control": "public, max-age=604800"})
+    return Response(_get_icon(512), mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
 
 @app.route("/favicon.ico")
 def favicon():
-    if 192 not in _ICON_CACHE: _ICON_CACHE[192] = _make_mythic_icon_png(192)
-    return Response(_ICON_CACHE[192], mimetype="image/png", headers={"Cache-Control": "public, max-age=604800"})
-
-
-@app.route("/api/generate-file", methods=["POST"])
-@login_required
-def api_generate_file():
-    """Generate a downloadable file from text content.
-    Supports: pdf, docx/word, txt, md, csv, json, html, js, py, and any other text format.
-    Returns base64-encoded file bytes + filename + mimeType."""
-    try:
-        data = request.get_json(force=True) or {}
-        content = (data.get("content") or "").strip()
-        fmt = (data.get("format") or "pdf").strip().lower()
-        title = (data.get("title") or "Mythic AI Document").strip()[:100]
-        if not content:
-            return jsonify({"error": "content is required"}), 400
-
-        safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip().replace(" ", "-") or "Mythic-AI"
-
-        # Text / code formats — direct encode, no library needed
-        TEXT_FORMATS = {
-            "txt": ("text/plain", ".txt"),
-            "text": ("text/plain", ".txt"),
-            "md": ("text/markdown", ".md"),
-            "markdown": ("text/markdown", ".md"),
-            "csv": ("text/csv", ".csv"),
-            "json": ("application/json", ".json"),
-            "html": ("text/html", ".html"),
-            "htm": ("text/html", ".html"),
-            "css": ("text/css", ".css"),
-            "js": ("text/javascript", ".js"),
-            "javascript": ("text/javascript", ".js"),
-            "py": ("text/x-python", ".py"),
-            "python": ("text/x-python", ".py"),
-            "ts": ("text/typescript", ".ts"),
-            "typescript": ("text/typescript", ".ts"),
-            "sql": ("text/plain", ".sql"),
-            "yaml": ("text/yaml", ".yaml"),
-            "xml": ("text/xml", ".xml"),
-            "sh": ("text/x-sh", ".sh"),
-            "bash": ("text/x-sh", ".sh"),
-            "r": ("text/plain", ".r"),
-            "cpp": ("text/x-c++src", ".cpp"),
-            "c": ("text/x-csrc", ".c"),
-            "java": ("text/x-java", ".java"),
-            "rs": ("text/x-rustsrc", ".rs"),
-            "rust": ("text/x-rustsrc", ".rs"),
-            "php": ("text/x-php", ".php"),
-            "rb": ("text/x-ruby", ".rb"),
-            "ruby": ("text/x-ruby", ".rb"),
-            "go": ("text/x-go", ".go"),
-            "swift": ("text/x-swift", ".swift"),
-            "kt": ("text/x-kotlin", ".kt"),
-            "kotlin": ("text/x-kotlin", ".kt"),
-        }
-        if fmt in TEXT_FORMATS:
-            mime, ext = TEXT_FORMATS[fmt]
-            return jsonify({
-                "file": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
-                "filename": safe_title + ext,
-                "mimeType": mime,
-            })
-
-        # Word (.docx)
-        if fmt in ("docx", "word", "doc"):
-            try:
-                import docx as _docx, io as _io
-                doc = _docx.Document()
-                if title: doc.add_heading(title, level=1)
-                for para in content.split("\n"): doc.add_paragraph(para)
-                buf = _io.BytesIO(); doc.save(buf)
-                return jsonify({
-                    "file": base64.b64encode(buf.getvalue()).decode("utf-8"),
-                    "filename": safe_title + ".docx",
-                    "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                })
-            except ImportError:
-                # python-docx not installed — fall back to .txt
-                return jsonify({
-                    "file": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
-                    "filename": safe_title + ".txt",
-                    "mimeType": "text/plain",
-                    "note": "Word generation requires `pip install python-docx` on the server. Saved as .txt instead.",
-                })
-
-        # PDF — stdlib only (no Pillow/reportlab needed)
-        import textwrap as _tw, struct as _struct, zlib as _zlib
-        PAGE_W, PAGE_H = 612, 792; MARGIN = 56; FS = 11; LEAD = 15
-        max_chars = max(40, int((PAGE_W - 2*MARGIN)/(FS*0.5)))
-        max_lines = int((PAGE_H - 2*MARGIN - 40)/LEAD)
-
-        def esc(s): return s.replace("\\","\\\\").replace("(","\\(").replace(")","\\)")
-        lines = []
-        if title: lines += [("t", title), ("b","")]
-        for para in content.split("\n"):
-            para = para.rstrip()
-            if not para: lines.append(("b",""))
-            else: lines += [("x", w) for w in (_tw.wrap(para, max_chars) or [""])]
-
-        pages = [lines[i:i+max_lines] for i in range(0, max(len(lines),1), max_lines)] or [[]]
-        objs = []; 
-        def emit(d): objs.append(d); return len(objs)
-        cat_n = emit(b"ph"); pgs_n = emit(b"ph"); fnt_n = emit(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-        pnums = []
-        for pg in pages:
-            sp = [b"BT", f"/F1 {FS} Tf".encode(), f"{LEAD} TL".encode(), f"{MARGIN} {PAGE_H-MARGIN} Td".encode()]
-            first = True
-            for kind, text in pg:
-                if not first: sp.append(b"T*")
-                first = False
-                if kind == "b": continue
-                if kind == "t": sp.append(b"/F1 16 Tf"); sp.append(f"({esc(text)}) Tj".encode("latin-1","replace")); sp.append(f"/F1 {FS} Tf".encode())
-                else: sp.append(f"({esc(text)}) Tj".encode("latin-1","replace"))
-            sp.append(b"ET"); stream = b"\n".join(sp)
-            cn = emit(f"<< /Length {len(stream)} >>\nstream\n".encode() + stream + b"\nendstream")
-            pnums.append(emit(f"<< /Type /Page /Parent {pgs_n} 0 R /MediaBox [0 0 {PAGE_W} {PAGE_H}] /Resources << /Font << /F1 {fnt_n} 0 R >> >> /Contents {cn} 0 R >>".encode()))
-        kids = " ".join(f"{n} 0 R" for n in pnums)
-        objs[pgs_n-1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(pnums)} >>".encode()
-        objs[cat_n-1] = f"<< /Type /Catalog /Pages {pgs_n} 0 R >>".encode()
-        out = bytearray(b"%PDF-1.4\n"); offs = [0]
-        for i, od in enumerate(objs, 1): offs.append(len(out)); out += f"{i} 0 obj\n".encode() + od + b"\nendobj\n"
-        xr = len(out); out += f"xref\n0 {len(objs)+1}\n".encode() + b"0000000000 65535 f \n"
-        for o in offs[1:]: out += f"{o:010d} 00000 n \n".encode()
-        out += f"trailer\n<< /Size {len(objs)+1} /Root {cat_n} 0 R >>\nstartxref\n{xr}\n%%EOF".encode()
-        return jsonify({
-            "file": base64.b64encode(bytes(out)).decode("utf-8"),
-            "filename": safe_title + ".pdf",
-            "mimeType": "application/pdf",
-        })
-    except Exception as e:
-        return jsonify({"error": f"File generation failed: {e}"}), 500
+    return Response(_get_icon(192), mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
 
 
 @app.route("/")
@@ -2870,66 +3761,9 @@ def api_rename_conversation(conv_id):
     return jsonify({"status": "renamed", "title": new_title})
 
 
-def to_ollama_messages(gemini_messages, system_prompt):
-    """Convert our stored Gemini-style messages ({role, parts:[...]}) into
-    Ollama's chat format ({role, content, images?})."""
-    msgs = [{"role": "system", "content": system_prompt}]
-    for m in gemini_messages:
-        role = "user" if m["role"] == "user" else "assistant"
-        text = "".join(p.get("text", "") for p in m["parts"] if "text" in p)
-        entry = {"role": role, "content": text}
-        images = [
-            p["inline_data"]["data"]
-            for p in m["parts"]
-            if "inline_data" in p and p["inline_data"].get("mime_type", "").startswith("image/")
-        ]
-        if images:
-            entry["images"] = images
-        msgs.append(entry)
-    return msgs
-
-
-def ollama_stream_chunks(messages):
-    """Yields plain text increments from a local Ollama server."""
-    try:
-        resp = requests.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={"model": OLLAMA_MODEL, "messages": messages, "stream": True},
-            stream=True,
-            timeout=120,
-        )
-    except requests.RequestException as e:
-        yield (
-            f"[Could not reach Ollama at {OLLAMA_URL}: {e}. "
-            f"Make sure Ollama is installed and running (`ollama serve`), "
-            f"and that you've pulled the model (`ollama pull {OLLAMA_MODEL}`).]"
-        )
-        return
-
-    if resp.status_code != 200:
-        yield f"[Ollama error ({resp.status_code}): {resp.text}]"
-        return
-
-    for raw_line in resp.iter_lines(decode_unicode=True):
-        if not raw_line:
-            continue
-        try:
-            obj = json.loads(raw_line)
-        except json.JSONDecodeError:
-            continue
-        if obj.get("error"):
-            yield f"[Ollama error: {obj['error']}]"
-            return
-        content = obj.get("message", {}).get("content", "")
-        if content:
-            yield content
-        if obj.get("done"):
-            break
-
-
 def to_openai_messages(gemini_messages, system_prompt):
     """Convert stored Gemini-format messages to OpenAI-compatible chat format.
-    Used by Groq, OpenRouter, and HuggingFace (all use the same OpenAI-style API)."""
+    Used by both Groq and Cerebras (both use the same OpenAI-style chat API)."""
     msgs = [{"role": "system", "content": system_prompt}]
     for m in gemini_messages:
         role = "user" if m["role"] == "user" else "assistant"
@@ -2938,189 +3772,78 @@ def to_openai_messages(gemini_messages, system_prompt):
     return msgs
 
 
-def groq_stream_chunks(messages):
-    """Stream from Groq API (OpenAI-compatible, very fast, generous free tier)."""
-    if not GROQ_API_KEY:
+def _openai_style_stream(url, api_key, model, messages, provider_label):
+    """Shared streaming logic for Groq/Cerebras (both are OpenAI-compatible).
+    Yields nothing at all on ANY failure (auth, rate limit, timeout, invalid
+    model, network error, 4xx/5xx) so the caller can silently fall through to
+    the next provider without ever exposing a provider error to the user."""
+    if not api_key:
         return
     try:
         resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": GROQ_MODEL, "messages": messages, "stream": True, "max_tokens": 2048},
+            url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "stream": True, "max_tokens": 2048},
             stream=True, timeout=60,
         )
-        if resp.status_code == 200:
-            for line in resp.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data_str)
-                    content = obj["choices"][0]["delta"].get("content", "")
-                    if content:
-                        yield content
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-            return  # success — stop here
-        # rate limited or error — fall through (return without yielding)
     except requests.RequestException:
-        pass
+        return  # network error / timeout — silently fall through
 
-
-def openrouter_stream_chunks(messages):
-    """Stream from OpenRouter (aggregates many free models)."""
-    if not OPENROUTER_API_KEY:
-        return
-    try:
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json",
-                     "HTTP-Referer": "http://localhost:5000", "X-Title": "Ꮇʏᴛʜɪᴄ ᴀɪ"},
-            json={"model": OPENROUTER_MODEL, "messages": messages, "stream": True, "max_tokens": 2048},
-            stream=True, timeout=60,
-        )
-        if resp.status_code == 200:
-            for line in resp.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data_str)
-                    content_chunk = obj["choices"][0]["delta"].get("content", "")
-                    if content_chunk:
-                        yield content_chunk
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-            return
-        else:
-            yield f"[OpenRouter error {resp.status_code}: {resp.text[:200]}]"
-            return
-    except requests.RequestException as e:
-        yield f"[OpenRouter connection error: {e}]"
+    if resp.status_code != 200:
+        # rate limit (429), server error (5xx), invalid model, auth error, etc. —
+        # all mean "silently try the next provider", never shown to the user.
         return
 
+    # IMPORTANT: iterate raw bytes and decode as UTF-8 ourselves. Groq/Cerebras
+    # don't set a charset on their SSE stream, and `requests` falls back to
+    # Latin-1 for text-ish content types per RFC 2616 when no charset is
+    # given — decode_unicode=True would then silently mangle every non-ASCII
+    # character (Hindi, emoji, curly quotes, etc.) into mojibake while plain
+    # English looked fine, which is exactly the "garbled Hindi" bug.
+    for raw_line in resp.iter_lines(decode_unicode=False):
+        if not raw_line:
+            continue
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if not line.startswith("data:"):
+            continue
+        data_str = line[5:].strip()
+        if data_str == "[DONE]":
+            break
+        try:
+            obj = json.loads(data_str)
+            content = obj["choices"][0]["delta"].get("content", "")
+            if content:
+                yield content
+        except (json.JSONDecodeError, KeyError, IndexError):
+            continue
 
-def huggingface_stream_chunks(messages):
-    """Stream from Hugging Face Inference API (free tier available)."""
-    if not HF_API_KEY:
-        return
-    # HF uses the same OpenAI-compatible endpoint format
-    try:
-        resp = requests.post(
-            f"https://api-inference.huggingface.co/models/{HF_MODEL}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {HF_API_KEY}", "Content-Type": "application/json"},
-            json={"model": HF_MODEL, "messages": messages, "stream": True, "max_tokens": 2048},
-            stream=True, timeout=60,
-        )
-        if resp.status_code == 200:
-            for line in resp.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data_str)
-                    content_chunk = obj["choices"][0]["delta"].get("content", "")
-                    if content_chunk:
-                        yield content_chunk
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-            return
-        else:
-            yield f"[OpenRouter error {resp.status_code}: {resp.text[:200]}]"
-            return
-    except requests.RequestException as e:
-        yield f"[OpenRouter connection error: {e}]"
-        return
 
+def groq_stream_chunks(messages):
+    """Stream from Groq (primary chat provider — fast, generous free tier)."""
+    yield from _openai_style_stream(
+        "https://api.groq.com/openai/v1/chat/completions",
+        GROQ_API_KEY, GROQ_MODEL, messages, "Groq",
+    )
 
 
 def cerebras_stream_chunks(messages):
-    """Stream from Cerebras AI (very fast, generous free tier, works on servers)."""
-    if not CEREBRAS_API_KEY:
-        return
-    try:
-        resp = requests.post(
-            "https://api.cerebras.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"},
-            json={"model": CEREBRAS_MODEL, "messages": messages, "stream": True, "max_tokens": 2048},
-            stream=True, timeout=60,
-        )
-        if resp.status_code == 200:
-            for line in resp.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data_str)
-                    chunk = obj["choices"][0]["delta"].get("content", "")
-                    if chunk:
-                        yield chunk
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-            return
-        else:
-            yield f"[Cerebras error {resp.status_code}: {resp.text[:300]}]"
-            return
-    except requests.RequestException as e:
-        yield f"[Cerebras connection error: {e}]"
-        return
+    """Stream from Cerebras (automatic fallback if Groq is unavailable)."""
+    yield from _openai_style_stream(
+        "https://api.cerebras.ai/v1/chat/completions",
+        CEREBRAS_API_KEY, CEREBRAS_MODEL, messages, "Cerebras",
+    )
 
 
-# --- Round-robin provider rotation ------------------------------------------
-# Tracks which provider index to try FIRST next time (persists for the life
-# of the process; resets on server restart, which is fine).
-_provider_index = [0]
-
-
-def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None, user_api_key=None):
-    """Groq first, Cerebras silent fallback. If the user has set their own API key
-    in Settings → My API Keys, it is used instead of the server-configured key for
-    their chosen provider. Never exposes provider errors to the user."""
+def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None):
+    """Groq first, Cerebras as a silent automatic fallback.
+    Never asks the user to pick a provider and never exposes provider errors —
+    if Groq yields nothing (rate limit, timeout, invalid model, network error,
+    4xx/5xx), we just move on to Cerebras with no visible interruption."""
     sp = system_prompt or SYSTEM_PROMPT
     openai_msgs = to_openai_messages(gemini_messages, sp)
-
-    # If the user supplied their own key for a provider, try that first
-    if user_api_key:
-        _uk_provider = user_api_key["provider"]
-        _uk_key      = user_api_key["key"]
-        _uk_url      = ("https://api.groq.com/openai/v1/chat/completions"
-                        if _uk_provider == "groq"
-                        else "https://api.cerebras.ai/v1/chat/completions")
-        _uk_model    = GROQ_MODEL if _uk_provider == "groq" else CEREBRAS_MODEL
-        collected = False
-        try:
-            resp = requests.post(
-                _uk_url,
-                headers={"Authorization": f"Bearer {_uk_key}", "Content-Type": "application/json"},
-                json={"model": _uk_model, "messages": openai_msgs, "stream": True, "max_tokens": 2048},
-                stream=True, timeout=60,
-            )
-            if resp.status_code == 200:
-                for raw_line in resp.iter_lines(decode_unicode=False):
-                    if not raw_line: continue
-                    try: line = raw_line.decode("utf-8")
-                    except: continue
-                    if not line.startswith("data:"): continue
-                    ds = line[5:].strip()
-                    if ds == "[DONE]": break
-                    try:
-                        obj = json.loads(ds)
-                        chunk = obj["choices"][0]["delta"].get("content", "")
-                        if chunk: collected = True; yield chunk
-                    except: continue
-        except Exception:
-            pass
-        if collected:
-            return
-        # User key failed — fall through to server keys silently
 
     order = []
     if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
@@ -3142,81 +3865,16 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None, user
                 return
         except Exception:
             pass
+        # silently move on to the next provider
 
     yield "I'm having trouble reaching the AI service right now — please try again in a moment."
-
-    if not all_providers:
-        yield "[No AI providers configured. Add at least one API key.]"
-        return
-
-    n = len(all_providers)
-    start = _provider_index[0] % n
-
-    # Try each provider starting from the current rotation position
-    for i in range(n):
-        idx = (start + i) % n
-        name, fn = all_providers[idx]
-        collected = []
-        try:
-            for chunk in fn():
-                collected.append(chunk)
-                yield chunk
-            if collected:
-                # Success — next request starts from the NEXT provider (true rotation)
-                _provider_index[0] = (idx + 1) % n
-                return
-        except Exception:
-            pass
-        # This provider failed — silently try the next one
-
-    yield "[All AI providers failed or are rate-limited. Try again in a moment.]"
-
-
-
-
-def gemini_stream_chunks(payload):
-    """Yields plain text increments from Gemini's SSE stream.
-    Returns nothing (silently) on auth/quota/rate-limit errors so the
-    round-robin rotation automatically falls through to the next provider."""
-    try:
-        resp = requests.post(
-            GEMINI_STREAM_URL,
-            params={"key": API_KEY, "alt": "sse"},
-            json=payload,
-            stream=True,
-            timeout=60,
-        )
-    except requests.RequestException:
-        return  # network error — silently fall through
-
-    if resp.status_code != 200:
-        # Auth errors (401/403), quota errors (429), and server errors (5xx)
-        # all mean "try the next provider" — don't yield anything.
-        return
-
-    for raw_line in resp.iter_lines(decode_unicode=True):
-        if not raw_line or not raw_line.startswith("data:"):
-            continue
-        data_str = raw_line[len("data:"):].strip()
-        if not data_str or data_str == "[DONE]":
-            continue
-        try:
-            obj = json.loads(data_str)
-        except json.JSONDecodeError:
-            continue
-        try:
-            for part in obj["candidates"][0]["content"]["parts"]:
-                if "text" in part:
-                    yield part["text"]
-        except (KeyError, IndexError):
-            continue
 
 
 # --- Model selector (cosmetic tiers over the same underlying providers) -----
 # "VIP" is gated by a password so it isn't just a free option in the dropdown.
 # Set VIP_PASSWORD as an environment variable — if it's never set, the VIP
 # tier simply can't be unlocked (safe default, no hardcoded password).
-VIP_PASSWORD = os.environ.get("VIP_PASSWORD", "")
+VIP_PASSWORD = os.environ.get("VIP_PASSWORD", "1254")
 
 MODEL_CATALOG = [
     {"id": "mythic-1", "name": "Mythic 1", "vip": False},
@@ -3251,25 +3909,264 @@ def api_vip_unlock():
     return jsonify({"success": False})
 
 
+# ── Streak endpoint ───────────────────────────────────────────────────────────
+
+@app.route("/api/streak", methods=["GET"])
+@login_required
+def api_streak():
+    """Returns the current user's daily chat streak length (0 if they've
+    never chatted or their streak has already lapsed)."""
+    username = current_username()
+    return jsonify({"streak": _get_user_streak(username)})
+
+
+# ── Push Notification Routes ──────────────────────────────────────────────────
+
+@app.route("/api/push/vapid-public-key", methods=["GET"])
+def push_vapid_key():
+    """Returns the VAPID public key the browser needs to subscribe."""
+    if not VAPID_PUBLIC_KEY:
+        return jsonify({"error": "push not configured"}), 503
+    return jsonify({"publicKey": VAPID_PUBLIC_KEY})
+
+
+@app.route("/api/push/subscribe", methods=["POST"])
+@login_required
+def push_subscribe():
+    """Save (or update) a browser's push subscription, tagged with the
+    current (anonymous) username so re-engagement notifications can be
+    targeted at this specific person later."""
+    data = request.get_json(force=True) or {}
+    sub = data.get("subscription")
+    if not sub or not sub.get("endpoint"):
+        return jsonify({"error": "invalid subscription"}), 400
+    # Use the endpoint URL as a stable ID (it's unique per browser/device)
+    sub_id = str(uuid.uuid5(uuid.NAMESPACE_URL, sub["endpoint"]))
+    sub = dict(sub)
+    sub["_username"] = current_username()
+    _save_push_subscription(sub_id, sub)
+    return jsonify({"status": "subscribed", "id": sub_id})
+
+
+@app.route("/api/push/unsubscribe", methods=["POST"])
+@login_required
+def push_unsubscribe():
+    data = request.get_json(force=True) or {}
+    endpoint = (data.get("endpoint") or "").strip()
+    if endpoint:
+        sub_id = str(uuid.uuid5(uuid.NAMESPACE_URL, endpoint))
+        _delete_push_subscription(sub_id)
+    return jsonify({"status": "unsubscribed"})
+
+
+@app.route("/api/push/test", methods=["POST"])
+@login_required
+def push_test():
+    """Send a test notification to all subscriptions (admin-only for dev)."""
+    send_push_notification(
+        title="Mythic AI",
+        body="🎉 Push notifications are working!",
+        url="/",
+    )
+    return jsonify({"status": "sent"})
+
+
+# --- Weather (Open-Meteo — free, no API key needed, works for any country/city) ---
+_WMO_ICON = {
+    0: ("☀️", "Clear sky"), 1: ("🌤", "Mainly clear"), 2: ("⛅", "Partly cloudy"), 3: ("☁️", "Overcast"),
+    45: ("🌫", "Fog"), 48: ("🌫", "Freezing fog"),
+    51: ("🌦", "Light drizzle"), 53: ("🌦", "Drizzle"), 55: ("🌧", "Dense drizzle"),
+    56: ("🌧", "Freezing drizzle"), 57: ("🌧", "Freezing drizzle"),
+    61: ("🌧", "Light rain"), 63: ("🌧", "Rain"), 65: ("🌧", "Heavy rain"),
+    66: ("🌧", "Freezing rain"), 67: ("🌧", "Freezing rain"),
+    71: ("🌨", "Light snow"), 73: ("🌨", "Snow"), 75: ("❄️", "Heavy snow"), 77: ("❄️", "Snow grains"),
+    80: ("🌦", "Rain showers"), 81: ("🌧", "Rain showers"), 82: ("⛈", "Violent rain showers"),
+    85: ("🌨", "Snow showers"), 86: ("❄️", "Snow showers"),
+    95: ("⛈", "Thunderstorm"), 96: ("⛈", "Thunderstorm with hail"), 99: ("⛈", "Thunderstorm with hail"),
+}
+
+
+def _wmo(code):
+    return _WMO_ICON.get(code, ("🌡", "Unknown"))
+
+
+def _aqi_label(us_aqi):
+    if us_aqi is None:
+        return None
+    if us_aqi <= 50: return f"{us_aqi} (Good)"
+    if us_aqi <= 100: return f"{us_aqi} (Moderate)"
+    if us_aqi <= 150: return f"{us_aqi} (Unhealthy for sensitive groups)"
+    if us_aqi <= 200: return f"{us_aqi} (Unhealthy)"
+    if us_aqi <= 300: return f"{us_aqi} (Very unhealthy)"
+    return f"{us_aqi} (Hazardous)"
+
+
+@app.route("/api/weather", methods=["POST"])
+@login_required
+def api_weather():
+    data = request.get_json(force=True) or {}
+    location_name = (data.get("location") or "").strip()
+    lat = data.get("lat")
+    lon = data.get("lon")
+    display_name = location_name
+
+    try:
+        if lat is None or lon is None:
+            if not location_name:
+                return jsonify({"error": "Enter a city or use your location."}), 400
+            geo = requests.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={"name": location_name, "count": 1, "language": "en", "format": "json"},
+                timeout=10,
+            ).json()
+            results = geo.get("results") or []
+            if not results:
+                return jsonify({"error": f'Could not find "{location_name}".'}), 404
+            top = results[0]
+            lat, lon = top["latitude"], top["longitude"]
+            parts = [top.get("name")]
+            if top.get("admin1") and top.get("admin1") != top.get("name"):
+                parts.append(top["admin1"])
+            if top.get("country"):
+                parts.append(top["country"])
+            display_name = ", ".join(p for p in parts if p)
+
+        fr = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat, "longitude": lon,
+                "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,"
+                           "wind_speed_10m,pressure_msl,visibility",
+                "hourly": "temperature_2m,weather_code",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min,uv_index_max,"
+                         "sunrise,sunset",
+                "timezone": "auto",
+                "forecast_days": 7,
+            },
+            timeout=10,
+        ).json()
+
+        current = fr.get("current", {})
+        hourly_raw = fr.get("hourly", {})
+        daily_raw = fr.get("daily", {})
+
+        # If reverse-geolocated (lat/lon only, no location_name given), try to label it nicely.
+        if not display_name:
+            try:
+                rev = requests.get(
+                    "https://geocoding-api.open-meteo.com/v1/reverse",
+                    params={"latitude": lat, "longitude": lon, "language": "en", "format": "json"},
+                    timeout=8,
+                ).json()
+                rr = (rev.get("results") or [None])[0]
+                if rr:
+                    display_name = ", ".join(p for p in [rr.get("name"), rr.get("country")] if p)
+            except Exception:
+                pass
+            display_name = display_name or f"{lat:.2f}, {lon:.2f}"
+
+        icon, condition = _wmo(current.get("weather_code"))
+
+        # Air quality (best-effort — not fatal if it fails)
+        aqi = None
+        try:
+            aq = requests.get(
+                "https://air-quality-api.open-meteo.com/v1/air-quality",
+                params={"latitude": lat, "longitude": lon, "current": "us_aqi"},
+                timeout=8,
+            ).json()
+            aqi = _aqi_label((aq.get("current") or {}).get("us_aqi"))
+        except Exception:
+            pass
+
+        # Next 8 hours, from "now" onward
+        hourly = []
+        times = hourly_raw.get("time", [])
+        temps = hourly_raw.get("temperature_2m", [])
+        codes = hourly_raw.get("weather_code", [])
+        now_iso = current.get("time", "")
+        start_idx = 0
+        for i, t in enumerate(times):
+            if t >= now_iso:
+                start_idx = i
+                break
+        for i in range(start_idx, min(start_idx + 8, len(times))):
+            hi, _ = _wmo(codes[i] if i < len(codes) else None)
+            hour_label = times[i][11:16] if len(times[i]) >= 16 else times[i]
+            hourly.append({"time": hour_label, "icon": hi, "temp": round(temps[i]) if i < len(temps) else None})
+
+        daily = []
+        d_times = daily_raw.get("time", [])
+        d_max = daily_raw.get("temperature_2m_max", [])
+        d_min = daily_raw.get("temperature_2m_min", [])
+        d_codes = daily_raw.get("weather_code", [])
+        weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        for i, t in enumerate(d_times):
+            try:
+                y, m, dd = [int(x) for x in t.split("-")]
+                import datetime as _dt
+                wd = weekday_names[_dt.date(y, m, dd).weekday()]
+            except Exception:
+                wd = t
+            di, _ = _wmo(d_codes[i] if i < len(d_codes) else None)
+            daily.append({
+                "day": "Today" if i == 0 else wd,
+                "icon": di,
+                "max": round(d_max[i]) if i < len(d_max) else None,
+                "min": round(d_min[i]) if i < len(d_min) else None,
+            })
+
+        weather = {
+            "location": display_name,
+            "icon": icon,
+            "condition": condition,
+            "temp": round(current.get("temperature_2m", 0)),
+            "feels_like": round(current.get("apparent_temperature", 0)),
+            "humidity": current.get("relative_humidity_2m"),
+            "wind_speed": round(current.get("wind_speed_10m", 0)),
+            "pressure": round(current.get("pressure_msl")) if current.get("pressure_msl") is not None else None,
+            "visibility": round((current.get("visibility") or 0) / 1000, 1) if current.get("visibility") is not None else None,
+            "uv": (daily_raw.get("uv_index_max") or [None])[0],
+            "sunrise": (daily_raw.get("sunrise") or [None])[0][11:16] if (daily_raw.get("sunrise") or [None])[0] else None,
+            "sunset": (daily_raw.get("sunset") or [None])[0][11:16] if (daily_raw.get("sunset") or [None])[0] else None,
+            "aqi": aqi,
+            "hourly": hourly,
+            "daily": daily,
+        }
+        return jsonify({"weather": weather})
+    except requests.RequestException as e:
+        return jsonify({"error": f"Weather service unavailable: {e}"}), 502
+    except Exception as e:
+        return jsonify({"error": f"Could not process weather data: {e}"}), 500
+
+
 @app.route("/api/chat", methods=["POST"])
 @login_required
 def chat():
     data = request.get_json(force=True) or {}
     user_message = (data.get("message") or "").strip()
     conv_id = data.get("conversation_id")
-    attachment = data.get("attachment")
-    user_name = (data.get("user_name") or "").strip()[:60]
+    attachment = data.get("attachment")  # {name, mimeType, dataBase64} or None
+    user_name = (data.get("user_name") or "").strip()[:60]  # what Mythic AI should call the user
     requested_model = (data.get("model") or DEFAULT_MODEL_ID).strip()
     regenerate = bool(data.get("regenerate"))
-    # User's own API key from their browser (set in Settings → My API Keys)
-    # Validated strictly: must be a dict with provider + key string, key length ≥ 20.
-    user_api_key_raw = data.get("user_api_key")
-    user_api_key = None
-    if isinstance(user_api_key_raw, dict):
-        _provider = (user_api_key_raw.get("provider") or "").strip().lower()
-        _key = (user_api_key_raw.get("key") or "").strip()
-        if _provider in ("groq", "cerebras") and len(_key) >= 20:
-            user_api_key = {"provider": _provider, "key": _key}
+    # "ephemeral" is used by internal helper calls (e.g. generating follow-up
+    # question suggestions) that need a real AI reply but must NEVER show up
+    # as a saved chat in the sidebar and must never touch a real conversation.
+    ephemeral = bool(data.get("ephemeral"))
+
+    if ephemeral:
+        if not user_message:
+            return jsonify({"error": "message is required"}), 400
+        username = current_username()
+        temp_messages = [{"role": "user", "parts": [{"text": user_message}]}]
+
+        def generate_ephemeral():
+            for chunk in auto_stream_chunks(None, temp_messages, SYSTEM_PROMPT):
+                yield chunk.encode("utf-8")
+
+        return Response(stream_with_context(generate_ephemeral()),
+                         mimetype="text/plain; charset=utf-8")
 
     if regenerate:
         if not conv_id:
@@ -3319,10 +4216,10 @@ def chat():
             user_entry["attachment_meta"] = attachment_meta
         messages.append(user_entry)
 
-    # Strip attachment_meta (frontend-only field) before sending to the model
-    gemini_contents = [
-        {"role": m["role"], "parts": m["parts"]} for m in messages
-    ]
+        # A genuine chat message from this person — update their daily streak
+        # and reset their "quiet too long" clock so re-engagement notifications
+        # don't fire while they're actively chatting.
+        _update_user_activity(username)
 
     effective_system_prompt = SYSTEM_PROMPT
     if user_name:
@@ -3336,32 +4233,19 @@ def chat():
             " The user is on the VIP tier — feel free to go deeper and be more "
             "thorough than usual when it's helpful, without padding for its own sake."
         )
-    # Only the real Gemini call gets the "you have search" instruction — fallback
-    # providers don't have real search, so giving them that instruction makes them
-    # hallucinate fake tool-call JSON into the visible reply.
-    gemini_system_prompt = effective_system_prompt + GEMINI_SEARCH_ADDENDUM
-
-    payload = {
-        "contents": gemini_contents,
-        "systemInstruction": {"parts": [{"text": gemini_system_prompt}]},
-        "tools": [{"google_search": {}}],
-    }
 
     def generate():
         full_reply = []
-        if PROVIDER == "ollama":
-            chunk_source = ollama_stream_chunks(to_ollama_messages(messages, effective_system_prompt))
-        else:
-            chunk_source = auto_stream_chunks(payload, messages, effective_system_prompt,
-                                               user_api_key=user_api_key)
+        chunk_source = auto_stream_chunks(None, messages, effective_system_prompt)
 
         for chunk in chunk_source:
             full_reply.append(chunk)
-            yield chunk
+            yield chunk.encode("utf-8")
         messages.append({"role": "model", "parts": [{"text": "".join(full_reply)}]})
         save_conversation(username, conv_id, conv)
 
     resp = Response(stream_with_context(generate()), mimetype="text/plain; charset=utf-8")
+    resp.headers["Content-Type"] = "text/plain; charset=utf-8"
     resp.headers["X-Conversation-Id"] = conv_id
     return resp
 
@@ -3376,84 +4260,217 @@ def serve_temp_image(img_id):
     return Response(entry["data"], mimetype=entry["mime_type"])
 
 
+@app.route("/api/generate-file", methods=["POST"])
+@login_required
+def generate_file():
+    """Generates a downloadable file (PDF, Word doc, or plain text) from
+    text content — used for "generate a PDF / document / downloadable
+    file" requests. Returns base64 file bytes + filename + mime type."""
+    try:
+        data = request.get_json(force=True) or {}
+        content = (data.get("content") or "").strip()
+        fmt = (data.get("format") or "pdf").strip().lower()
+        title = (data.get("title") or "Mythic AI Document").strip()[:100]
+        filename_base = "".join(
+            c for c in title if c.isalnum() or c in " -_"
+        ).strip().replace(" ", "-") or "Mythic-AI-Document"
+
+        if not content:
+            return jsonify({"error": "content is required"}), 400
+
+        if fmt in ("docx", "word", "doc"):
+            docx_bytes = generate_docx_bytes(title, content)
+            if docx_bytes is not None:
+                return jsonify({
+                    "file": base64.b64encode(docx_bytes).decode("utf-8"),
+                    "filename": f"{filename_base}.docx",
+                    "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                })
+            # python-docx isn't installed on the server — fall back to a
+            # plain text file rather than failing outright.
+            return jsonify({
+                "file": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+                "filename": f"{filename_base}.txt",
+                "mimeType": "text/plain",
+                "note": "Word (.docx) generation isn't set up on this server "
+                        "(needs `pip install python-docx`) — sent as a plain "
+                        "text file instead.",
+            })
+
+        if fmt in ("txt", "text"):
+            return jsonify({
+                "file": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+                "filename": f"{filename_base}.txt",
+                "mimeType": "text/plain",
+            })
+
+        # Default: PDF
+        pdf_bytes = generate_pdf_bytes(title, content)
+        return jsonify({
+            "file": base64.b64encode(pdf_bytes).decode("utf-8"),
+            "filename": f"{filename_base}.pdf",
+            "mimeType": "application/pdf",
+        })
+    except Exception as e:
+        return jsonify({"error": f"File generation failed: {e}"}), 500
+
+
 @app.route("/api/generate-image", methods=["POST"])
 @login_required
 def generate_image():
-    data = request.get_json(force=True) or {}
-    prompt = data.get("prompt", "").strip()
-    image_b64 = data.get("imageBase64")  # optional — source photo for Ghibli Me / edits
-    mime_type = data.get("mimeType", "image/jpeg")
-    if not prompt:
-        return jsonify({"error": "prompt required"}), 400
-
-    # Preferred path: NanoBanana. Supports real image-to-image editing, so
-    # "Ghibli Me" can actually transform the uploaded photo instead of just
-    # generating a generic image from text.
-    if NANO_BANANA_API_KEY:
-        image_urls = None
-        if image_b64:
-            try:
-                raw = base64.b64decode(image_b64, validate=True)
-            except Exception:
-                return jsonify({"error": "invalid image data"}), 400
-            if len(raw) > MAX_UPLOAD_BYTES:
-                return jsonify({"error": "image too large (max 8MB)"}), 400
-            img_id = _store_temp_image(raw, mime_type)
-            image_urls = [f"{request.host_url.rstrip('/')}/api/temp-image/{img_id}"]
-
-        task_id, err = nano_banana_submit(prompt, image_urls=image_urls)
-        if err:
-            return jsonify({"error": err}), 502
-        result_url, err = nano_banana_poll(task_id)
-        if err:
-            return jsonify({"error": err}), 502
-        try:
-            img_resp = requests.get(result_url, timeout=30)
-            img_resp.raise_for_status()
-            return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
-        except requests.RequestException as e:
-            return jsonify({"error": f"Could not download result image: {e}"}), 502
-
-    # Fallback: HuggingFace FLUX.1-schnell — text-to-image only, ignores any
-    # uploaded photo (it has no image-to-image mode here).
-    if not HF_API_KEY:
-        return jsonify({"error": "No image generation provider configured"}), 503
-    model = "black-forest-labs/FLUX.1-schnell"
     try:
-        resp = requests.post(
-            f"https://api-inference.huggingface.co/models/{model}",
-            headers={"Authorization": f"Bearer {HF_API_KEY}"},
-            json={"inputs": prompt},
-            timeout=60,
-        )
-        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
-            img_b64 = base64.b64encode(resp.content).decode("utf-8")
-            return jsonify({"image": img_b64})
-        else:
-            return jsonify({"error": f"Image generation failed ({resp.status_code})"}), 502
-    except requests.RequestException as e:
-        return jsonify({"error": str(e)}), 502
+        data = request.get_json(force=True) or {}
+        prompt = data.get("prompt", "").strip()
+        image_b64 = data.get("imageBase64")
+        mime_type = data.get("mimeType", "image/jpeg")
+        style = data.get("style", "").strip()
+        if not prompt:
+            return jsonify({"error": "prompt required"}), 400
 
+        full_prompt = f"{prompt}, {style}" if style else prompt
+
+        # ── Auto-enhance prompt for better output quality ────────────────────
+        prompt_lower = full_prompt.lower()
+        is_book      = any(w in prompt_lower for w in ["book cover", "book", "novel cover", "textbook"])
+        is_portrait  = any(w in prompt_lower for w in ["portrait", "person", "face", "selfie", "photo of"])
+        is_logo      = any(w in prompt_lower for w in ["logo", "icon", "emblem", "badge"])
+        is_anime     = any(w in prompt_lower for w in ["anime", "ghibli", "manga", "cartoon", "illustration"])
+        is_landscape = any(w in prompt_lower for w in ["landscape", "scenery", "nature", "city", "skyline", "aerial"])
+
+        quality_tail = ", masterpiece, best quality, highly detailed, sharp focus, professional"
+
+        if is_book:
+            enhanced = (
+                f"{full_prompt}, professional book cover design, elegant typography layout, "
+                f"dramatic lighting, rich colors, visually striking, award-winning cover art, "
+                f"publishing industry standard{quality_tail}"
+            )
+            width, height = 512, 768
+        elif is_portrait:
+            enhanced = (
+                f"{full_prompt}, cinematic portrait photography, soft studio lighting, "
+                f"8K ultra-detailed, DSLR quality, photorealistic{quality_tail}"
+            )
+            width, height = 512, 768
+        elif is_logo:
+            enhanced = (
+                f"{full_prompt}, clean vector style, minimalist, professional brand design, "
+                f"flat design, scalable, high contrast{quality_tail}"
+            )
+            width, height = 768, 768
+        elif is_anime:
+            enhanced = (
+                f"{full_prompt}, vibrant anime art, clean linework, beautiful coloring, "
+                f"Studio Ghibli quality, cel shading{quality_tail}"
+            )
+            width, height = 768, 768
+        elif is_landscape:
+            enhanced = (
+                f"{full_prompt}, epic wide shot, golden hour lighting, ultra-wide, "
+                f"breathtaking scenery, National Geographic quality{quality_tail}"
+            )
+            width, height = 896, 512
+        else:
+            enhanced = f"{full_prompt}{quality_tail}"
+            width, height = 768, 768
+
+        negative = (
+            "blurry, low quality, pixelated, distorted, deformed, ugly, bad anatomy, "
+            "watermark, signature, text errors, garbled text, poorly drawn, disfigured, "
+            "oversaturated, washed out, extra limbs, duplicate, clone, artifact, noise"
+        )
+
+        # ── 1. NanoBanana (real image-to-image, best for Ghibli Me) ──────────
+        if NANO_BANANA_API_KEY:
+            image_urls = None
+            if image_b64:
+                try:
+                    raw = base64.b64decode(image_b64, validate=True)
+                    if len(raw) > MAX_UPLOAD_BYTES:
+                        return jsonify({"error": "image too large (max 8MB)"}), 400
+                    img_id = _store_temp_image(raw, mime_type)
+                    base_url = request.host_url.rstrip('/')
+                    image_urls = [f"{base_url}/api/temp-image/{img_id}"]
+                except Exception:
+                    pass  # bad base64 — fall through without the image
+            try:
+                task_id, err = nano_banana_submit(enhanced, image_urls=image_urls)
+                if not err:
+                    result_url, err = nano_banana_poll(task_id)
+                    if not err:
+                        img_resp = requests.get(result_url, timeout=30)
+                        img_resp.raise_for_status()
+                        return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
+            except Exception:
+                pass  # fall through to next provider
+
+        # ── 2. HuggingFace FLUX.1-schnell ─────────────────────────────────────
+        if HF_API_KEY:
+            try:
+                resp = requests.post(
+                    "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
+                    headers={"Authorization": f"Bearer {HF_API_KEY}"},
+                    json={"inputs": enhanced},
+                    timeout=90,
+                )
+                if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
+                    return jsonify({"image": base64.b64encode(resp.content).decode("utf-8")})
+            except Exception:
+                pass  # fall through
+
+        # ── 3. Pollinations.AI — zero-config, always available ────────────────
+        seed = int(time.time()) % 99999
+        encoded_prompt   = urllib.parse.quote(enhanced)
+        encoded_negative = urllib.parse.quote(negative)
+        poll_url = (
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+            f"?width={width}&height={height}&seed={seed}"
+            f"&negative={encoded_negative}"
+            f"&model=flux&enhance=true&nologo=true"
+        )
+        img_resp = requests.get(poll_url, timeout=120)
+        if img_resp.status_code == 200 and img_resp.headers.get("content-type", "").startswith("image/"):
+            return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
+        return jsonify({"error": f"Image generation failed (status {img_resp.status_code}). Please try again."}), 502
+
+    except Exception as e:
+        # Catch-all: always return JSON, never an HTML error page
+        return jsonify({"error": f"Image generation error: {str(e)}"}), 500
+
+
+_reengagement_thread_started = False
+
+def _start_reengagement_thread_once():
+    """Starts the hourly notification background thread exactly once,
+    whether the app is launched via `python ai_chat.py`, gunicorn, or any
+    other WSGI runner. Never starts it on serverless platforms (Vercel etc.)
+    since a background thread there would just be frozen between requests
+    and never actually fire on schedule — see IS_SERVERLESS notes above."""
+    global _reengagement_thread_started
+    if _reengagement_thread_started or IS_SERVERLESS:
+        return
+    threading.Thread(target=_reengagement_loop, daemon=True).start()
+    _reengagement_thread_started = True
+
+
+_start_reengagement_thread_once()
 
 if __name__ == "__main__":
     active = []
-    if PROVIDER in ("auto", "gemini") and GEMINI_API_KEY:
-        active.append(f"Gemini({GEMINI_MODEL})")
     if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
         active.append(f"Groq({GROQ_MODEL})")
     if PROVIDER in ("auto", "cerebras") and CEREBRAS_API_KEY:
         active.append(f"Cerebras({CEREBRAS_MODEL})")
-    if PROVIDER in ("auto", "openrouter") and OPENROUTER_API_KEY:
-        active.append(f"OpenRouter({OPENROUTER_MODEL})")
-    if PROVIDER in ("auto", "huggingface") and HF_API_KEY:
-        active.append(f"HuggingFace({HF_MODEL})")
-    if PROVIDER == "ollama":
-        active.append(f"Ollama({OLLAMA_MODEL}@{OLLAMA_URL})")
     providers_str = " → ".join(active) if active else "none configured!"
     image_provider = "NanoBanana (image-to-image supported)" if NANO_BANANA_API_KEY else (
         "HuggingFace FLUX (text-to-image only)" if HF_API_KEY else "none configured!"
     )
-    print(f"Starting Ꮇʏᴛʜɪᴄ ᴀɪ at http://localhost:5000")
-    print(f"Providers (fallback order): {providers_str}")
+    print(f"Starting Mythic AI at http://localhost:5000")
+    print(f"Providers (Groq primary, Cerebras fallback): {providers_str}")
     print(f"Image generation: {image_provider}")
+    if IS_SERVERLESS:
+        print("NOTE: detected a serverless environment (Vercel) — see the "
+              "IS_SERVERLESS comment near the top of this file for the "
+              "limitations that come with running this app there.")
+
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
