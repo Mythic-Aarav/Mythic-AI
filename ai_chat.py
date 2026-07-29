@@ -1,5 +1,5 @@
 """
-Ꮇʏᴛʜɪᴄ ᴀɪ — single file, powered by Groq (primary) with Cerebras as a silent
+Mythic AI — single file, powered by Groq (primary) with Cerebras as a silent
 automatic fallback. No provider selection is exposed to the user — if Groq is
 rate-limited, times out, or errors, the app transparently retries on Cerebras.
 
@@ -230,8 +230,8 @@ HF_MODEL          = os.environ.get("HF_MODEL",          "mistralai/Mistral-7B-In
 CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "gpt-oss-120b")
 
 SYSTEM_PROMPT = (
-    "You are Ꮇʏᴛʜɪᴄ ᴀɪ, a smart and friendly AI assistant made by Aarav Singh. "
-    "If asked who made you, say you are Ꮇʏᴛʜɪᴄ ᴀɪ made by Aarav Singh — say it once naturally, never repeat it unprompted. "
+    "You are Mythic AI, a smart and friendly AI assistant made by Aarav Singh. "
+    "If asked who made you, say you are Mythic AI made by Aarav Singh — say it once naturally, never repeat it unprompted. "
     "Never mention Google, Groq, OpenRouter, HuggingFace, Cerebras, Meta, Mistral, Anthropic, or any AI company as your creator or backend. "
     "You can help with anything: questions, writing, coding, math, ideas, or just chatting. "
     "When writing code, always wrap it in markdown code blocks with the language name. "
@@ -254,7 +254,12 @@ SYSTEM_PROMPT = (
     "2. NEVER start replies with filler like Great question, Sure, Of course, Absolutely, Certainly. "
     "3. NEVER repeat information already given earlier in the conversation. Build on it. "
     "4. Be direct and natural — like a knowledgeable friend, not a customer service bot. "
-    "5. Keep answers concise unless the user asks for detail."
+    "5. Keep answers concise unless the user asks for detail. "
+    "6. MATCH YOUR REPLY LENGTH TO THE MESSAGE: a short greeting like 'hi', 'hello', "
+    "'hey', 'thanks', or 'ok' gets a short, casual, 1-2 sentence reply — never a long "
+    "essay, never a list of your capabilities, never multiple paragraphs. Save longer, "
+    "detailed answers for messages that actually ask a real question or request "
+    "something specific."
 )
 
 app = Flask(__name__)
@@ -489,8 +494,39 @@ def delete_conversation(username, conv_id):
 
 # --- Local file fallbacks for when Supabase is not configured ----------------
 import os as _os
+
+# ── Serverless (Vercel) compatibility notes ──────────────────────────────────
+# This app was written as a normal long-running server (Render/Railway/a VPS)
+# and several of its features fundamentally rely on that:
+#   1. It keeps push subscriptions, temp image uploads, and conversations in
+#      local JSON files / in-memory dicts. Vercel's filesystem is READ-ONLY
+#      except for /tmp, and /tmp (plus all memory) is wiped on every cold
+#      start and isn't shared across instances — so conversations, streaks,
+#      and push subscriptions will keep "disappearing" there.
+#   2. The hourly re-engagement notifications rely on a background thread
+#      that runs forever. Vercel serverless functions only run while
+#      handling a request and are frozen/killed otherwise, so that thread
+#      never gets to fire on its own schedule.
+#   3. /api/chat streams its reply chunk-by-chunk (SSE-style). Vercel's
+#      default Node/Python serverless functions buffer and have a max
+#      execution duration, so long streaming replies can get cut off or
+#      arrive all at once instead of live.
+# If Vercel is a hard requirement, the practical fix is to swap local JSON
+# storage for a real database (Vercel KV / Postgres / Supabase — which this
+# file already partially supports), and move the notification scheduler to
+# an external cron (e.g. Vercel Cron Jobs calling a small endpoint) instead
+# of an in-process thread. Otherwise, a normal always-on host (Render,
+# Railway, Fly.io, a VPS) is a much better match for this code as written.
+IS_SERVERLESS = bool(_os.environ.get("VERCEL") or _os.environ.get("VERCEL_ENV"))
+
 _BASE_DIR = _os.path.dirname(_os.path.abspath(__file__))
-_DATA_DIR = _os.path.join(_BASE_DIR, "chat_data")
+if IS_SERVERLESS:
+    # /tmp is the only writable path on Vercel — this avoids crashing with a
+    # read-only-filesystem error, even though data still won't persist
+    # across cold starts/instances there. See notes above.
+    _DATA_DIR = _os.path.join("/tmp", "mythic_ai_chat_data")
+else:
+    _DATA_DIR = _os.path.join(_BASE_DIR, "chat_data")
 _os.makedirs(_DATA_DIR, exist_ok=True)
 
 def _user_conv_dir(username):
@@ -549,11 +585,14 @@ def make_title(first_message):
 _ACTIVITY_FILE = _os.path.join(_DATA_DIR, "user_activity.json")
 _activity_lock = threading.Lock()
 
-# How long a user must be quiet before we consider nudging them, and the
-# minimum gap between two nudges to the same person.
-_REENGAGEMENT_IDLE_HOURS = 20
-_REENGAGEMENT_MIN_GAP_HOURS = 20
-_REENGAGEMENT_CHECK_INTERVAL_SECONDS = 30 * 60  # scan every 30 minutes
+# Notifications rotate once per hour through the message pool, per user —
+# e.g. hour 1 = "come back and chat", hour 2 = "study reminder", hour 3 =
+# "activity reminder", hour 4 = "feature update", hour 5 = back to the top,
+# etc. Someone who's actively chatting right now (within the last hour) is
+# skipped for that cycle so we don't interrupt them mid-conversation.
+_REENGAGEMENT_ROTATION = ["come_back", "study", "activity", "feature"]
+_REENGAGEMENT_SKIP_IF_ACTIVE_WITHIN_HOURS = 1
+_REENGAGEMENT_CHECK_INTERVAL_SECONDS = 60 * 60  # once every hour
 
 
 def _load_all_activity():
@@ -614,51 +653,69 @@ def _get_user_streak(username):
     return (data.get(username) or {}).get("streak", 0)
 
 
+def _subscribed_usernames():
+    """Every distinct (anonymous) username that currently has at least one
+    push subscription registered."""
+    _load_push_subscriptions()
+    names = set()
+    for sub in _push_subscriptions.values():
+        u = sub.get("_username")
+        if u:
+            names.add(u)
+    return names
+
+
 def _run_reengagement_pass():
-    """Scans every known user; if they've gone quiet long enough (and haven't
-    already been nudged recently), sends one push notification. Users with an
-    active streak get a "your streak is on hold" message so they don't lose
-    it; everyone else gets a random pick from the general message pool."""
+    """Runs once per hour. For every subscribed user (skipping anyone active
+    in roughly the last hour), sends exactly one push notification: a
+    "streak on hold" alert if they have an active streak, otherwise the next
+    message in the rotation (come back -> study -> activity -> feature -> repeat)."""
     if not _PUSH_AVAILABLE or not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
         return
     now = time.time()
+    usernames = _subscribed_usernames()
+    if not usernames:
+        return
+
     with _activity_lock:
         data = _load_all_activity()
         changed = False
-        for username, rec in data.items():
+        for username in usernames:
+            rec = data.get(username) or {
+                "streak": 0, "last_active_day": None, "last_active_ts": 0,
+                "last_notified_ts": 0, "notif_rotation_index": 0,
+            }
             last_active_ts = rec.get("last_active_ts", 0)
-            last_notified_ts = rec.get("last_notified_ts", 0)
-            if last_active_ts <= 0:
-                continue
-            hours_inactive = (now - last_active_ts) / 3600.0
-            hours_since_notified = (now - last_notified_ts) / 3600.0
-            if hours_inactive < _REENGAGEMENT_IDLE_HOURS:
-                continue
-            if last_notified_ts and hours_since_notified < _REENGAGEMENT_MIN_GAP_HOURS:
-                continue
+            hours_inactive = (now - last_active_ts) / 3600.0 if last_active_ts else 999
+            if hours_inactive < _REENGAGEMENT_SKIP_IF_ACTIVE_WITHIN_HOURS:
+                continue  # actively chatting right now -- don't interrupt
 
             streak = rec.get("streak", 0)
             if streak >= 2:
-                title = "🔥 Mythic AI"
+                title = "streak"
                 body = f"Your {streak}-day streak is on hold! Come chat with me to keep it going."
             else:
-                category = random.choice(["come_back", "activity", "study", "feature"])
-                title = "Mythic AI"
+                idx = rec.get("notif_rotation_index", 0) % len(_REENGAGEMENT_ROTATION)
+                category = _REENGAGEMENT_ROTATION[idx]
+                rec["notif_rotation_index"] = idx + 1
+                title = "rotation"
                 body = _random_notification_body(category)
 
             try:
-                send_push_notification_to_user(username, title, body, url="/")
+                send_push_notification_to_user(username, "Mythic AI", body, url="/")
             except Exception:
                 pass
             rec["last_notified_ts"] = now
+            data[username] = rec
             changed = True
         if changed:
             _save_all_activity(data)
 
 
 def _reengagement_loop():
-    """Background daemon thread: periodically checks for quiet users and
-    sends them a re-engagement / streak-on-hold push notification."""
+    """Background daemon thread: once per hour, sends every subscribed user
+    the next rotating re-engagement notification (or a streak-on-hold alert
+    if they have an active streak going)."""
     while True:
         try:
             _run_reengagement_pass()
@@ -685,7 +742,10 @@ PAGE = r"""<!DOCTYPE html>
 <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
 <link rel="shortcut icon" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/icon.png">
-<title>Ꮇʏᴛʜɪᴄ ᴀɪ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&family=Noto+Sans+Devanagari:wght@400;600&display=swap" rel="stylesheet">
+<title>Mythic AI</title>
 <style>
   :root {
     --bg:#1a1a1a; --panel:#2a2a2a; --border:#3a3a3a;
@@ -694,9 +754,23 @@ PAGE = r"""<!DOCTYPE html>
     --ai-bubble:#1a1a1a; --sidebar-w:260px; --msg-font-size:14.5px;
   }
   * { box-sizing:border-box; margin:0; padding:0; }
+  /* "Noto Sans" is loaded from Google Fonts as a wide-coverage fallback —
+     some Android phones ship without glyphs for the stylized logo
+     characters or for Devanagari/other scripts, which shows as boxes ("tofu").
+     Listing Noto Sans (and Noto Sans Devanagari) after the system fonts fixes
+     that without changing how things look on phones that already have full
+     glyph coverage. */
   html,body { height:100%; background:var(--bg); color:var(--text);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; overflow:hidden; }
-  .layout { display:flex; height:100vh; }
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,
+      "Noto Sans","Noto Sans Devanagari",sans-serif; overflow:hidden; }
+  /* Mobile browsers (Chrome/Samsung Internet especially) don't shrink 100vh
+     for their address bar, so a plain `height:100vh` layout ends up taller
+     than what's actually visible — the input box at the bottom gets pushed
+     below the fold and the person can't see or reach it. --app-height is
+     set live from JS to the real visible height; 100dvh is a same-effect
+     CSS-only fallback for browsers that support it. */
+  .layout { display:flex; height:100vh; height:calc(var(--app-height, 100vh));
+    height:100dvh; }
 
   /* Light theme override */
   body.theme-light {
@@ -740,7 +814,8 @@ PAGE = r"""<!DOCTYPE html>
   #sidebar-toggle { background:none; border:1px solid var(--border); color:var(--muted);
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0; }
   #sidebar-toggle:hover { background:var(--panel); }
-  header h1 { font-size:16px; font-weight:700; color:var(--accent); margin:0; }
+  header h1 { font-size:16px; font-weight:700; color:var(--accent); margin:0;
+    font-variant:small-caps; letter-spacing:.5px; }
   #streak-badge { display:none; align-items:center; gap:4px; background:linear-gradient(135deg,#ff9d42,#ff5f6d);
     color:#fff; font-size:11px; font-weight:800; padding:3px 9px; border-radius:12px; white-space:nowrap; }
   #name-btn { background:none; border:1px solid var(--border); color:var(--muted);
@@ -951,16 +1026,22 @@ PAGE = r"""<!DOCTYPE html>
     /* Main app always takes full width */
     .app { width:100% !important; flex:1; }
 
-    header { padding:calc(10px + env(safe-area-inset-top)) 12px 10px; }
+    header { padding:calc(10px + env(safe-area-inset-top)) 10px 8px;
+      flex-wrap:wrap; row-gap:6px; }
+    header .left { flex-wrap:wrap; row-gap:4px; }
+    header .right { flex-wrap:wrap; justify-content:flex-end; row-gap:6px; gap:6px; }
     header h1 { font-size:14px; }
-    #sidebar-toggle { width:38px; height:38px; font-size:14px; }
-    #name-btn { width:38px; height:38px; font-size:14px; }
-    #settings-btn { width:38px; height:38px; font-size:14px; }
-    #export-btn { width:38px; height:38px; font-size:14px; }
-    #vip-btn { width:38px; height:38px; font-size:14px; }
-    #clear-btn { font-size:11px; padding:8px 10px; min-height:38px; }
+    #sidebar-toggle { width:36px; height:36px; font-size:13px; }
+    #name-btn { width:36px; height:36px; font-size:13px; }
+    #settings-btn { width:36px; height:36px; font-size:13px; }
+    #export-btn { width:36px; height:36px; font-size:13px; }
+    #vip-btn { width:36px; height:36px; font-size:13px; }
+    #clear-btn { font-size:0; padding:8px 10px; min-height:36px; }
+    #clear-btn::before { content:'🗑'; font-size:15px; }
     #speak-toggle { font-size:11px; padding:5px 8px; }
-    #fullscreen-btn { width:38px; height:38px; font-size:14px; }
+    #fullscreen-btn { width:36px; height:36px; font-size:13px; }
+    #install-btn { padding:6px 9px; font-size:0; }
+    #install-btn::before { content:'⬇'; font-size:14px; }
 
     #messages-wrap { overflow-y:auto; -webkit-overflow-scrolling:touch; }
     #messages { padding:14px 10px; gap:12px; max-width:100%; }
@@ -1000,13 +1081,13 @@ PAGE = r"""<!DOCTYPE html>
   <div id="sidebar">
     <button id="new-chat-btn">+ New chat</button>
     <div id="conv-list"></div>
-    <div id="sidebar-footer">Ꮇʏᴛʜɪᴄ ᴀɪ &middot; by Aarav Singh</div>
+    <div id="sidebar-footer">Mythic AI &middot; by Aarav Singh</div>
   </div>
   <div class="app">
     <header>
       <div class="left">
         <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
-        <h1>Ꮇʏᴛʜɪᴄ ᴀɪ</h1>
+        <h1>Mythic AI</h1>
         <span id="vip-badge" style="display:none;background:linear-gradient(135deg,#f5c542,#e0a800);color:#1a1a1a;font-size:10.5px;font-weight:800;padding:3px 8px;border-radius:10px;letter-spacing:.3px;">VIP</span>
         <span id="streak-badge" title="Daily chat streak">🔥 0</span>
       </div>
@@ -1016,7 +1097,7 @@ PAGE = r"""<!DOCTYPE html>
         <button id="fullscreen-btn" type="button" title="Fullscreen">
           <span id="fullscreen-icon">⛶</span>
         </button>
-        <button id="name-btn" title="What should Ꮇʏᴛʜɪᴄ ᴀɪ call you?">🙂</button>
+        <button id="name-btn" title="What should Mythic AI call you?">🙂</button>
         <button id="settings-btn" title="Settings">⚙</button>
         <button id="export-btn" title="Export this chat">⬇</button>
         <button id="clear-btn">Delete chat</button>
@@ -1026,7 +1107,7 @@ PAGE = r"""<!DOCTYPE html>
     <div id="messages-wrap">
       <div id="messages">
         <div class="empty-state" id="empty-state">
-          <h2>Ꮇʏᴛʜɪᴄ ᴀɪ</h2>
+          <h2>Mythic AI</h2>
           <p>Ask me anything, generate images, or just chat 👋</p>
         </div>
       </div>
@@ -1052,7 +1133,7 @@ PAGE = r"""<!DOCTYPE html>
       <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;">
         <span style="font-size:20px;flex-shrink:0;">🔔</span>
         <div style="min-width:0;">
-          <div style="font-size:13px;font-weight:600;color:var(--text);">Get notified when Ꮇʏᴛʜɪᴄ ᴀɪ replies</div>
+          <div style="font-size:13px;font-weight:600;color:var(--text);">Get notified when Mythic AI replies</div>
           <div style="font-size:11.5px;color:var(--muted);margin-top:1px;">Even when you switch to another tab</div>
         </div>
       </div>
@@ -1096,7 +1177,7 @@ PAGE = r"""<!DOCTYPE html>
               <circle cx="12" cy="13" r="4"/>
             </svg>
           </button>
-          <textarea id="input" rows="1" placeholder="Message Ꮇʏᴛʜɪᴄ ᴀɪ..."></textarea>
+          <textarea id="input" rows="1" placeholder="Message Mythic AI..."></textarea>
           <!-- Voice input -->
           <button class="tool-btn" id="voice-btn" type="button" title="Voice input">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1119,8 +1200,8 @@ PAGE = r"""<!DOCTYPE html>
 
 <div id="name-modal-overlay">
   <div id="name-modal">
-    <h3>What should Ꮇʏᴛʜɪᴄ ᴀɪ call you?</h3>
-    <p>Enter your preferred name — Ꮇʏᴛʜɪᴄ ᴀɪ will use it when it talks to you.</p>
+    <h3>What should Mythic AI call you?</h3>
+    <p>Enter your preferred name — Mythic AI will use it when it talks to you.</p>
     <input type="text" id="name-input" maxlength="60" placeholder="e.g. Aarav" autocomplete="off">
     <div id="name-modal-actions">
       <button id="name-cancel-btn" type="button">Cancel</button>
@@ -1133,7 +1214,7 @@ PAGE = r"""<!DOCTYPE html>
 <div id="settings-modal-overlay">
   <div id="settings-modal">
     <h3>Settings</h3>
-    <p class="sub">Customize how Ꮇʏᴛʜɪᴄ ᴀɪ looks and replies. Saved on this device.</p>
+    <p class="sub">Customize how Mythic AI looks and replies. Saved on this device.</p>
 
     <div class="settings-section">
       <label>Theme</label>
@@ -1187,6 +1268,17 @@ PAGE = r"""<!DOCTYPE html>
     <div class="settings-section">
       <label>Custom instructions</label>
       <textarea id="custom-instructions-input" placeholder="e.g. Always answer in bullet points"></textarea>
+    </div>
+
+    <div class="settings-section" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
+      <label>🔊 Read-aloud language</label>
+      <select id="voice-language-select" class="settings-select"></select>
+    </div>
+
+    <div class="settings-section">
+      <label>🎙 Read-aloud voice</label>
+      <select id="voice-select" class="settings-select"></select>
+      <div id="voice-hint" style="font-size:11px;color:var(--muted);margin-top:6px;"></div>
     </div>
 
     <div class="settings-section" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
@@ -1343,6 +1435,22 @@ PAGE = r"""<!DOCTYPE html>
 </div>
 
 <script>
+// Fix for the classic mobile "100vh is taller than what you can actually
+// see" bug (address bar / keyboard aren't subtracted from 100vh on most
+// mobile browsers). This keeps --app-height in sync with the real visible
+// height so the input box at the bottom of the page never gets pushed
+// off-screen. See the .layout CSS rule that consumes this variable.
+function _setAppHeight() {
+  const h = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+  document.documentElement.style.setProperty('--app-height', h + 'px');
+}
+_setAppHeight();
+window.addEventListener('resize', _setAppHeight);
+window.addEventListener('orientationchange', () => setTimeout(_setAppHeight, 100));
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', _setAppHeight);
+}
+
 const messagesWrap = document.getElementById('messages-wrap');
 const messagesEl   = document.getElementById('messages');
 const form         = document.getElementById('chat-form');
@@ -1496,7 +1604,7 @@ function clearEmptyState() {
   if (es) es.remove();
 }
 function showEmptyState() {
-  messagesEl.innerHTML = '<div class="empty-state" id="empty-state"><h2>Ꮇʏᴛʜɪᴄ ᴀɪ</h2><p>Ask me anything, generate images, or just chat 👋</p></div>';
+  messagesEl.innerHTML = '<div class="empty-state" id="empty-state"><h2>Mythic AI</h2><p>Ask me anything, generate images, or just chat 👋</p></div>';
 }
 
 let addMessage = function(role, text, attachment) {
@@ -1608,6 +1716,14 @@ function speak(text) {
   if (!plain) return;
   currentUtterance = new SpeechSynthesisUtterance(plain);
   currentUtterance.rate = 1.05;
+  const chosen = (typeof getChosenVoice === 'function') ? getChosenVoice() : null;
+  if (chosen) {
+    currentUtterance.voice = chosen;
+    currentUtterance.lang = chosen.lang;
+  } else {
+    const lang = localStorage.getItem('mythic_voice_lang');
+    if (lang) currentUtterance.lang = lang;
+  }
   currentUtterance.onstart = () => speakingIndicator.classList.add('show');
   currentUtterance.onend = () => speakingIndicator.classList.remove('show');
   currentUtterance.onerror = () => speakingIndicator.classList.remove('show');
@@ -1942,7 +2058,7 @@ fullscreenBtn.addEventListener('click', toggleFullscreen);
 document.addEventListener('fullscreenchange', updateFullscreenBtn);
 document.addEventListener('webkitfullscreenchange', updateFullscreenBtn);
 
-// "What should Ꮇʏᴛʜɪᴄ ᴀɪ call you?" — stored locally, sent with every chat request
+// "What should Mythic AI call you?" — stored locally, sent with every chat request
 function getUserName() { return localStorage.getItem('mythic_user_name') || ''; }
 function setUserName(name) {
   if (name) localStorage.setItem('mythic_user_name', name);
@@ -1986,9 +2102,9 @@ exportBtn.addEventListener('click', async () => {
     const r = await fetch('/api/conversations/' + activeConvId);
     if (!r.ok) return;
     const d = await r.json();
-    const lines = [`# ${d.title || 'Ꮇʏᴛʜɪᴄ ᴀɪ chat'}`, ''];
+    const lines = [`# ${d.title || 'Mythic AI chat'}`, ''];
     (d.messages || []).forEach(m => {
-      lines.push(m.role === 'user' ? 'You:' : 'Ꮇʏᴛʜɪᴄ ᴀɪ:');
+      lines.push(m.role === 'user' ? 'You:' : 'Mythic AI:');
       lines.push(m.text || (m.attachment ? `[attachment: ${m.attachment.name}]` : ''));
       lines.push('');
     });
@@ -2096,7 +2212,7 @@ settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsM
       notifBtn.textContent = 'Enabled ✓';
       notifBtn.style.borderColor = 'var(--accent)';
       notifBtn.style.color = 'var(--accent)';
-      notifStatus.textContent = "You'll get a notification when Ꮇʏᴛʜɪᴄ ᴀɪ replies while you're away.";
+      notifStatus.textContent = "You'll get a notification when Mythic AI replies while you're away.";
     } else if (perm === 'denied') {
       notifBtn.textContent = 'Blocked';
       notifBtn.style.borderColor = '#ef4444';
@@ -2106,7 +2222,7 @@ settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsM
       notifBtn.textContent = 'Enable';
       notifBtn.style.borderColor = 'var(--border)';
       notifBtn.style.color = 'var(--muted)';
-      notifStatus.textContent = "Get notified when Ꮇʏᴛʜɪᴄ ᴀɪ replies while you're in another tab.";
+      notifStatus.textContent = "Get notified when Mythic AI replies while you're in another tab.";
     }
   }
   updateNotifUI();
@@ -2197,6 +2313,129 @@ fontSizeSlider.addEventListener('input', () => {
 
 loadSettings();
 
+// ─── VOICE & LANGUAGE PICKER ─────────────────────────────────────────────────
+(function() {
+  const langSelect   = document.getElementById('voice-language-select');
+  const voiceSelect  = document.getElementById('voice-select');
+  const voiceHint    = document.getElementById('voice-hint');
+  if (!langSelect || !voiceSelect) return;
+
+  // A broad list of languages (BCP-47 codes) covering the world's most
+  // widely-spoken languages, so "ask which language" has real choices.
+  const LANGUAGES = [
+    ['en-US','English (US)'], ['en-GB','English (UK)'], ['en-IN','English (India)'],
+    ['hi-IN','Hindi'], ['bn-IN','Bengali'], ['ta-IN','Tamil'], ['te-IN','Telugu'],
+    ['mr-IN','Marathi'], ['gu-IN','Gujarati'], ['kn-IN','Kannada'], ['ml-IN','Malayalam'],
+    ['pa-IN','Punjabi'], ['ur-PK','Urdu'], ['es-ES','Spanish (Spain)'], ['es-MX','Spanish (Mexico)'],
+    ['fr-FR','French'], ['de-DE','German'], ['it-IT','Italian'], ['pt-BR','Portuguese (Brazil)'],
+    ['pt-PT','Portuguese (Portugal)'], ['nl-NL','Dutch'], ['ru-RU','Russian'], ['pl-PL','Polish'],
+    ['tr-TR','Turkish'], ['ar-SA','Arabic'], ['he-IL','Hebrew'], ['fa-IR','Persian'],
+    ['zh-CN','Chinese (Mandarin)'], ['zh-TW','Chinese (Taiwan)'], ['ja-JP','Japanese'],
+    ['ko-KR','Korean'], ['vi-VN','Vietnamese'], ['th-TH','Thai'], ['id-ID','Indonesian'],
+    ['ms-MY','Malay'], ['fil-PH','Filipino'], ['sw-KE','Swahili'], ['am-ET','Amharic'],
+    ['nb-NO','Norwegian'], ['sv-SE','Swedish'], ['da-DK','Danish'], ['fi-FI','Finnish'],
+    ['el-GR','Greek'], ['cs-CZ','Czech'], ['ro-RO','Romanian'], ['uk-UA','Ukrainian'],
+    ['hu-HU','Hungarian'], ['sk-SK','Slovak'], ['bg-BG','Bulgarian'], ['hr-HR','Croatian'],
+  ];
+  langSelect.innerHTML = LANGUAGES.map(([code,name]) => `<option value="${code}">${name}</option>`).join('');
+
+  // Common name fragments used by common TTS engines to signal gender, so we
+  // can bucket "5 female / 5 male" even though the Web Speech API itself
+  // doesn't expose a gender field.
+  const FEMALE_HINTS = ['female','woman','girl','samantha','victoria','karen','moira','tessa',
+    'zira','susan','fiona','kyoko','ting-ting','sin-ji','mei-jia','allison','ava','samanatha',
+    'salli','joanna','kimberly','kendra','ivy','aditi','raveena','shreya'];
+  const MALE_HINTS = ['male','man','boy','daniel','alex','fred','george','james','david',
+    'thomas','mark','ryan','oliver','matthew','justin','joey','brian','eric','yusuf'];
+
+  function guessGender(voice) {
+    const n = voice.name.toLowerCase();
+    if (FEMALE_HINTS.some(h => n.includes(h))) return 'female';
+    if (MALE_HINTS.some(h => n.includes(h))) return 'male';
+    return null; // unknown — still usable, just unlabeled
+  }
+
+  let cachedVoices = [];
+
+  function populateVoiceSelect() {
+    const langCode = langSelect.value || 'en-US';
+    const langPrefix = langCode.split('-')[0];
+    let matches = cachedVoices.filter(v => v.lang && v.lang.toLowerCase().startsWith(langPrefix));
+    if (!matches.length) matches = cachedVoices; // fall back to any installed voice
+
+    const female = [], male = [], other = [];
+    matches.forEach(v => {
+      const g = guessGender(v);
+      if (g === 'female' && female.length < 5) female.push(v);
+      else if (g === 'male' && male.length < 5) male.push(v);
+      else if (!g) other.push(v);
+    });
+    // Top up female/male buckets from unlabeled voices if the engine didn't
+    // give us 5 of each explicitly, so the picker still shows real options.
+    while (female.length < 5 && other.length) female.push(other.shift());
+    while (male.length < 5 && other.length) male.push(other.shift());
+
+    voiceSelect.innerHTML = '';
+    const addGroup = (label, list) => {
+      if (!list.length) return;
+      const grp = document.createElement('optgroup');
+      grp.label = label;
+      list.forEach((v, i) => {
+        const opt = document.createElement('option');
+        opt.value = v.name + '||' + v.lang;
+        opt.textContent = `${label === 'Female' ? '♀' : '♂'} ${label} Voice ${i+1} (${v.name})`;
+        grp.appendChild(opt);
+      });
+      voiceSelect.appendChild(grp);
+    };
+    addGroup('Female', female);
+    addGroup('Male', male);
+
+    if (!female.length && !male.length) {
+      voiceHint.textContent = 'No voices found for this language on your device yet — try again in a moment.';
+    } else {
+      voiceHint.textContent = `${female.length} female, ${male.length} male voice(s) available for this language.`;
+    }
+
+    const saved = localStorage.getItem('mythic_voice_choice');
+    if (saved && [...voiceSelect.options].some(o => o.value === saved)) {
+      voiceSelect.value = saved;
+    } else if (voiceSelect.options.length) {
+      voiceSelect.selectedIndex = 0;
+    }
+  }
+
+  function refreshVoices() {
+    if (!window.speechSynthesis) return;
+    cachedVoices = window.speechSynthesis.getVoices() || [];
+    populateVoiceSelect();
+  }
+
+  if (window.speechSynthesis) {
+    refreshVoices();
+    window.speechSynthesis.onvoiceschanged = refreshVoices;
+  }
+
+  langSelect.value = localStorage.getItem('mythic_voice_lang') || 'en-US';
+  langSelect.addEventListener('change', () => {
+    localStorage.setItem('mythic_voice_lang', langSelect.value);
+    populateVoiceSelect();
+  });
+  voiceSelect.addEventListener('change', () => {
+    localStorage.setItem('mythic_voice_choice', voiceSelect.value);
+  });
+
+  // Exposed globally so speak() can look up the actual SpeechSynthesisVoice
+  // object matching the saved name/lang choice.
+  window.getChosenVoice = function() {
+    const saved = localStorage.getItem('mythic_voice_choice');
+    if (!saved || !window.speechSynthesis) return null;
+    const [name, lang] = saved.split('||');
+    const voices = window.speechSynthesis.getVoices() || [];
+    return voices.find(v => v.name === name && v.lang === lang) || null;
+  };
+})();
+
 // ─── MARKDOWN RENDERING ──────────────────────────────────────────────────────
 function renderMarkdown(text) {
   const div = document.createElement('div');
@@ -2277,8 +2516,8 @@ async function addFollowupSuggestions(aiText) {
     const r = await fetch('/api/chat', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
-        message: `Based on this AI reply, suggest 3 short follow-up questions the user might ask. Reply ONLY with 3 questions, one per line, no numbering, no extra text:\n\n${aiText.slice(0,400)}`,
-        conversation_id: null, model: 'mythic-1.0', user_name: ''
+        message: `Based on this AI reply, suggest 3 short follow-up questions the user might ask. Reply ONLY with 3 questions, one per line, no numbering, no extra text, in English:\n\n${aiText.slice(0,400)}`,
+        conversation_id: null, model: 'mythic-1.0', user_name: '', ephemeral: true
       })
     });
     if (!r.ok) return;
@@ -2411,7 +2650,7 @@ function _showIOSInstallModal() {
   m.innerHTML = `
     <div style="background:var(--panel);border:1px solid var(--border);border-radius:20px;padding:28px 24px;width:100%;max-width:420px;text-align:center;box-shadow:0 -4px 40px rgba(0,0,0,.4);">
       <div style="font-size:42px;margin-bottom:10px;">📲</div>
-      <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">Install Ꮇʏᴛʜɪᴄ ᴀɪ</div>
+      <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">Install Mythic AI</div>
       <div style="color:var(--muted);font-size:13.5px;line-height:1.7;margin-bottom:20px;">
         Tap the <strong style="color:var(--text);">Share button</strong> <span style="font-size:17px;">⬆</span> at the bottom of Safari,<br>
         then tap <strong style="color:var(--text);">"Add to Home Screen"</strong> <span style="font-size:15px;">➕</span>
@@ -2441,7 +2680,7 @@ if (installBtn) {
     } else {
       // Generic fallback for other browsers
       alert(
-        'Install Ꮇʏᴛʜɪᴄ ᴀɪ as an app:\n\n' +
+        'Install Mythic AI as an app:\n\n' +
         '• Chrome / Edge: Click ⋮ menu → "Install app"\n' +
         '• Samsung Browser: Tap ⋮ → "Add page to"\n' +
         '• Firefox: Tap ⋮ → "Install"\n' +
@@ -2531,7 +2770,7 @@ if (notifAllowBtn) notifAllowBtn.addEventListener('click', async () => {
     // Immediately show a confirmation notification so the user knows it worked
     if (_swReg) {
       try {
-        await _swReg.showNotification('Ꮇʏᴛʜɪᴄ ᴀɪ 🔔', {
+        await _swReg.showNotification('Mythic AI 🔔', {
           body: "Notifications enabled! You'll hear from me when your answer is ready.",
           icon: '/icon.png', badge: '/icon.png',
           tag: 'mythic-notif-confirm', vibrate: [150, 80, 150],
@@ -2540,14 +2779,14 @@ if (notifAllowBtn) notifAllowBtn.addEventListener('click', async () => {
       _doSubscribe(_swReg);
     } else {
       // SW not ready yet — try a plain Notification as fallback
-      try { new Notification('Ꮇʏᴛʜɪᴄ ᴀɪ 🔔', { body: "Notifications enabled!", icon: '/icon.png' }); }
+      try { new Notification('Mythic AI 🔔', { body: "Notifications enabled!", icon: '/icon.png' }); }
       catch {}
     }
     // Update the Settings toggle UI
     const nb = document.getElementById('notif-toggle-btn');
     const ns = document.getElementById('notif-status');
     if (nb) { nb.textContent = 'Enabled ✓'; nb.style.borderColor = 'var(--accent)'; nb.style.color = 'var(--accent)'; }
-    if (ns) ns.textContent = "You'll get notified when Ꮇʏᴛʜɪᴄ ᴀɪ replies while you're away.";
+    if (ns) ns.textContent = "You'll get notified when Mythic AI replies while you're away.";
     localStorage.removeItem('mythic_notif_dismissed');
   } else {
     // User denied — update Settings UI accordingly
@@ -2578,7 +2817,7 @@ window._notifyAiReply = function(preview) {
   const body = preview || 'Your answer is ready — tap to read it.';
   if (_swReg) {
     try {
-      _swReg.showNotification('Ꮇʏᴛʜɪᴄ ᴀɪ replied 💬', {
+      _swReg.showNotification('Mythic AI replied 💬', {
         body, icon: '/icon.png', badge: '/icon.png',
         tag: 'mythic-ai-reply', renotify: true, vibrate: [200, 100, 200],
         data: { url: '/' },
@@ -2587,7 +2826,7 @@ window._notifyAiReply = function(preview) {
     } catch {}
   } else {
     // SW not available — plain Notification as fallback
-    try { new Notification('Ꮇʏᴛʜɪᴄ ᴀɪ replied 💬', { body, icon: '/icon.png' }); }
+    try { new Notification('Mythic AI replied 💬', { body, icon: '/icon.png' }); }
     catch {}
   }
 };
@@ -3095,7 +3334,7 @@ self.addEventListener('fetch', e => {
 
 // ── Push Notifications ────────────────────────────────────────────────────────
 self.addEventListener('push', e => {
-  let data = { title: 'Ꮇʏᴛʜɪᴄ ᴀɪ', body: 'You have a new message', icon: '/icon.png', url: '/' };
+  let data = { title: 'Mythic AI', body: 'You have a new message', icon: '/icon.png', url: '/' };
   try {
     if (e.data) {
       const parsed = e.data.json();
@@ -3146,7 +3385,7 @@ self.addEventListener('notificationclick', e => {
 @app.route("/manifest.json")
 def pwa_manifest():
     manifest = {
-        "name": "Ꮇʏᴛʜɪᴄ ᴀɪ",
+        "name": "Mythic AI",
         "short_name": "Mythic AI",
         "description": "Smart AI assistant by Aarav Singh",
         "start_url": "/",
@@ -3428,8 +3667,20 @@ def _openai_style_stream(url, api_key, model, messages, provider_label):
         # all mean "silently try the next provider", never shown to the user.
         return
 
-    for line in resp.iter_lines(decode_unicode=True):
-        if not line or not line.startswith("data:"):
+    # IMPORTANT: iterate raw bytes and decode as UTF-8 ourselves. Groq/Cerebras
+    # don't set a charset on their SSE stream, and `requests` falls back to
+    # Latin-1 for text-ish content types per RFC 2616 when no charset is
+    # given — decode_unicode=True would then silently mangle every non-ASCII
+    # character (Hindi, emoji, curly quotes, etc.) into mojibake while plain
+    # English looked fine, which is exactly the "garbled Hindi" bug.
+    for raw_line in resp.iter_lines(decode_unicode=False):
+        if not raw_line:
+            continue
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if not line.startswith("data:"):
             continue
         data_str = line[5:].strip()
         if data_str == "[DONE]":
@@ -3496,7 +3747,7 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None):
 # "VIP" is gated by a password so it isn't just a free option in the dropdown.
 # Set VIP_PASSWORD as an environment variable — if it's never set, the VIP
 # tier simply can't be unlocked (safe default, no hardcoded password).
-VIP_PASSWORD = os.environ.get("VIP_PASSWORD", "")
+VIP_PASSWORD = os.environ.get("VIP_PASSWORD", "1254")
 
 MODEL_CATALOG = [
     {"id": "mythic-1", "name": "Mythic 1", "vip": False},
@@ -3586,7 +3837,7 @@ def push_unsubscribe():
 def push_test():
     """Send a test notification to all subscriptions (admin-only for dev)."""
     send_push_notification(
-        title="Ꮇʏᴛʜɪᴄ ᴀɪ",
+        title="Mythic AI",
         body="🎉 Push notifications are working!",
         url="/",
     )
@@ -3769,9 +4020,26 @@ def chat():
     user_message = (data.get("message") or "").strip()
     conv_id = data.get("conversation_id")
     attachment = data.get("attachment")  # {name, mimeType, dataBase64} or None
-    user_name = (data.get("user_name") or "").strip()[:60]  # what Ꮇʏᴛʜɪᴄ ᴀɪ should call the user
+    user_name = (data.get("user_name") or "").strip()[:60]  # what Mythic AI should call the user
     requested_model = (data.get("model") or DEFAULT_MODEL_ID).strip()
     regenerate = bool(data.get("regenerate"))
+    # "ephemeral" is used by internal helper calls (e.g. generating follow-up
+    # question suggestions) that need a real AI reply but must NEVER show up
+    # as a saved chat in the sidebar and must never touch a real conversation.
+    ephemeral = bool(data.get("ephemeral"))
+
+    if ephemeral:
+        if not user_message:
+            return jsonify({"error": "message is required"}), 400
+        username = current_username()
+        temp_messages = [{"role": "user", "parts": [{"text": user_message}]}]
+
+        def generate_ephemeral():
+            for chunk in auto_stream_chunks(None, temp_messages, SYSTEM_PROMPT):
+                yield chunk.encode("utf-8")
+
+        return Response(stream_with_context(generate_ephemeral()),
+                         mimetype="text/plain; charset=utf-8")
 
     if regenerate:
         if not conv_id:
@@ -3845,11 +4113,12 @@ def chat():
 
         for chunk in chunk_source:
             full_reply.append(chunk)
-            yield chunk
+            yield chunk.encode("utf-8")
         messages.append({"role": "model", "parts": [{"text": "".join(full_reply)}]})
         save_conversation(username, conv_id, conv)
 
     resp = Response(stream_with_context(generate()), mimetype="text/plain; charset=utf-8")
+    resp.headers["Content-Type"] = "text/plain; charset=utf-8"
     resp.headers["X-Conversation-Id"] = conv_id
     return resp
 
@@ -3987,6 +4256,23 @@ def generate_image():
         return jsonify({"error": f"Image generation error: {str(e)}"}), 500
 
 
+_reengagement_thread_started = False
+
+def _start_reengagement_thread_once():
+    """Starts the hourly notification background thread exactly once,
+    whether the app is launched via `python ai_chat.py`, gunicorn, or any
+    other WSGI runner. Never starts it on serverless platforms (Vercel etc.)
+    since a background thread there would just be frozen between requests
+    and never actually fire on schedule — see IS_SERVERLESS notes above."""
+    global _reengagement_thread_started
+    if _reengagement_thread_started or IS_SERVERLESS:
+        return
+    threading.Thread(target=_reengagement_loop, daemon=True).start()
+    _reengagement_thread_started = True
+
+
+_start_reengagement_thread_once()
+
 if __name__ == "__main__":
     active = []
     if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
@@ -3997,13 +4283,12 @@ if __name__ == "__main__":
     image_provider = "NanoBanana (image-to-image supported)" if NANO_BANANA_API_KEY else (
         "HuggingFace FLUX (text-to-image only)" if HF_API_KEY else "none configured!"
     )
-    print(f"Starting Ꮇʏᴛʜɪᴄ ᴀɪ at http://localhost:5000")
+    print(f"Starting Mythic AI at http://localhost:5000")
     print(f"Providers (Groq primary, Cerebras fallback): {providers_str}")
     print(f"Image generation: {image_provider}")
-
-    # Background daemon thread: periodically nudges quiet users with a
-    # re-engagement / streak-on-hold push notification (only fires anything
-    # if VAPID_PRIVATE_KEY / VAPID_PUBLIC_KEY are configured).
-    threading.Thread(target=_reengagement_loop, daemon=True).start()
+    if IS_SERVERLESS:
+        print("NOTE: detected a serverless environment (Vercel) — see the "
+              "IS_SERVERLESS comment near the top of this file for the "
+              "limitations that come with running this app there.")
 
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
