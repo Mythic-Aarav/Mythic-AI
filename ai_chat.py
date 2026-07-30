@@ -3803,10 +3803,47 @@ def _openai_style_stream(url, api_key, model, messages, provider_label):
     """Shared streaming logic for Groq/Cerebras (both are OpenAI-compatible).
     Yields nothing at all on ANY failure (auth, rate limit, timeout, invalid
     model, network error, 4xx/5xx) so the caller can silently fall through to
-    the next provider without ever exposing a provider error to the user."""
+    the next provider without ever exposing a provider error to the user.
+
+    On Vercel/serverless, streaming responses are buffered and can be cut off,
+    so we fall back to a single non-streaming request that returns the full
+    reply in one go — the frontend still displays it, just not word-by-word."""
     if not api_key:
         print(f"[{provider_label}] skipped: no API key configured")
         return
+
+    # Non-streaming path on serverless — avoids Vercel's edge buffer cutting
+    # the response short mid-stream.
+    if IS_SERVERLESS:
+        try:
+            resp = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": messages, "stream": False, "max_tokens": 2048},
+                timeout=45,
+            )
+        except requests.RequestException as e:
+            print(f"[{provider_label}] network error: {e}")
+            return
+        if resp.status_code != 200:
+            try: body_preview = resp.text[:500]
+            except Exception: body_preview = "<unreadable>"
+            print(f"[{provider_label}] HTTP {resp.status_code}: {body_preview}")
+            return
+        try:
+            obj = resp.json()
+            content = obj["choices"][0]["message"]["content"] or ""
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+            print(f"[{provider_label}] bad JSON: {e}")
+            return
+        # Yield the full reply in reasonable chunks so the frontend still
+        # renders progressively even though the network delivered it all at once
+        step = 80
+        for i in range(0, len(content), step):
+            yield content[i:i + step]
+        return
+
+    # Streaming path — the normal, preferred flow on always-on hosts
     try:
         resp = requests.post(
             url,
@@ -3819,8 +3856,6 @@ def _openai_style_stream(url, api_key, model, messages, provider_label):
         return
 
     if resp.status_code != 200:
-        # Log status + body so auth/model/rate-limit errors are visible in
-        # Render's logs, without ever exposing them to the end user.
         try:
             body_preview = resp.text[:500]
         except Exception:
@@ -3888,7 +3923,10 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
         order.append(("Cerebras", lambda: cerebras_stream_chunks(openai_msgs, cerebras_key)))
 
     if not order:
-        yield "I'm not able to respond right now — no AI provider is configured on the server."
+        yield ("I can't reach any AI provider right now. If this is your app, please "
+               "add a `GROQ_API_KEY` (get one free at https://console.groq.com/keys) "
+               "or `CEREBRAS_API_KEY` in your environment variables. If you're the user, "
+               "you can also add your own API key in Settings → My API Keys.")
         return
 
     for _name, fn in order:
@@ -3899,10 +3937,13 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
                 yield chunk
             if collected:
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[{_name}] unexpected error: {e}")
 
-    yield "I'm having trouble reaching the AI service right now — please try again in a moment."
+    # All configured providers failed silently — give the user something actionable
+    yield ("I couldn't get a reply from the AI right now. This usually means the API "
+           "key on the server is invalid, out of quota, or the provider is temporarily "
+           "down. Please try again in a moment, or add your own API key in Settings.")
 
 
 # --- Model selector (cosmetic tiers over the same underlying providers) -----
@@ -4021,6 +4062,67 @@ def push_test():
         url="/",
     )
     return jsonify({"status": "sent"})
+
+
+# ── Cron endpoint for hourly notifications ───────────────────────────────────
+# On Vercel serverless, the background thread never fires because functions
+# are frozen between requests. Configure a Vercel Cron Job (or GitHub Actions,
+# cron-job.org, EasyCron, etc.) to hit this endpoint every hour:
+#
+#   vercel.json:
+#     { "crons": [{ "path": "/api/cron/reengagement", "schedule": "0 * * * *" }] }
+#
+# Protection: set CRON_SECRET as an environment variable and pass it in a
+# header:  Authorization: Bearer <CRON_SECRET>
+#          or in a query string: /api/cron/reengagement?secret=<CRON_SECRET>
+# If CRON_SECRET is unset, the endpoint is open (fine for dev only).
+CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()
+
+@app.route("/api/cron/reengagement", methods=["GET", "POST"])
+def cron_reengagement():
+    if CRON_SECRET:
+        provided = ""
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            provided = auth[7:].strip()
+        elif "x-vercel-cron-secret" in request.headers:
+            provided = request.headers.get("x-vercel-cron-secret", "").strip()
+        else:
+            provided = request.args.get("secret", "").strip()
+        if provided != CRON_SECRET:
+            return jsonify({"error": "unauthorized"}), 401
+    try:
+        _run_reengagement_pass()
+        return jsonify({"status": "ok", "subscribers": len(_push_subscriptions)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── /api/health: quick diagnostic so admins can see what's configured ────────
+@app.route("/api/health", methods=["GET"])
+def api_health():
+    return jsonify({
+        "app": "Mythic AI",
+        "serverless": IS_SERVERLESS,
+        "providers": {
+            "groq":     {"configured": bool(GROQ_API_KEY),     "model": GROQ_MODEL},
+            "cerebras": {"configured": bool(CEREBRAS_API_KEY), "model": CEREBRAS_MODEL},
+        },
+        "image_generation": {
+            "nano_banana":  bool(NANO_BANANA_API_KEY),
+            "huggingface":  bool(HF_API_KEY),
+            "pollinations": True,  # always available, no key needed
+        },
+        "push_notifications": {
+            "configured": _PUSH_AVAILABLE and bool(VAPID_PRIVATE_KEY) and bool(VAPID_PUBLIC_KEY),
+            "subscribers": len(_push_subscriptions),
+            "cron_endpoint": "/api/cron/reengagement",
+            "cron_secret_set": bool(CRON_SECRET),
+        },
+        "hint": ("Add GROQ_API_KEY or CEREBRAS_API_KEY as environment variables "
+                 "if 'configured' is false. On Vercel, also set up a cron job "
+                 "hitting /api/cron/reengagement every hour for notifications.")
+    })
 
 
 # --- Weather (Open-Meteo — free, no API key needed, works for any country/city) ---
