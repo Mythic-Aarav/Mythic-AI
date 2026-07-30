@@ -1954,7 +1954,7 @@ function addFileMessage(fileB64, filename, mimeType, note) {
   const div = document.createElement('div');
   div.className = 'msg ai';
   const label = document.createElement('div');
-  label.textContent = 'Here\\'s your file, ready to download:';
+  label.textContent = "Here's your file, ready to download:";
   div.appendChild(label);
   const blob = _b64ToBlob(fileB64, mimeType);
   const url = URL.createObjectURL(blob);
