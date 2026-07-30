@@ -3805,6 +3805,7 @@ def _openai_style_stream(url, api_key, model, messages, provider_label):
     model, network error, 4xx/5xx) so the caller can silently fall through to
     the next provider without ever exposing a provider error to the user."""
     if not api_key:
+        print(f"[{provider_label}] skipped: no API key configured")
         return
     try:
         resp = requests.post(
@@ -3813,10 +3814,18 @@ def _openai_style_stream(url, api_key, model, messages, provider_label):
             json={"model": model, "messages": messages, "stream": True, "max_tokens": 2048},
             stream=True, timeout=60,
         )
-    except requests.RequestException:
+    except requests.RequestException as e:
+        print(f"[{provider_label}] network error: {e}")
         return
 
     if resp.status_code != 200:
+        # Log status + body so auth/model/rate-limit errors are visible in
+        # Render's logs, without ever exposing them to the end user.
+        try:
+            body_preview = resp.text[:500]
+        except Exception:
+            body_preview = "<unreadable>"
+        print(f"[{provider_label}] HTTP {resp.status_code}: {body_preview}")
         return
 
     for raw_line in resp.iter_lines(decode_unicode=False):
