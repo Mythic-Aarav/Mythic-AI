@@ -711,6 +711,11 @@ _activity_lock = threading.Lock()
 
 _REENGAGEMENT_ROTATION = ["come_back", "study", "activity", "feature"]
 _REENGAGEMENT_SKIP_IF_ACTIVE_WITHIN_HOURS = 1
+# Minimum gap between two notifications to the same user — prevents duplicates
+# if the cron endpoint is hit multiple times in quick succession (e.g. two
+# external crons, or a manual test). Default 55 minutes so an hourly cron still
+# fires normally, but rapid retries are ignored.
+_REENGAGEMENT_MIN_GAP_MINUTES = 55
 _REENGAGEMENT_CHECK_INTERVAL_SECONDS = 60 * 60  # once every hour
 
 
@@ -797,6 +802,13 @@ def _run_reengagement_pass():
             last_active_ts = rec.get("last_active_ts", 0)
             hours_inactive = (now - last_active_ts) / 3600.0 if last_active_ts else 999
             if hours_inactive < _REENGAGEMENT_SKIP_IF_ACTIVE_WITHIN_HOURS:
+                continue
+
+            # Don't re-notify the same user within the minimum-gap window,
+            # so rapid cron hits don't spam the same person.
+            last_notified_ts = rec.get("last_notified_ts", 0)
+            minutes_since_notified = (now - last_notified_ts) / 60.0 if last_notified_ts else 99999
+            if minutes_since_notified < _REENGAGEMENT_MIN_GAP_MINUTES:
                 continue
 
             streak = rec.get("streak", 0)
