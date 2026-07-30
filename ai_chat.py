@@ -94,9 +94,15 @@ NANO_BANANA_BASE     = "https://api.nanobananaapi.ai/api/v1/nanobanana"
 #
 # If keys are not set, push notifications are silently disabled — everything
 # else still works normally.
-VAPID_PRIVATE_KEY   = os.environ.get("VAPID_PRIVATE_KEY",   "")
-VAPID_PUBLIC_KEY    = os.environ.get("VAPID_PUBLIC_KEY",    "")
-VAPID_CLAIMS_EMAIL  = os.environ.get("VAPID_CLAIMS_EMAIL",  "mailto:admin@mythic-ai.app")
+VAPID_PRIVATE_KEY   = os.environ.get("VAPID_PRIVATE_KEY",   "").strip()
+# The public key MUST be a single line with no stray whitespace/newlines —
+# copy/pasting into a multi-line env-var box (Render, etc.) can silently
+# introduce a trailing newline or spaces, which breaks the browser's
+# base64url decode and produces "applicationServerKey is not valid" even
+# though the key content itself is correct. Strip defensively and also
+# collapse any internal whitespace that shouldn't be there.
+VAPID_PUBLIC_KEY    = "".join(os.environ.get("VAPID_PUBLIC_KEY", "").split())
+VAPID_CLAIMS_EMAIL  = os.environ.get("VAPID_CLAIMS_EMAIL",  "mailto:admin@mythic-ai.app").strip()
 
 # In-memory subscription store (replaced by file/Supabase in production)
 # Key: a stable browser id, Value: the full PushSubscription JSON object
@@ -3939,7 +3945,16 @@ def api_streak():
 def push_vapid_key():
     if not VAPID_PUBLIC_KEY:
         return jsonify({"error": "push not configured"}), 503
-    return jsonify({"publicKey": VAPID_PUBLIC_KEY})
+    # length_ok: a valid P-256 uncompressed-point key, base64url-encoded
+    # with no padding, is always exactly 87 characters. If this is false,
+    # the env var was pasted with extra/missing characters (whitespace,
+    # truncation, wrong key type) and the browser will reject it with
+    # "applicationServerKey is not valid".
+    return jsonify({
+        "publicKey": VAPID_PUBLIC_KEY,
+        "length": len(VAPID_PUBLIC_KEY),
+        "length_ok": len(VAPID_PUBLIC_KEY) == 87,
+    })
 
 
 @app.route("/api/push/subscribe", methods=["POST"])
