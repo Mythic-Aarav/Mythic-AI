@@ -43,6 +43,7 @@ Features:
 """
 
 import os
+import re
 import json
 import uuid
 import time
@@ -583,7 +584,12 @@ def _delete_conversation_file(username, conv_id):
 
 
 def make_title(first_message):
-    title = (first_message or "Attachment").strip().replace("\n", " ")
+    text = (first_message or "Attachment").strip()
+    # Strip an internal "[Instructions: ...] " tone/length/custom-instructions
+    # prefix (added client-side when Settings → tone/length are set) so it
+    # never leaks into a conversation's saved title in the sidebar.
+    text = re.sub(r'^\[Instructions:.*?\]\s*', '', text, flags=re.DOTALL)
+    title = text.replace("\n", " ").strip() or "New chat"
     return title[:40] + ("…" if len(title) > 40 else "")
 
 
@@ -715,8 +721,17 @@ _REENGAGEMENT_SKIP_IF_ACTIVE_WITHIN_HOURS = 1
 # if the cron endpoint is hit multiple times in quick succession (e.g. two
 # external crons, or a manual test). Default 55 minutes so an hourly cron still
 # fires normally, but rapid retries are ignored.
+#
+# NOTE ON SCHEDULES:
+#   - Render (always-on): the in-process background thread below fires
+#     every _REENGAGEMENT_CHECK_INTERVAL_SECONDS (1 hour by default) — see
+#     _reengagement_loop(). Nothing else to configure.
+#   - Vercel (serverless): the in-process thread never runs (frozen between
+#     requests), so /api/cron/reengagement must be triggered externally.
+#     Set up a Vercel Cron Job that hits it ONCE A DAY AT 12:00 — see the
+#     vercel.json example and CRON_SECRET notes near that route below.
 _REENGAGEMENT_MIN_GAP_MINUTES = 55
-_REENGAGEMENT_CHECK_INTERVAL_SECONDS = 60 * 60  # once every hour
+_REENGAGEMENT_CHECK_INTERVAL_SECONDS = 60 * 60  # Render: fires once every hour
 
 
 def _load_all_activity():
@@ -832,6 +847,9 @@ def _run_reengagement_pass():
 
 
 def _reengagement_loop():
+    """Render / always-on hosts only. Fires _run_reengagement_pass() every
+    _REENGAGEMENT_CHECK_INTERVAL_SECONDS (1 hour). Never runs on Vercel —
+    use the /api/cron/reengagement endpoint with an external daily cron there."""
     while True:
         try:
             _run_reengagement_pass()
@@ -3935,10 +3953,9 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
         order.append(("Cerebras", lambda: cerebras_stream_chunks(openai_msgs, cerebras_key)))
 
     if not order:
-        yield ("I can't reach any AI provider right now. If this is your app, please "
-               "add a `GROQ_API_KEY` (get one free at https://console.groq.com/keys) "
-               "or `CEREBRAS_API_KEY` in your environment variables. If you're the user, "
-               "you can also add your own API key in Settings → My API Keys.")
+        # Kept short and free of internal setup instructions — see chat
+        # request for context.
+        yield "I'm not able to reply right now — please try again shortly."
         return
 
     for _name, fn in order:
@@ -3952,10 +3969,8 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
         except Exception as e:
             print(f"[{_name}] unexpected error: {e}")
 
-    # All configured providers failed silently — give the user something actionable
-    yield ("I couldn't get a reply from the AI right now. This usually means the API "
-           "key on the server is invalid, out of quota, or the provider is temporarily "
-           "down. Please try again in a moment, or add your own API key in Settings.")
+    # All configured providers failed silently — keep it short and generic.
+    yield "I couldn't get a reply just now. Please try again in a moment."
 
 
 # --- Model selector (cosmetic tiers over the same underlying providers) -----
@@ -4076,13 +4091,25 @@ def push_test():
     return jsonify({"status": "sent"})
 
 
-# ── Cron endpoint for hourly notifications ───────────────────────────────────
-# On Vercel serverless, the background thread never fires because functions
-# are frozen between requests. Configure a Vercel Cron Job (or GitHub Actions,
-# cron-job.org, EasyCron, etc.) to hit this endpoint every hour:
+# ── Cron endpoint for scheduled notifications ─────────────────────────────────
+# SCHEDULE SUMMARY:
+#   - Render (or any always-on host): nothing to configure — the in-process
+#     background thread (_reengagement_loop) fires automatically every
+#     _REENGAGEMENT_CHECK_INTERVAL_SECONDS (1 hour).
+#   - Vercel (serverless): the in-process thread never runs there (functions
+#     freeze between requests), so this endpoint must be triggered by an
+#     EXTERNAL cron, once a day at 12:00 (noon). Configure it with:
 #
 #   vercel.json:
-#     { "crons": [{ "path": "/api/cron/reengagement", "schedule": "0 * * * *" }] }
+#     {
+#       "crons": [
+#         { "path": "/api/cron/reengagement", "schedule": "0 12 * * *" }
+#       ]
+#     }
+#
+#   "0 12 * * *" = once a day at 12:00 in the project's configured cron
+#   timezone (UTC by default on Vercel — adjust the hour if you need a
+#   specific local noon).
 #
 # Protection: set CRON_SECRET as an environment variable and pass it in a
 # header:  Authorization: Bearer <CRON_SECRET>
@@ -4129,11 +4156,12 @@ def api_health():
             "configured": _PUSH_AVAILABLE and bool(VAPID_PRIVATE_KEY) and bool(VAPID_PUBLIC_KEY),
             "subscribers": len(_push_subscriptions),
             "cron_endpoint": "/api/cron/reengagement",
+            "cron_schedule": "Render: every 1 hour (built-in thread). Vercel: once daily at 12:00 via external cron.",
             "cron_secret_set": bool(CRON_SECRET),
         },
         "hint": ("Add GROQ_API_KEY or CEREBRAS_API_KEY as environment variables "
                  "if 'configured' is false. On Vercel, also set up a cron job "
-                 "hitting /api/cron/reengagement every hour for notifications.")
+                 "hitting /api/cron/reengagement once a day at 12:00 for notifications.")
     })
 
 
@@ -4590,7 +4618,8 @@ def generate_image():
 _reengagement_thread_started = False
 
 def _start_reengagement_thread_once():
-    """Starts the hourly notification background thread exactly once."""
+    """Starts the hourly notification background thread exactly once.
+    Render/always-on only — never starts on Vercel (use the cron route)."""
     global _reengagement_thread_started
     if _reengagement_thread_started or IS_SERVERLESS:
         return
@@ -4613,6 +4642,8 @@ if __name__ == "__main__":
     print(f"Starting Mythic AI at http://localhost:5000")
     print(f"Providers (Groq primary, Cerebras fallback): {providers_str}")
     print(f"Image generation: {image_provider}")
+    print(f"Re-engagement notifications: Render/always-on -> hourly background "
+          f"thread. Vercel -> daily at 12:00 via /api/cron/reengagement (external cron).")
     if IS_SERVERLESS:
         print("NOTE: detected a serverless environment (Vercel) — see the "
               "IS_SERVERLESS comment near the top of this file for the "
