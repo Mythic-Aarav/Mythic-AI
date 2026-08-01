@@ -1854,6 +1854,7 @@ PAGE = r"""<!DOCTYPE html>
       <button class="quick-btn" id="homework-btn">📚 Homework</button>
       <button class="quick-btn" id="weather-btn">🌤 Weather</button>
       <button class="quick-btn" id="search-btn">🔍 Search</button>
+      <button class="quick-btn" id="code-workspace-btn">💻 Code</button>
     </div>
       <form id="chat-form">
         <div class="input-row">
@@ -2163,6 +2164,63 @@ PAGE = r"""<!DOCTYPE html>
 
     <div style="display:flex;justify-content:flex-end;margin-top:14px;">
       <button id="weather-close-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:10px 16px;font-size:14px;cursor:pointer;">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── CODE WORKSPACE — HTML/CSS/JS editor with live preview ──────────────── -->
+<div id="code-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:300;align-items:center;justify-content:center;padding:16px;">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;width:100%;max-width:1100px;height:88vh;display:flex;flex-direction:column;overflow:hidden;">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border);flex-shrink:0;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-size:16px;font-weight:700;">💻 Code Workspace</span>
+        <input id="code-project-name" value="my-project" style="background:var(--bg);border:1px solid var(--border);color:var(--muted);font-size:12px;padding:4px 8px;border-radius:6px;font-family:inherit;width:140px;">
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button id="code-run-btn" style="background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">▶ Run</button>
+        <button id="code-download-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;font-family:inherit;">⬇ Download</button>
+        <button id="code-fullscreen-preview-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;font-family:inherit;">⛶ Preview</button>
+        <button id="code-close-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;font-family:inherit;">✕</button>
+      </div>
+    </div>
+
+    <div style="display:flex;flex:1;min-height:0;">
+      <!-- Editor pane -->
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0;border-right:1px solid var(--border);">
+        <div style="display:flex;border-bottom:1px solid var(--border);flex-shrink:0;">
+          <button class="code-file-tab active" data-target="code-editor-html" style="flex:1;padding:9px;background:var(--accent-dim);color:var(--accent);border:none;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;">HTML</button>
+          <button class="code-file-tab" data-target="code-editor-css" style="flex:1;padding:9px;background:none;color:var(--muted);border:none;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;">CSS</button>
+          <button class="code-file-tab" data-target="code-editor-js" style="flex:1;padding:9px;background:none;color:var(--muted);border:none;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;">JS</button>
+        </div>
+        <textarea id="code-editor-html" spellcheck="false" style="flex:1;background:#0d1117;color:#c9d1d9;border:none;outline:none;padding:14px;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:13px;line-height:1.6;resize:none;tab-size:2;white-space:pre;overflow:auto;">&lt;!-- Write your HTML here --&gt;
+&lt;h1&gt;Hello from Mythic AI Code Workspace&lt;/h1&gt;
+&lt;p&gt;Edit HTML, CSS, and JS, then hit Run.&lt;/p&gt;
+&lt;button onclick="sayHi()"&gt;Click me&lt;/button&gt;</textarea>
+        <textarea id="code-editor-css" spellcheck="false" style="flex:1;display:none;background:#0d1117;color:#c9d1d9;border:none;outline:none;padding:14px;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:13px;line-height:1.6;resize:none;tab-size:2;white-space:pre;overflow:auto;">body {
+  font-family: sans-serif;
+  background: #1a1a1a;
+  color: #ececec;
+  padding: 24px;
+}
+button {
+  background: #10a37f;
+  color: #fff;
+  border: none;
+  padding: 10px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}</textarea>
+        <textarea id="code-editor-js" spellcheck="false" style="flex:1;display:none;background:#0d1117;color:#c9d1d9;border:none;outline:none;padding:14px;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:13px;line-height:1.6;resize:none;tab-size:2;white-space:pre;overflow:auto;">function sayHi() {
+  alert("Hello from your Code Workspace!");
+}</textarea>
+      </div>
+
+      <!-- Preview pane -->
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0;background:#fff;">
+        <div style="padding:6px 12px;background:var(--bg);border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);flex-shrink:0;">Live Preview</div>
+        <iframe id="code-preview-frame" sandbox="allow-scripts allow-modals" style="flex:1;border:none;width:100%;background:#fff;"></iframe>
+      </div>
     </div>
   </div>
 </div>
@@ -4202,7 +4260,119 @@ if (weatherLocBtn2) weatherLocBtn2.addEventListener('click', () => {
 });
 renderRecentSearches();
 
-// ─── Code block copy buttons (event delegation — blocks are added dynamically) ─
+// ─── CODE WORKSPACE — HTML/CSS/JS editor with live preview ─────────────────
+(function() {
+  const codeBtn        = document.getElementById('code-workspace-btn');
+  const codeModal       = document.getElementById('code-modal-overlay');
+  const closeBtn        = document.getElementById('code-close-btn');
+  const runBtn          = document.getElementById('code-run-btn');
+  const downloadBtn     = document.getElementById('code-download-btn');
+  const fullscreenBtn   = document.getElementById('code-fullscreen-preview-btn');
+  const projectNameInput= document.getElementById('code-project-name');
+  const previewFrame    = document.getElementById('code-preview-frame');
+  const editors = {
+    html: document.getElementById('code-editor-html'),
+    css:  document.getElementById('code-editor-css'),
+    js:   document.getElementById('code-editor-js'),
+  };
+  const tabs = document.querySelectorAll('.code-file-tab');
+  if (!codeBtn) return;
+
+  const STORE_KEY = 'mythic_code_workspace';
+  function saveDraft() {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({
+        html: editors.html.value, css: editors.css.value, js: editors.js.value,
+        name: projectNameInput.value,
+      }));
+    } catch {}
+  }
+  function loadDraft() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+      if (saved) {
+        editors.html.value = saved.html ?? editors.html.value;
+        editors.css.value  = saved.css  ?? editors.css.value;
+        editors.js.value   = saved.js   ?? editors.js.value;
+        projectNameInput.value = saved.name || 'my-project';
+      }
+    } catch {}
+  }
+  loadDraft();
+
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      tabs.forEach(t => {
+        t.classList.remove('active');
+        t.style.background = 'none'; t.style.color = 'var(--muted)';
+      });
+      tab.classList.add('active');
+      tab.style.background = 'var(--accent-dim)'; tab.style.color = 'var(--accent)';
+      Object.values(editors).forEach(ed => ed.style.display = 'none');
+      document.getElementById(tab.dataset.target).style.display = 'block';
+    });
+  });
+
+  // Tab-key inserts 2 spaces instead of moving focus, standard editor behavior
+  Object.values(editors).forEach(ed => {
+    ed.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = ed.selectionStart, end = ed.selectionEnd;
+        ed.value = ed.value.slice(0, start) + '  ' + ed.value.slice(end);
+        ed.selectionStart = ed.selectionEnd = start + 2;
+      }
+    });
+    ed.addEventListener('input', saveDraft);
+  });
+
+  function buildDocument() {
+    return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>${editors.css.value}</style>
+</head>
+<body>
+${editors.html.value}
+<script>${editors.js.value}<\/script>
+</body>
+</html>`;
+  }
+
+  function runPreview() {
+    previewFrame.srcdoc = buildDocument();
+    saveDraft();
+  }
+
+  codeBtn.addEventListener('click', () => {
+    codeModal.style.display = 'flex';
+    runPreview();
+  });
+  closeBtn.addEventListener('click', () => { codeModal.style.display = 'none'; });
+  codeModal.addEventListener('click', (e) => { if (e.target === codeModal) codeModal.style.display = 'none'; });
+  runBtn.addEventListener('click', runPreview);
+
+  downloadBtn.addEventListener('click', () => {
+    const name = (projectNameInput.value || 'my-project').replace(/[^a-z0-9_-]/gi, '-');
+    const blob = new Blob([buildDocument()], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name + '.html';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  fullscreenBtn.addEventListener('click', () => {
+    const win = window.open('', '_blank');
+    if (win) { win.document.write(buildDocument()); win.document.close(); }
+  });
+
+  // Ctrl+Enter inside the modal re-runs the preview, like most code sandboxes
+  codeModal.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runPreview(); }
+  });
+})();
 messagesEl.addEventListener('click', async (e) => {
   const btn = e.target.closest('.code-copy-btn');
   if (!btn) return;
@@ -4990,6 +5160,7 @@ def api_rename_conversation(conv_id):
         if not new_title:
             return jsonify({"error": "title cannot be empty"}), 400
         conv["title"] = new_title
+        conv["title_is_custom"] = True
         changed["title"] = new_title
     if "folder" in data:
         folder = (data.get("folder") or "").strip()[:60] or None
@@ -5268,6 +5439,72 @@ def cerebras_stream_chunks(messages, api_key=None, model=None):
         "https://api.cerebras.ai/v1/chat/completions",
         api_key or CEREBRAS_API_KEY, model or CEREBRAS_MODEL, CEREBRAS_MODEL, messages, "Cerebras",
     )
+
+
+def _quick_completion(messages, api_key_groq=None, api_key_cerebras=None, max_tokens=20):
+    """Non-streaming, short completion used for auxiliary tasks like AI title
+    generation — tries Groq then Cerebras (same silent-fallback pattern as
+    chat), returns plain text or None if both fail. Kept deliberately small
+    (max_tokens) since this is just for a 3-6 word chat title, not a real
+    reply, so it stays fast and cheap."""
+    groq_key = (api_key_groq or "").strip() or GROQ_API_KEY
+    cerebras_key = (api_key_cerebras or "").strip() or CEREBRAS_API_KEY
+
+    for key, model, url, label in (
+        (groq_key, GROQ_MODEL, "https://api.groq.com/openai/v1/chat/completions", "Groq"),
+        (cerebras_key, CEREBRAS_MODEL, "https://api.cerebras.ai/v1/chat/completions", "Cerebras"),
+    ):
+        if not key:
+            continue
+        try:
+            resp = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": messages, "stream": False, "max_tokens": max_tokens, "temperature": 0.4},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                continue
+            obj = resp.json()
+            content = (obj["choices"][0]["message"]["content"] or "").strip()
+            if content:
+                return content
+        except Exception as e:
+            print(f"[TitleGen/{label}] failed: {e}")
+            continue
+    return None
+
+
+def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, api_key_cerebras=None):
+    """Asks the AI for a short, natural chat title based on the first
+    exchange — the same pattern ChatGPT/Claude use, instead of just
+    truncating the raw first message. Falls back to make_title() if the
+    AI call fails for any reason, so a title is always produced."""
+    user_msg = (first_user_message or "").strip()
+    user_msg = re.sub(r'^\[Instructions:.*?\]\s*', '', user_msg, flags=re.DOTALL)
+    ai_reply = (first_ai_reply or "").strip()
+
+    if not user_msg and not ai_reply:
+        return "New chat"
+
+    prompt = (
+        "Generate a short, natural chat title (3-6 words, no quotes, no punctuation "
+        "at the end, no emoji, title case) that summarizes what this conversation is "
+        "about. Reply with ONLY the title text, nothing else.\n\n"
+        f"User: {user_msg[:400]}\n"
+        f"Assistant: {ai_reply[:400]}"
+    )
+    messages = [
+        {"role": "system", "content": "You generate concise chat titles. Reply with only the title, no extra text."},
+        {"role": "user", "content": prompt},
+    ]
+    result = _quick_completion(messages, api_key_groq, api_key_cerebras, max_tokens=16)
+    if result:
+        title = result.strip().strip('"').strip("'").split("\n")[0].strip()
+        title = re.sub(r'[.!?]+$', '', title).strip()
+        if title:
+            return title[:60]
+    return make_title(first_user_message)
 
 
 def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
@@ -5787,6 +6024,8 @@ def chat():
             "thorough than usual when it's helpful, without padding for its own sake."
         )
 
+    is_first_exchange = (not regenerate) and len(messages) == 1  # just the user message so far
+
     def generate():
         full_reply = []
         chunk_source = auto_stream_chunks(None, messages, effective_system_prompt,
@@ -5795,7 +6034,20 @@ def chat():
         for chunk in chunk_source:
             full_reply.append(chunk)
             yield chunk.encode("utf-8")
-        messages.append({"role": "model", "parts": [{"text": "".join(full_reply)}]})
+        reply_text = "".join(full_reply)
+        messages.append({"role": "model", "parts": [{"text": reply_text}]})
+
+        # AI-generated smart title — only for the very first exchange in a
+        # conversation, and only if the person hasn't already renamed the
+        # chat themselves (title_is_custom guards against overwriting that).
+        if is_first_exchange and not conv.get("title_is_custom"):
+            try:
+                conv["title"] = generate_smart_title(
+                    user_message, reply_text, user_groq_key, user_cerebras_key
+                )
+            except Exception as e:
+                print(f"[SmartTitle] failed, keeping fallback title: {e}")
+
         save_conversation(username, conv_id, conv)
 
     resp = Response(stream_with_context(generate()), mimetype="text/plain; charset=utf-8")
