@@ -2349,7 +2349,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
   currentAbortController = new AbortController();
   _lastUserMessageText = message || _lastUserMessageText;
 
-  if (!regenerate) {
+  if (!regenerate && currentMode === 'chat') {
     const wantsFile = FILE_KEYWORDS.test(message || '');
     const wantsImage = !wantsFile && IMAGE_KEYWORDS.test(message || '') && !attachment;
     if (wantsImage) {
@@ -2408,7 +2408,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
     loadConversationList();
     refreshStreakBadge();
 
-    if (!regenerate && FILE_KEYWORDS.test(message || '')) {
+    if (!regenerate && currentMode === 'chat' && FILE_KEYWORDS.test(message || '')) {
       await tryGenerateFile(message || '', fullText);
     }
 
@@ -3831,7 +3831,11 @@ function requirePassword(action) {
   }, 350);
 }
 
-// ─── Chat / Cowork / Code mode tabs (VIP-gated) ─────────────────────────────
+// ─── Chat / Cowork / Code mode tabs (VIP-model-gated) ───────────────────────
+// Cowork, Code, and Artifacts are only usable while the Mythic VIP model is
+// selected. If VIP isn't unlocked yet, switching to it goes through the
+// existing VIP password modal exactly once (via showVipModal / vipUnlocked) —
+// after that, no repeated password prompts, just the model requirement.
 const modeTabs = document.querySelectorAll('.mode-tab[data-mode]');
 function setActiveModeTab(mode) {
   currentMode = mode;
@@ -3839,16 +3843,36 @@ function setActiveModeTab(mode) {
   const placeholders = { chat: 'Message Mythic AI...', cowork: 'Describe the task to hand off...', code: 'Describe what you want to build or fix...' };
   if (input) input.placeholder = placeholders[mode] || placeholders.chat;
 }
+function requireVipModel(action) {
+  if (selectedModel === 'mythic-vip') { action(); return; }
+  if (vipUnlocked) {
+    selectedModel = 'mythic-vip';
+    updateVipBtn();
+    action();
+    return;
+  }
+  showVipModal();
+  const check = setInterval(() => {
+    if (vipUnlocked && selectedModel === 'mythic-vip') { clearInterval(check); action(); }
+    const overlay = document.getElementById('vip-modal-overlay');
+    if (overlay && overlay.style.display === 'none') clearInterval(check);
+  }, 350);
+}
 modeTabs.forEach(tab => {
   tab.addEventListener('click', () => {
     const mode = tab.dataset.mode;
     if (mode === 'chat') { setActiveModeTab('chat'); return; }
-    requirePassword(() => {
+    requireVipModel(() => {
       tab.classList.add('unlocked');
       setActiveModeTab(mode);
     });
   });
 });
+// If the person switches back to a non-VIP model while on Cowork/Code, drop
+// back to Chat mode so requests don't silently keep using the VIP-only prompt.
+const _origVipBtnHandlerCheck = setInterval(() => {
+  if (selectedModel !== 'mythic-vip' && currentMode !== 'chat') setActiveModeTab('chat');
+}, 1000);
 
 // ─── Artifacts panel — collects code blocks pulled out of AI replies ───────
 function _extractCodeBlocks(text) {
@@ -3909,7 +3933,7 @@ function showArtifactsModal() {
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 }
 const artifactsTabBtn = document.getElementById('artifacts-tab-btn');
-if (artifactsTabBtn) artifactsTabBtn.addEventListener('click', () => requirePassword(() => {
+if (artifactsTabBtn) artifactsTabBtn.addEventListener('click', () => requireVipModel(() => {
   artifactsTabBtn.classList.add('unlocked');
   showArtifactsModal();
 }));
