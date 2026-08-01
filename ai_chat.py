@@ -281,6 +281,14 @@ app = Flask(__name__)
 # to the system prompt for that request only.
 MODE_PROMPTS = {
     "default": "",
+    "cowork": (
+        "MODE: Cowork. The user is delegating a multi-step task, not just asking a "
+        "quick question. Break the work into a short numbered plan first (3-7 steps), "
+        "then execute the steps yourself as far as you can in this reply — don't just "
+        "hand back a plan and stop. Call out any step you genuinely can't do (needs a "
+        "live tool, file access, etc.) instead of pretending to do it. End with a brief "
+        "status: done / partially done / blocked on X."
+    ),
     "coding": (
         "MODE: Coding Assistant. Prioritize correct, runnable code. Always specify "
         "the language in code fences. Briefly explain non-obvious logic. When asked "
@@ -642,8 +650,11 @@ def _load_conversation_file(username, conv_id):
         return None
 
 def _save_conversation_file(username, conv_id, data):
-    with open(_conv_file(username, conv_id), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(_conv_file(username, conv_id), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[save_conversation] FAILED to write conversation {conv_id} for {username}: {e}")
 
 def _delete_conversation_file(username, conv_id):
     path = _conv_file(username, conv_id)
@@ -1267,6 +1278,14 @@ PAGE = r"""<!DOCTYPE html>
   .quick-btn:hover { background:var(--accent-dim); border-color:var(--accent); color:var(--accent); }
   #quick-actions { flex-shrink:0; }
 
+  .mode-tab { display:flex; align-items:center; gap:6px; background:none; border:1px solid transparent;
+    color:var(--muted); font-size:13px; font-family:inherit; padding:7px 12px; border-radius:8px;
+    cursor:pointer; white-space:nowrap; touch-action:manipulation; }
+  .mode-tab:hover { background:var(--panel); color:var(--text); }
+  .mode-tab.active { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); font-weight:600; }
+  .mode-tab-lock { font-size:10px; opacity:.7; }
+  .mode-tab.active .mode-tab-lock, .mode-tab.unlocked .mode-tab-lock { display:none; }
+
   #messages-wrap::-webkit-scrollbar, #conv-list::-webkit-scrollbar { width:6px; }
   #messages-wrap::-webkit-scrollbar-thumb, #conv-list::-webkit-scrollbar-thumb
     { background:var(--border); border-radius:4px; }
@@ -1342,7 +1361,7 @@ PAGE = r"""<!DOCTYPE html>
     <div id="sidebar-footer">
       <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
         <button id="archived-toggle-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">🗄 Archived</button>
-        <button id="bookmarks-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">🔖 Bookmarks</button>
+        <button id="bookmarks-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">⭐ Bookmarks</button>
         <button id="stats-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">📊 Stats</button>
       </div>
       Mythic AI &middot; by Aarav Singh
@@ -1369,6 +1388,21 @@ PAGE = r"""<!DOCTYPE html>
       </div>
     </header>
 
+    <div id="mode-tab-bar" style="display:flex;align-items:center;gap:4px;padding:8px 20px;border-bottom:1px solid var(--border);background:var(--bg);flex-shrink:0;overflow-x:auto;">
+      <button class="mode-tab active" data-mode="chat" title="Regular chat">
+        💬 <span>Chat</span>
+      </button>
+      <button class="mode-tab" data-mode="cowork" title="VIP — multi-step task assistant">
+        🗂 <span>Cowork</span> <span class="mode-tab-lock">🔒</span>
+      </button>
+      <button class="mode-tab" data-mode="code" title="VIP — coding-focused assistant">
+        &lt;/&gt; <span>Code</span> <span class="mode-tab-lock">🔒</span>
+      </button>
+      <button class="mode-tab" id="artifacts-tab-btn" title="VIP — saved code/text snippets from replies">
+        📦 <span>Artifacts</span> <span class="mode-tab-lock">🔒</span>
+      </button>
+    </div>
+
     <div id="messages-wrap">
       <div id="messages">
         <div class="empty-state" id="empty-state">
@@ -1377,6 +1411,7 @@ PAGE = r"""<!DOCTYPE html>
         </div>
       </div>
     </div>
+
 
     <button id="scroll-btn" title="Scroll to bottom">↓</button>
 
@@ -1763,6 +1798,8 @@ const vipBtn        = document.getElementById('vip-btn');
 const streakBadge   = document.getElementById('streak-badge');
 
 let selectedModel = 'mythic-2';
+let currentMode   = 'chat';
+let _artifacts     = []; // {id, lang, code, ts, sourceMsgPreview}
 let vipUnlocked   = false;
 
 function getUserApiKeys() {
@@ -2336,6 +2373,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
         user_name: getUserName(),
         regenerate: !!regenerate,
         model: selectedModel,
+        mode: currentMode === 'chat' ? 'default' : currentMode,
         ...getUserApiKeys(),
       })
     });
@@ -2348,7 +2386,11 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
     aiTextNode = addMessage('ai', '');
 
     const convId = r.headers.get('X-Conversation-Id');
-    if (convId) activeConvId = convId;
+    if (convId) {
+      const isNewConv = activeConvId !== convId;
+      activeConvId = convId;
+      if (isNewConv) await loadConversationList();
+    }
 
     const reader = r.body.getReader();
     const decoder = new TextDecoder();
@@ -2362,6 +2404,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
       scrollToBottom();
     }
     speak(fullText);
+    _addArtifactsFromReply(fullText);
     loadConversationList();
     refreshStreakBadge();
 
@@ -3774,15 +3817,112 @@ messagesEl.addEventListener('click', async (e) => {
   } catch {}
 });
 
+// ─── Shared password gate (reuses the VIP password) for protected sidebar
+// features — Bookmarks, Stats, Archived. Opens the VIP unlock modal if the
+// person hasn't already entered the password this session, then runs the
+// requested action once they do.
+function requirePassword(action) {
+  if (vipUnlocked) { action(); return; }
+  showVipModal();
+  const check = setInterval(() => {
+    if (vipUnlocked) { clearInterval(check); action(); }
+    const overlay = document.getElementById('vip-modal-overlay');
+    if (overlay && overlay.style.display === 'none') clearInterval(check);
+  }, 350);
+}
+
+// ─── Chat / Cowork / Code mode tabs (VIP-gated) ─────────────────────────────
+const modeTabs = document.querySelectorAll('.mode-tab[data-mode]');
+function setActiveModeTab(mode) {
+  currentMode = mode;
+  modeTabs.forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
+  const placeholders = { chat: 'Message Mythic AI...', cowork: 'Describe the task to hand off...', code: 'Describe what you want to build or fix...' };
+  if (input) input.placeholder = placeholders[mode] || placeholders.chat;
+}
+modeTabs.forEach(tab => {
+  tab.addEventListener('click', () => {
+    const mode = tab.dataset.mode;
+    if (mode === 'chat') { setActiveModeTab('chat'); return; }
+    requirePassword(() => {
+      tab.classList.add('unlocked');
+      setActiveModeTab(mode);
+    });
+  });
+});
+
+// ─── Artifacts panel — collects code blocks pulled out of AI replies ───────
+function _extractCodeBlocks(text) {
+  const blocks = [];
+  const re = /```(\w*)\n?([\s\S]*?)```/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[2].trim()) blocks.push({ lang: m[1] || 'text', code: m[2].trim() });
+  }
+  return blocks;
+}
+function _addArtifactsFromReply(fullText) {
+  const blocks = _extractCodeBlocks(fullText || '');
+  blocks.forEach(b => {
+    _artifacts.push({
+      id: 'art_' + Math.random().toString(36).slice(2, 9),
+      lang: b.lang, code: b.code, ts: Date.now(),
+      preview: fullText.replace(/[#*`_~>]/g, '').trim().slice(0, 60),
+    });
+  });
+}
+function showArtifactsModal() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px;';
+  const rows = _artifacts.length ? _artifacts.slice().reverse().map(a => `
+    <div class="art-row" data-id="${a.id}" style="border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden;">
+      <div style="display:flex;justify-content:space-between;align-items:center;background:var(--panel);padding:8px 12px;font-size:11.5px;color:var(--muted);">
+        <span>📦 ${a.lang} &middot; ${a.preview || 'snippet'}</span>
+        <div style="display:flex;gap:6px;">
+          <button class="art-copy" data-id="${a.id}" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;">📋</button>
+          <button class="art-download" data-id="${a.id}" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;">⬇</button>
+        </div>
+      </div>
+      <pre style="margin:0;padding:10px 12px;overflow-x:auto;background:var(--bg);font-size:12px;max-height:160px;"><code>${a.code.replace(/&/g,'&amp;').replace(/</g,'&lt;').slice(0,4000)}</code></pre>
+    </div>`).join('') : '<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px;">No artifacts yet — code blocks from AI replies show up here automatically.</div>';
+  overlay.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;width:92%;max-width:520px;max-height:78vh;overflow-y:auto;">
+    <h3 style="margin:0 0 12px;font-size:16px;">📦 Artifacts</h3>
+    <div>${rows}</div>
+    <button id="art-close" style="margin-top:10px;width:100%;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:9px;cursor:pointer;font-family:inherit;">Close</button>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelectorAll('.art-copy').forEach(btn => btn.addEventListener('click', async () => {
+    const a = _artifacts.find(x => x.id === btn.dataset.id);
+    if (a) { try { await navigator.clipboard.writeText(a.code); btn.textContent = '✓'; setTimeout(() => btn.textContent = '📋', 1000); } catch {} }
+  }));
+  overlay.querySelectorAll('.art-download').forEach(btn => btn.addEventListener('click', () => {
+    const a = _artifacts.find(x => x.id === btn.dataset.id);
+    if (!a) return;
+    const ext = { python: 'py', javascript: 'js', js: 'js', html: 'html', css: 'css', json: 'json', bash: 'sh', text: 'txt' }[a.lang] || 'txt';
+    const blob = new Blob([a.code], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url; link.download = `artifact.${ext}`;
+    document.body.appendChild(link); link.click(); link.remove();
+    URL.revokeObjectURL(url);
+  }));
+  overlay.querySelector('#art-close').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+const artifactsTabBtn = document.getElementById('artifacts-tab-btn');
+if (artifactsTabBtn) artifactsTabBtn.addEventListener('click', () => requirePassword(() => {
+  artifactsTabBtn.classList.add('unlocked');
+  showArtifactsModal();
+}));
+
 // ─── Archived view toggle ─────────────────────────────────────────────────────
 const archivedToggleBtn = document.getElementById('archived-toggle-btn');
-if (archivedToggleBtn) archivedToggleBtn.addEventListener('click', () => {
+if (archivedToggleBtn) archivedToggleBtn.addEventListener('click', () => requirePassword(() => {
   showingArchived = !showingArchived;
   archivedToggleBtn.textContent = showingArchived ? '💬 Active Chats' : '🗄 Archived';
   archivedToggleBtn.style.color = showingArchived ? 'var(--accent)' : '';
   archivedToggleBtn.style.borderColor = showingArchived ? 'var(--accent)' : 'var(--border)';
   loadConversationList();
-});
+}));
 
 // ─── Message bookmarks (stored per-conversation in localStorage) ──────────────
 function getBookmarks() {
@@ -3821,7 +3961,7 @@ function showBookmarksModal() {
   });
   if (!count) rows = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:13px;">No bookmarked messages yet. Use the 🔖 icon on any message.</div>';
   overlay.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;width:90%;max-width:420px;max-height:70vh;overflow-y:auto;">
-    <h3 style="margin:0 0 12px;font-size:16px;">🔖 Bookmarked Messages</h3>
+    <h3 style="margin:0 0 12px;font-size:16px;">⭐ Bookmarked Messages</h3>
     <div>${rows}</div>
     <button id="bm-close" style="margin-top:14px;width:100%;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:9px;cursor:pointer;font-family:inherit;">Close</button>
   </div>`;
@@ -3832,7 +3972,7 @@ function showBookmarksModal() {
   overlay.querySelector('#bm-close').addEventListener('click', () => overlay.remove());
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 }
-if (bookmarksBtn) bookmarksBtn.addEventListener('click', showBookmarksModal);
+if (bookmarksBtn) bookmarksBtn.addEventListener('click', () => requirePassword(showBookmarksModal));
 
 // ─── Chat statistics ────────────────────────────────────────────────────────
 const statsBtn = document.getElementById('stats-btn');
@@ -3872,7 +4012,7 @@ async function showStatsModal() {
   overlay.querySelector('#stats-close').addEventListener('click', () => overlay.remove());
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 }
-if (statsBtn) statsBtn.addEventListener('click', showStatsModal);
+if (statsBtn) statsBtn.addEventListener('click', () => requirePassword(showStatsModal));
 
 // ─── Bookmark button on AI/user messages ───────────────────────────────────
 let _msgIndexCounter = 0;
@@ -3883,10 +4023,10 @@ buildMsgActions = function(row, textNode, role) {
   row.dataset.msgIndex = myIndex;
   const bmBtn = document.createElement('button');
   bmBtn.type = 'button'; bmBtn.title = 'Bookmark';
-  bmBtn.textContent = isBookmarked(activeConvId, myIndex) ? '🔖' : '🏷';
+  bmBtn.textContent = isBookmarked(activeConvId, myIndex) ? '⭐' : '☆';
   bmBtn.addEventListener('click', () => {
     const on = toggleBookmark(activeConvId, myIndex, textNode.textContent || textNode.innerText || '');
-    bmBtn.textContent = on ? '🔖' : '🏷';
+    bmBtn.textContent = on ? '⭐' : '☆';
   });
   actions.appendChild(bmBtn);
   return actions;
@@ -3913,7 +4053,7 @@ function showCommandPalette() {
     { label: '+ New chat', action: () => { startNewChat(); } },
     { label: '⚙ Open Settings', action: () => { settingsModalOverlay.style.display = 'flex'; } },
     { label: '📊 Chat Statistics', action: showStatsModal },
-    { label: '🔖 Bookmarked Messages', action: showBookmarksModal },
+    { label: '⭐ Bookmarked Messages', action: showBookmarksModal },
     { label: '🗄 Toggle Archived View', action: () => archivedToggleBtn && archivedToggleBtn.click() },
     { label: '⬇ Export current chat', action: () => exportBtn.click() },
     { label: '☰ Toggle sidebar', action: () => sidebarToggle.click() },
