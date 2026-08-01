@@ -59,6 +59,11 @@ try:
     _PUSH_AVAILABLE = True
 except ImportError:
     _PUSH_AVAILABLE = False
+try:
+    from PIL import Image, ImageFilter, ImageStat, ImageDraw, ImageOps, ImageSequence
+    _WATERMARK_AVAILABLE = True
+except ImportError:
+    _WATERMARK_AVAILABLE = False
 from flask import (
     Flask, request, jsonify, Response, session,
     stream_with_context
@@ -871,6 +876,392 @@ def generate_docx_bytes(title: str, body_text: str):
     buf = _io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AUTOMATIC WATERMARK SYSTEM
+# ══════════════════════════════════════════════════════════════════════════
+# Every AI-generated image is automatically watermarked before it ever leaves
+# the server — the frontend never sees, and can never download, an
+# unwatermarked image. Uses Pillow (free, open-source) — no paid image APIs.
+# If Pillow isn't installed, watermarking is skipped gracefully (image
+# generation still works) and a warning is printed once at startup; run
+# `pip install Pillow` to enable it.
+#
+# ADMIN_SECRET (env var, same pattern as CRON_SECRET) protects the admin
+# endpoints for uploading/replacing/resetting the official logo.
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "").strip()
+_WATERMARK_DIR = _os.path.join(_DATA_DIR, "watermark")
+_os.makedirs(_WATERMARK_DIR, exist_ok=True)
+_WATERMARK_LOGO_LIGHT_PATH = _os.path.join(_WATERMARK_DIR, "logo_light.png")  # white mark, for dark backgrounds
+_WATERMARK_LOGO_DARK_PATH  = _os.path.join(_WATERMARK_DIR, "logo_dark.png")   # dark mark, for light backgrounds
+
+if not _WATERMARK_AVAILABLE:
+    print("[Watermark] Pillow is not installed — generated images will NOT be "
+          "watermarked. Run `pip install Pillow` (free, no license cost) to enable "
+          "the automatic watermark system.")
+
+
+def _require_admin():
+    """Returns True if the request carries a valid ADMIN_SECRET. If
+    ADMIN_SECRET is unset, admin endpoints are open (dev-only default —
+    always set ADMIN_SECRET in production)."""
+    if not ADMIN_SECRET:
+        return True
+    auth = request.headers.get("Authorization", "")
+    provided = auth[7:].strip() if auth.startswith("Bearer ") else request.args.get("secret", "").strip()
+    return provided == ADMIN_SECRET
+
+
+def _build_default_watermark_logo(size=512, light=True):
+    """Generates the default monogram watermark as a transparent-background
+    RGBA PIL Image — supersampled 4x then downsampled for clean anti-aliasing.
+    `light=True` gives a white mark (for dark image backgrounds); `light=False`
+    gives a near-black mark with a soft white edge (for light backgrounds)."""
+    SS = 4  # supersample factor for anti-aliasing
+    W = H = size * SS
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    fg = (255, 255, 255, 255) if light else (26, 26, 26, 255)
+    s = W / 40
+    pts = [
+        (10 * s, 28 * s), (10 * s, 12 * s), (20 * s, 22 * s),
+        (30 * s, 12 * s), (30 * s, 28 * s),
+    ]
+    lw = max(4, int(W // 11))
+    draw.line(pts, fill=fg, width=lw, joint="curve")
+    r = lw // 2
+    for (x, y) in [pts[0], pts[-1]]:
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=fg)
+
+    if not light:
+        outline = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(outline).line(pts, fill=(255, 255, 255, 160), width=lw + max(6, W // 40), joint="curve")
+        outline = outline.filter(ImageFilter.GaussianBlur(W / 60))
+        img = Image.alpha_composite(outline, img)
+
+    return img.resize((size, size), Image.LANCZOS)
+
+
+_default_logo_cache = {}
+
+def _get_default_watermark_logo(light=True):
+    key = "light" if light else "dark"
+    if key not in _default_logo_cache:
+        _default_logo_cache[key] = _build_default_watermark_logo(512, light=light)
+    return _default_logo_cache[key]
+
+
+def _load_watermark_logo(light=True):
+    """Returns the active logo as an RGBA PIL Image — an admin-uploaded custom
+    logo if one exists on disk, otherwise the built-in default monogram."""
+    path = _WATERMARK_LOGO_LIGHT_PATH if light else _WATERMARK_LOGO_DARK_PATH
+    if _os.path.exists(path):
+        try:
+            return Image.open(path).convert("RGBA")
+        except Exception:
+            pass
+    return _get_default_watermark_logo(light=light)
+
+
+_WM_POSITIONS = {
+    "br": ("right", "bottom"), "bottom-right": ("right", "bottom"),
+    "bl": ("left", "bottom"),  "bottom-left": ("left", "bottom"),
+    "tr": ("right", "top"),    "top-right": ("right", "top"),
+    "tl": ("left", "top"),     "top-left": ("left", "top"),
+    "center": ("center", "center"),
+}
+
+
+def _region_edge_density(gray_img, box):
+    crop = gray_img.crop(box)
+    if crop.width < 2 or crop.height < 2:
+        return 0.0
+    edges = crop.filter(ImageFilter.FIND_EDGES)
+    return ImageStat.Stat(edges).mean[0]
+
+
+def _pick_watermark_geometry(base_rgba, logo_w, logo_h, margin, position_pref):
+    W, H = base_rgba.size
+    anchor_x, anchor_y = _WM_POSITIONS.get(position_pref, _WM_POSITIONS["br"])
+
+    def box_for(dx_off, dy_off):
+        if anchor_x == "right":
+            x = W - margin - logo_w - dx_off
+        elif anchor_x == "left":
+            x = margin + dx_off
+        else:
+            x = (W - logo_w) // 2
+        if anchor_y == "bottom":
+            y = H - margin - logo_h - dy_off
+        elif anchor_y == "top":
+            y = margin + dy_off
+        else:
+            y = (H - logo_h) // 2
+        x = max(0, min(W - logo_w, int(x)))
+        y = max(0, min(H - logo_h, int(y)))
+        return (x, y, x + logo_w, y + logo_h)
+
+    default_box = box_for(0, 0)
+    if anchor_x == "center":
+        return default_box
+
+    try:
+        gray = base_rgba.convert("L")
+        overall = ImageStat.Stat(gray.filter(ImageFilter.FIND_EDGES)).mean[0]
+        busy = _region_edge_density(gray, default_box)
+        if busy > overall * 1.6 and busy > 8:
+            shift = int(max(logo_w, logo_h) * 0.9)
+            candidates = [box_for(shift, 0), box_for(0, shift), box_for(shift, shift)]
+            best_box, best_score = default_box, busy
+            for cand in candidates:
+                score = _region_edge_density(gray, cand)
+                if score < best_score:
+                    best_box, best_score = cand, score
+            return best_box
+    except Exception:
+        pass
+    return default_box
+
+
+def _analyze_background_theme(base_rgba, box):
+    crop = base_rgba.convert("RGB").crop(box)
+    stat = ImageStat.Stat(crop)
+    r, g, b = stat.mean
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    colorfulness = (max(r, g, b) - min(r, g, b))
+    is_colorful = colorfulness > 40 or (sum(stat.stddev) / 3) > 55
+    return ("dark" if luminance < 128 else "light"), is_colorful
+
+
+def _add_shadow_and_glow(logo_rgba, want_shadow=True, want_glow=True, is_dark_bg=True):
+    pad = max(8, logo_rgba.width // 6)
+    canvas_w, canvas_h = logo_rgba.width + pad * 2, logo_rgba.height + pad * 2
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+
+    if want_glow:
+        glow_color = (255, 255, 255, 90) if is_dark_bg else (0, 0, 0, 60)
+        glow_mask = logo_rgba.split()[-1]
+        glow = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        glow_layer = Image.new("RGBA", (canvas_w, canvas_h), glow_color)
+        mask_canvas = Image.new("L", (canvas_w, canvas_h), 0)
+        mask_canvas.paste(glow_mask, (pad, pad))
+        mask_canvas = mask_canvas.filter(ImageFilter.GaussianBlur(pad / 2.2))
+        glow.paste(glow_layer, (0, 0), mask_canvas)
+        canvas = Image.alpha_composite(canvas, glow)
+
+    if want_shadow:
+        shadow_mask = logo_rgba.split()[-1]
+        shadow = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        shadow_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 130))
+        mask_canvas = Image.new("L", (canvas_w, canvas_h), 0)
+        offset = max(2, logo_rgba.width // 40)
+        mask_canvas.paste(shadow_mask, (pad + offset, pad + offset))
+        mask_canvas = mask_canvas.filter(ImageFilter.GaussianBlur(pad / 4))
+        shadow.paste(shadow_layer, (0, 0), mask_canvas)
+        canvas = Image.alpha_composite(canvas, shadow)
+
+    canvas.alpha_composite(logo_rgba, (pad, pad))
+    return canvas, pad
+
+
+def apply_watermark_to_frame(base_rgba, opts):
+    """Applies the watermark to a single RGBA frame and returns the result."""
+    if not opts.get("enabled", True):
+        return base_rgba
+
+    W, H = base_rgba.size
+    size_pct = max(2.0, min(5.0, float(opts.get("size_pct", 3.2))))
+    logo_w = max(20, int(W * size_pct / 100.0))
+    margin = opts.get("margin")
+    margin = int(margin) if margin else max(24, int(W * 0.02))
+    position_pref = opts.get("position", "br")
+
+    probe_box = _pick_watermark_geometry(base_rgba, logo_w, logo_w, margin, position_pref)
+    theme_pref = opts.get("theme", "auto")
+    if theme_pref == "auto":
+        bg_theme, is_colorful = _analyze_background_theme(base_rgba, probe_box)
+    else:
+        bg_theme, is_colorful = theme_pref, False
+
+    use_light_logo = (bg_theme == "dark")
+    logo = _load_watermark_logo(light=use_light_logo)
+    logo_h = int(logo.height * (logo_w / logo.width))
+    logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
+
+    logo_with_fx, pad = _add_shadow_and_glow(
+        logo, want_shadow=opts.get("shadow", True), want_glow=opts.get("glow", True),
+        is_dark_bg=use_light_logo,
+    )
+
+    opacity = max(10, min(100, int(opts.get("opacity", 88)))) / 100.0
+    if opacity < 1.0:
+        alpha = logo_with_fx.split()[-1].point(lambda a: int(a * opacity))
+        logo_with_fx.putalpha(alpha)
+
+    final_box = _pick_watermark_geometry(base_rgba, logo_with_fx.width, logo_with_fx.height, max(0, margin - pad), position_pref)
+    x, y, _, _ = final_box
+
+    result = base_rgba.copy()
+    result.alpha_composite(logo_with_fx, (x, y))
+    return result
+
+
+def apply_watermark(image_bytes, opts):
+    """Top-level entry point: watermarks `image_bytes` and returns new bytes
+    in the same format, preserving animation (GIF/animated WebP). If
+    watermarking is disabled or Pillow is unavailable, returns the original
+    bytes untouched."""
+    if not _WATERMARK_AVAILABLE or not (opts or {}).get("enabled", True):
+        return image_bytes
+    try:
+        import io as _io
+        src = Image.open(_io.BytesIO(image_bytes))
+        fmt = (src.format or "PNG").upper()
+
+        is_animated = getattr(src, "is_animated", False) and src.n_frames > 1
+        if is_animated and fmt in ("GIF", "WEBP"):
+            frames = []
+            durations = []
+            for frame in ImageSequence.Iterator(src):
+                rgba = frame.convert("RGBA")
+                watermarked = apply_watermark_to_frame(rgba, opts)
+                frames.append(watermarked)
+                durations.append(frame.info.get("duration", 80))
+            out = _io.BytesIO()
+            save_kwargs = {"save_all": True, "append_images": frames[1:], "duration": durations,
+                           "loop": src.info.get("loop", 0), "disposal": 2}
+            if fmt == "GIF":
+                frames[0].save(out, format="GIF", **save_kwargs)
+            else:
+                frames[0].save(out, format="WEBP", **save_kwargs)
+            return out.getvalue()
+
+        rgba = src.convert("RGBA")
+        watermarked = apply_watermark_to_frame(rgba, opts)
+        out = _io.BytesIO()
+        if fmt in ("JPEG", "JPG"):
+            watermarked.convert("RGB").save(out, format="JPEG", quality=95, optimize=True)
+        elif fmt == "WEBP":
+            watermarked.save(out, format="WEBP", quality=95, lossless=False)
+        else:
+            watermarked.save(out, format="PNG", optimize=True)
+        return out.getvalue()
+    except Exception as e:
+        print(f"[Watermark] failed to apply, returning original image unmodified: {e}")
+        return image_bytes
+
+
+def _finalize_generated_image(raw_bytes, watermark_opts):
+    """Applies the automatic watermark and returns a base64 string ready to
+    send to the frontend. This is the single choke point every image-
+    generation branch routes through, so the watermark can never be
+    'forgotten' for any provider."""
+    opts = dict(watermark_opts or {})
+    opts.setdefault("enabled", True)
+    watermarked_bytes = apply_watermark(raw_bytes, opts)
+    return base64.b64encode(watermarked_bytes).decode("utf-8")
+
+
+def _io_BytesIO(b):
+    import io as _io
+    return _io.BytesIO(b)
+
+
+# ── Admin endpoints: upload / replace / reset / preview the official logo ────
+
+@app.route("/api/admin/watermark/upload", methods=["POST"])
+def admin_watermark_upload():
+    if not _require_admin():
+        return jsonify({"error": "unauthorized"}), 401
+    if not _WATERMARK_AVAILABLE:
+        return jsonify({"error": "Pillow is not installed on the server — run `pip install Pillow`"}), 503
+    data = request.get_json(force=True) or {}
+    saved = []
+    for key, path in (("logo_light_base64", _WATERMARK_LOGO_LIGHT_PATH),
+                       ("logo_dark_base64", _WATERMARK_LOGO_DARK_PATH)):
+        b64 = data.get(key)
+        if not b64:
+            continue
+        try:
+            raw = base64.b64decode(b64, validate=True)
+        except Exception:
+            return jsonify({"error": f"{key} is not valid base64"}), 400
+
+        is_svg = raw.lstrip().startswith(b"<?xml") or raw.lstrip().startswith(b"<svg") or b"<svg" in raw[:200]
+        if is_svg:
+            try:
+                import cairosvg
+                raw = cairosvg.svg2png(bytestring=raw, output_width=1024, output_height=1024)
+            except ImportError:
+                return jsonify({
+                    "error": "SVG upload requires `pip install cairosvg` on the server. "
+                             "Please upload a transparent PNG or WebP instead, or install "
+                             "cairosvg (free/open-source) to enable SVG."
+                }), 503
+            except Exception as e:
+                return jsonify({"error": f"Could not rasterize SVG: {e}"}), 400
+
+        try:
+            img = Image.open(_io_BytesIO(raw)).convert("RGBA")
+        except Exception as e:
+            return jsonify({"error": f"Could not read image for {key}: {e}"}), 400
+        img.save(path, format="PNG")
+        saved.append(key)
+
+    if not saved:
+        return jsonify({"error": "no logo_light_base64 or logo_dark_base64 provided"}), 400
+    global _default_logo_cache
+    _default_logo_cache = {}
+    return jsonify({"status": "saved", "updated": saved})
+
+
+@app.route("/api/admin/watermark/reset", methods=["POST"])
+def admin_watermark_reset():
+    if not _require_admin():
+        return jsonify({"error": "unauthorized"}), 401
+    for path in (_WATERMARK_LOGO_LIGHT_PATH, _WATERMARK_LOGO_DARK_PATH):
+        if _os.path.exists(path):
+            _os.remove(path)
+    global _default_logo_cache
+    _default_logo_cache = {}
+    return jsonify({"status": "reset to default logo"})
+
+
+@app.route("/api/admin/watermark/preview", methods=["GET"])
+def admin_watermark_preview():
+    if not _require_admin():
+        return jsonify({"error": "unauthorized"}), 401
+    if not _WATERMARK_AVAILABLE:
+        return jsonify({"error": "Pillow is not installed on the server"}), 503
+    import io as _io
+    size = 640
+    preview = Image.new("RGB", (size, size), (235, 235, 235))
+    draw = ImageDraw.Draw(preview)
+    draw.rectangle([0, 0, size, size // 2], fill=(30, 30, 34))
+    draw.rectangle([0, size // 2, size // 2, size], fill=(230, 60, 90))
+    opts = {
+        "enabled": True, "opacity": int(request.args.get("opacity", 88)),
+        "size_pct": float(request.args.get("size_pct", 3.2)),
+        "position": request.args.get("position", "br"),
+        "shadow": request.args.get("shadow", "1") != "0",
+        "glow": request.args.get("glow", "1") != "0",
+        "theme": request.args.get("theme", "auto"),
+    }
+    watermarked = apply_watermark_to_frame(preview.convert("RGBA"), opts)
+    out = _io.BytesIO()
+    watermarked.convert("RGB").save(out, format="PNG")
+    return Response(out.getvalue(), mimetype="image/png")
+
+
+@app.route("/api/watermark/info", methods=["GET"])
+def watermark_info():
+    return jsonify({
+        "available": _WATERMARK_AVAILABLE,
+        "custom_logo_light": _os.path.exists(_WATERMARK_LOGO_LIGHT_PATH),
+        "custom_logo_dark": _os.path.exists(_WATERMARK_LOGO_DARK_PATH),
+    })
 
 
 # ── Daily chat streaks + re-engagement scheduling ────────────────────────────
@@ -5482,6 +5873,11 @@ def generate_image():
         image_b64 = data.get("imageBase64")
         mime_type = data.get("mimeType", "image/jpeg")
         style = data.get("style", "").strip()
+        # Per-request watermark settings (from Settings → Image Watermark in
+        # the frontend, or sane defaults if not sent). Every branch below
+        # routes its result through _finalize_generated_image() so the mark
+        # can never be skipped for any current or future image provider.
+        watermark_opts = data.get("watermark") or {}
         if not prompt:
             return jsonify({"error": "prompt required"}), 400
 
@@ -5556,7 +5952,7 @@ def generate_image():
                     if not err:
                         img_resp = requests.get(result_url, timeout=30)
                         img_resp.raise_for_status()
-                        return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
+                        return jsonify({"image": _finalize_generated_image(img_resp.content, watermark_opts)})
             except Exception:
                 pass
 
@@ -5569,7 +5965,7 @@ def generate_image():
                     timeout=90,
                 )
                 if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
-                    return jsonify({"image": base64.b64encode(resp.content).decode("utf-8")})
+                    return jsonify({"image": _finalize_generated_image(resp.content, watermark_opts)})
             except Exception:
                 pass
 
@@ -5584,7 +5980,7 @@ def generate_image():
         )
         img_resp = requests.get(poll_url, timeout=120)
         if img_resp.status_code == 200 and img_resp.headers.get("content-type", "").startswith("image/"):
-            return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
+            return jsonify({"image": _finalize_generated_image(img_resp.content, watermark_opts)})
         return jsonify({"error": f"Image generation failed (status {img_resp.status_code}). Please try again."}), 502
 
     except Exception as e:
