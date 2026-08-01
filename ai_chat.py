@@ -282,15 +282,17 @@ app = Flask(__name__)
 MODE_PROMPTS = {
     "default": "",
     "cowork": (
-        "MODE: Cowork. The user is delegating a build task (e.g. \"build me a website\"), "
-        "not asking a quick question. Do NOT just describe a plan and stop — output the "
-        "complete, runnable code for the whole thing in this single reply, split into "
-        "clearly labeled files using fenced code blocks with the language and filename on "
-        "the first line as a comment (e.g. ```html <!-- index.html -->). Give a 1-2 sentence "
-        "summary at most before the code, then the code, then a short 'what to do next' note "
-        "if something can't be finished in one reply (e.g. needs an API key). Never ask "
-        "clarifying questions before producing a first working version — make reasonable "
-        "assumptions and state them briefly instead."
+        "MODE: Cowork — a general multi-step task assistant, not just a coder. "
+        "If the task is to build/fix software or a website: do NOT just describe a plan "
+        "and stop — output the complete, runnable code for the whole thing in this single "
+        "reply, split into clearly labeled files using fenced code blocks with the language "
+        "and filename on the first line as a comment (e.g. ```html <!-- index.html -->). "
+        "Never ask clarifying questions before producing a first working version — make "
+        "reasonable assumptions and state them briefly instead. "
+        "If the task is NOT about code (research, writing, planning, comparisons, etc.): "
+        "just do the task directly and completely, in whatever format actually fits it — "
+        "don't force code blocks or a file structure where none make sense. "
+        "In both cases: finish the work in this reply rather than only listing next steps."
     ),
     "coding": (
         "MODE: Coding Assistant. Prioritize correct, runnable code. Always specify "
@@ -1886,11 +1888,14 @@ function showVipModal() {
 
 (async () => {
   try {
-    const [mr, vr] = await Promise.all([
-      fetch('/api/models').then(r => r.json()),
-      fetch('/api/vip-status').then(r => r.json()),
-    ]);
-    vipUnlocked = !!vr.vip;
+    // Deliberately NOT restoring vipUnlocked from /api/vip-status here.
+    // The unlock flag rides in the same long-lived session cookie used for
+    // conversation storage, so trusting it on load meant a page refresh
+    // skipped the VIP password entirely. VIP now always starts locked for
+    // a fresh page load — the password is required again each time you
+    // open/reload the app, but not repeatedly while switching tabs within
+    // the same loaded page.
+    const mr = await fetch('/api/models').then(r => r.json());
     if (mr && mr.default) selectedModel = mr.default;
   } catch {}
   updateVipBtn();
@@ -3900,34 +3905,75 @@ function _extractCodeBlocks(text) {
 }
 function _addArtifactsFromReply(fullText) {
   const blocks = _extractCodeBlocks(fullText || '');
+  const groupId = 'grp_' + Math.random().toString(36).slice(2, 9);
   blocks.forEach(b => {
     _artifacts.push({
       id: 'art_' + Math.random().toString(36).slice(2, 9),
-      lang: b.lang, code: b.code, ts: Date.now(),
+      groupId, lang: b.lang, code: b.code, ts: Date.now(),
       preview: fullText.replace(/[#*`_~>]/g, '').trim().slice(0, 60),
     });
   });
 }
+// Combines all html/css/js artifacts from the SAME reply into one runnable
+// document and opens it in a sandboxed iframe — this is the real, honest
+// equivalent of "run this for me": actual in-browser execution, not a
+// claim of touching your filesystem or OS.
+function _buildPreviewDoc(groupId) {
+  const group = _artifacts.filter(a => a.groupId === groupId);
+  const htmlArt = group.find(a => a.lang === 'html');
+  const cssArts = group.filter(a => a.lang === 'css');
+  const jsArts = group.filter(a => ['javascript', 'js'].includes(a.lang));
+  if (!htmlArt) return null;
+  let doc = htmlArt.code;
+  const cssTag = cssArts.map(a => `<style>${a.code}</style>`).join('\n');
+  const jsTag = jsArts.map(a => `<script>${a.code}<\/script>`).join('\n');
+  if (doc.includes('</head>')) doc = doc.replace('</head>', cssTag + '\n</head>');
+  else doc = cssTag + doc;
+  if (doc.includes('</body>')) doc = doc.replace('</body>', jsTag + '\n</body>');
+  else doc = doc + jsTag;
+  return doc;
+}
+function showPreviewModal(groupId) {
+  const doc = _buildPreviewDoc(groupId);
+  if (!doc) return;
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:600;display:flex;flex-direction:column;';
+  overlay.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 16px;background:#1a1a1a;">
+      <span style="color:#fff;font-size:13px;">▶ Live preview (sandboxed — runs in your browser only)</span>
+      <button id="preview-close" style="background:none;border:1px solid #444;color:#ccc;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;">✕ Close</button>
+    </div>
+    <iframe id="preview-frame" style="flex:1;border:none;background:#fff;" sandbox="allow-scripts allow-forms allow-modals"></iframe>`;
+  document.body.appendChild(overlay);
+  const frame = overlay.querySelector('#preview-frame');
+  frame.srcdoc = doc;
+  overlay.querySelector('#preview-close').addEventListener('click', () => overlay.remove());
+}
 function showArtifactsModal() {
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px;';
-  const rows = _artifacts.length ? _artifacts.slice().reverse().map(a => `
+  const rows = _artifacts.length ? _artifacts.slice().reverse().map(a => {
+    const canPreview = a.lang === 'html' && _artifacts.some(x => x.groupId === a.groupId && x.lang === 'html');
+    return `
     <div class="art-row" data-id="${a.id}" style="border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden;">
       <div style="display:flex;justify-content:space-between;align-items:center;background:var(--panel);padding:8px 12px;font-size:11.5px;color:var(--muted);">
         <span>📦 ${a.lang} &middot; ${a.preview || 'snippet'}</span>
         <div style="display:flex;gap:6px;">
+          ${canPreview ? `<button class="art-run" data-group="${a.groupId}" style="background:var(--accent);border:none;color:#fff;border-radius:6px;cursor:pointer;font-size:11px;padding:3px 8px;">▶ Run</button>` : ''}
           <button class="art-copy" data-id="${a.id}" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;">📋</button>
           <button class="art-download" data-id="${a.id}" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;">⬇</button>
         </div>
       </div>
       <pre style="margin:0;padding:10px 12px;overflow-x:auto;background:var(--bg);font-size:12px;max-height:160px;"><code>${a.code.replace(/&/g,'&amp;').replace(/</g,'&lt;').slice(0,4000)}</code></pre>
-    </div>`).join('') : '<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px;">No artifacts yet — code blocks from AI replies show up here automatically.</div>';
+    </div>`;
+  }).join('') : '<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px;">No artifacts yet — code blocks from AI replies show up here automatically.</div>';
   overlay.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;width:92%;max-width:520px;max-height:78vh;overflow-y:auto;">
     <h3 style="margin:0 0 12px;font-size:16px;">📦 Artifacts</h3>
     <div>${rows}</div>
     <button id="art-close" style="margin-top:10px;width:100%;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:9px;cursor:pointer;font-family:inherit;">Close</button>
   </div>`;
   document.body.appendChild(overlay);
+  overlay.querySelectorAll('.art-run').forEach(btn => btn.addEventListener('click', () => showPreviewModal(btn.dataset.group)));
   overlay.querySelectorAll('.art-copy').forEach(btn => btn.addEventListener('click', async () => {
     const a = _artifacts.find(x => x.id === btn.dataset.id);
     if (a) { try { await navigator.clipboard.writeText(a.code); btn.textContent = '✓'; setTimeout(() => btn.textContent = '📋', 1000); } catch {} }
@@ -4639,9 +4685,11 @@ def api_generate_title(conv_id):
 
     raw_title = raw_title.strip().strip('"').strip("'")
     raw_title = re.sub(r'^\[Instructions:.*?\]\s*', '', raw_title, flags=re.DOTALL)
-    if not raw_title or len(raw_title) > 80:
-        # AI unreachable or returned junk — keep the existing title rather
-        # than overwrite it with something worse.
+    # Take just the first line/sentence in case the model added extra
+    # commentary despite instructions — truncate rather than reject outright,
+    # so a slightly-verbose reply still produces a usable title.
+    raw_title = raw_title.split("\n")[0].strip()
+    if not raw_title:
         return jsonify({"status": "unchanged", "title": conv.get("title", "New chat")})
 
     new_title = raw_title[:60]
