@@ -282,12 +282,15 @@ app = Flask(__name__)
 MODE_PROMPTS = {
     "default": "",
     "cowork": (
-        "MODE: Cowork. The user is delegating a multi-step task, not just asking a "
-        "quick question. Break the work into a short numbered plan first (3-7 steps), "
-        "then execute the steps yourself as far as you can in this reply — don't just "
-        "hand back a plan and stop. Call out any step you genuinely can't do (needs a "
-        "live tool, file access, etc.) instead of pretending to do it. End with a brief "
-        "status: done / partially done / blocked on X."
+        "MODE: Cowork. The user is delegating a build task (e.g. \"build me a website\"), "
+        "not asking a quick question. Do NOT just describe a plan and stop — output the "
+        "complete, runnable code for the whole thing in this single reply, split into "
+        "clearly labeled files using fenced code blocks with the language and filename on "
+        "the first line as a comment (e.g. ```html <!-- index.html -->). Give a 1-2 sentence "
+        "summary at most before the code, then the code, then a short 'what to do next' note "
+        "if something can't be finished in one reply (e.g. needs an API key). Never ask "
+        "clarifying questions before producing a first working version — make reasonable "
+        "assumptions and state them briefly instead."
     ),
     "coding": (
         "MODE: Coding Assistant. Prioritize correct, runnable code. Always specify "
@@ -1869,6 +1872,7 @@ function showVipModal() {
         overlay.style.display = 'none';
         selectedModel = 'mythic-vip';
         updateVipBtn();
+        if (typeof syncModeTabLocks === 'function') syncModeTabLocks();
       } else {
         pwErr.style.display = 'block'; pwIn.value = ''; pwIn.focus();
       }
@@ -1890,12 +1894,15 @@ function showVipModal() {
     if (mr && mr.default) selectedModel = mr.default;
   } catch {}
   updateVipBtn();
+  if (typeof syncModeTabLocks === 'function') syncModeTabLocks();
 })();
 
 vipBtn.addEventListener('click', () => {
   if (!vipUnlocked) { showVipModal(); return; }
   selectedModel = selectedModel === 'mythic-vip' ? 'mythic-2' : 'mythic-vip';
   updateVipBtn();
+  if (typeof syncModeTabLocks === 'function') syncModeTabLocks();
+  if (typeof setActiveModeTab === 'function' && selectedModel !== 'mythic-vip' && currentMode !== 'chat') setActiveModeTab('chat');
 });
 
 const nameModalOverlay = document.getElementById('name-modal-overlay');
@@ -2386,11 +2393,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
     aiTextNode = addMessage('ai', '');
 
     const convId = r.headers.get('X-Conversation-Id');
-    if (convId) {
-      const isNewConv = activeConvId !== convId;
-      activeConvId = convId;
-      if (isNewConv) await loadConversationList();
-    }
+    if (convId) activeConvId = convId;
 
     const reader = r.body.getReader();
     const decoder = new TextDecoder();
@@ -3848,22 +3851,33 @@ function requireVipModel(action) {
   if (vipUnlocked) {
     selectedModel = 'mythic-vip';
     updateVipBtn();
+    syncModeTabLocks();
     action();
     return;
   }
   showVipModal();
   const check = setInterval(() => {
-    if (vipUnlocked && selectedModel === 'mythic-vip') { clearInterval(check); action(); }
+    if (vipUnlocked && selectedModel === 'mythic-vip') { clearInterval(check); syncModeTabLocks(); action(); }
     const overlay = document.getElementById('vip-modal-overlay');
     if (overlay && overlay.style.display === 'none') clearInterval(check);
   }, 350);
+}
+// Lock icons reflect REAL auth state (vipUnlocked + selectedModel), not a
+// manually-toggled class — this avoids the lock silently disappearing/
+// staying stale after a page reload or model switch.
+function syncModeTabLocks() {
+  const isVip = vipUnlocked && selectedModel === 'mythic-vip';
+  modeTabs.forEach(t => {
+    if (t.dataset.mode === 'chat') return;
+    t.classList.toggle('unlocked', isVip);
+  });
+  if (artifactsTabBtn) artifactsTabBtn.classList.toggle('unlocked', isVip);
 }
 modeTabs.forEach(tab => {
   tab.addEventListener('click', () => {
     const mode = tab.dataset.mode;
     if (mode === 'chat') { setActiveModeTab('chat'); return; }
     requireVipModel(() => {
-      tab.classList.add('unlocked');
       setActiveModeTab(mode);
     });
   });
@@ -3934,7 +3948,6 @@ function showArtifactsModal() {
 }
 const artifactsTabBtn = document.getElementById('artifacts-tab-btn');
 if (artifactsTabBtn) artifactsTabBtn.addEventListener('click', () => requireVipModel(() => {
-  artifactsTabBtn.classList.add('unlocked');
   showArtifactsModal();
 }));
 
