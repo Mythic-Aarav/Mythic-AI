@@ -4,7 +4,7 @@ automatic fallback. No provider selection is exposed to the user — if Groq is
 rate-limited, times out, or errors, the app transparently retries on Cerebras.
 
 Usage:
-    1. pip install flask requests Pillow
+    1. pip install flask requests
     2. Set your API keys:
          Mac/Linux:   export GROQ_API_KEY="your-groq-key"
                       export CEREBRAS_API_KEY="your-cerebras-key"
@@ -19,13 +19,6 @@ Get a FREE Cerebras API key at https://cloud.cerebras.ai
 Optional — NanoBanana (nanobananaapi.ai) powers real image-to-image editing for
 "Ghibli Me"; without it, image generation falls back to HuggingFace FLUX
 (text-to-image only). Weather uses Open-Meteo, which needs no API key at all.
-
-Automatic image watermarking (Pillow — free, open-source, no paid API):
-    Every AI-generated image is automatically watermarked with the app's logo
-    before it's ever shown or downloadable — see the "AUTOMATIC WATERMARK
-    SYSTEM" section further down this file. Optional env vars:
-         ADMIN_SECRET   protects /api/admin/watermark/* (upload/replace/reset logo)
-    Without Pillow installed, image generation still works, just unwatermarked.
 
 Supabase (optional — for accounts/conversation storage across restarts & devices):
     Set these as environment variables (never hardcode secrets in this file):
@@ -43,9 +36,6 @@ Features:
   can use their own Groq/Cerebras key instead of the server's
 - Image generation, Ghibli Me (image-to-image), and full weather (current +
   hourly + 7-day + air quality) built in
-- Automatic, adaptive logo watermark on every generated image (smart position,
-  contrast-aware light/dark logo, soft shadow/glow, HDPI-safe, animated-GIF/
-  WebP aware, customizable in Settings, admin logo upload/reset/preview)
 - Generate downloadable files (PDF / Word / text) straight from a chat reply
 - Daily chat streaks + re-engagement push notifications ("come back and chat",
   study reminders, activity nudges, streak-on-hold alerts, feature updates)
@@ -53,11 +43,13 @@ Features:
 """
 
 import os
+import re
 import json
 import uuid
 import time
 import base64
 import random
+import hashlib
 import datetime
 import threading
 import urllib.parse
@@ -67,11 +59,6 @@ try:
     _PUSH_AVAILABLE = True
 except ImportError:
     _PUSH_AVAILABLE = False
-try:
-    from PIL import Image, ImageFilter, ImageStat, ImageDraw, ImageOps, ImageSequence
-    _WATERMARK_AVAILABLE = True
-except ImportError:
-    _WATERMARK_AVAILABLE = False
 from flask import (
     Flask, request, jsonify, Response, session,
     stream_with_context
@@ -289,6 +276,59 @@ SYSTEM_PROMPT = (
 app = Flask(__name__)
 
 
+# ── Reasoning/task modes — pure prompt-engineering, no extra APIs needed ────
+# Selected client-side and sent as `mode` with each /api/chat call; appended
+# to the system prompt for that request only.
+MODE_PROMPTS = {
+    "default": "",
+    "coding": (
+        "MODE: Coding Assistant. Prioritize correct, runnable code. Always specify "
+        "the language in code fences. Briefly explain non-obvious logic. When asked "
+        "to debug, identify the exact bug before proposing a fix. When asked to "
+        "generate a project, structure it file by file with clear filenames."
+    ),
+    "research": (
+        "MODE: Research Assistant. Structure answers with clear sections. Explicitly "
+        "flag where a claim is uncertain, contested, or outside your training data "
+        "rather than presenting speculation as fact. Prefer thorough, well-organized "
+        "answers over short ones."
+    ),
+    "study": (
+        "MODE: Study/Homework Helper. Explain concepts step-by-step like a patient "
+        "tutor. After solving a problem, briefly state the method so the student can "
+        "apply it themselves next time. Suitable for CBSE/NCERT and general curricula."
+    ),
+    "debate": (
+        "MODE: Debate Partner. When given a position, construct the strongest "
+        "good-faith argument for it, then present the strongest counterarguments. "
+        "Stay even-handed and avoid straw-manning either side."
+    ),
+    "business": (
+        "MODE: Business Assistant. Be concise, structured, and action-oriented — "
+        "think memos, plans, and decision frameworks rather than essays."
+    ),
+    "math": (
+        "MODE: Math Solver. Show step-by-step working, not just the final answer. "
+        "Use LaTeX notation ($...$ for inline, $$...$$ for display) for equations. "
+        "Double-check arithmetic before presenting the final result."
+    ),
+    "translation": (
+        "MODE: Translator. Translate faithfully, preserving tone and meaning. If "
+        "helpful, briefly explain notable grammar or idiom choices after the translation."
+    ),
+    "writing": (
+        "MODE: Writing Assistant. Match the requested tone and format precisely "
+        "(email, blog, resume, essay, letter, etc.). Give the finished piece first; "
+        "only add commentary if asked."
+    ),
+    "brainstorm": (
+        "MODE: Brainstorming Partner. Generate a wide variety of genuinely distinct "
+        "ideas rather than elaborating on just one. Use short bullet points unless "
+        "asked for depth."
+    ),
+}
+
+
 def _persistent_secret_key():
     """A stable Flask secret key across restarts/workers so each visitor's
     session cookie (which stores their anonymous user_id) doesn't get
@@ -351,7 +391,7 @@ def nano_banana_submit(prompt, image_urls=None, num_images=1):
         return None, "NanoBanana API key not configured"
     payload = {
         "prompt": prompt,
-        "type": "IMAGETOIAMGE" if image_urls else "TEXTTOIAMGE",
+        "type": "IMAGETOIMAGE" if image_urls else "TEXTTOIAMGE",
         "numImages": num_images,
     }
     if image_urls:
@@ -448,11 +488,14 @@ def list_conversations(username):
         return _list_conversations_file(username)
     try:
         r = requests.get(
-            sb(f"conversations?username=eq.{username}&order=updated_at.desc&select=id,title,updated_at"),
+            sb(f"conversations?username=eq.{username}&order=updated_at.desc"
+               f"&select=id,title,updated_at,folder,pinned,archived"),
             headers=sb_headers(), timeout=10,
         )
         if r.status_code == 200:
-            return r.json()
+            rows = r.json()
+            rows.sort(key=lambda c: (not c.get("pinned", False), -(c.get("updated_at") or 0)))
+            return rows
     except Exception:
         pass
     return []
@@ -496,6 +539,9 @@ def save_conversation(username, conv_id, data):
                 "title": data.get("title", "New chat"),
                 "updated_at": data["updated_at"],
                 "messages": data.get("messages", []),
+                "folder": data.get("folder"),
+                "pinned": bool(data.get("pinned", False)),
+                "archived": bool(data.get("archived", False)),
             },
             timeout=15,
         )
@@ -571,10 +617,18 @@ def _list_conversations_file(username):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 d = json.load(f)
-            convs.append({"id": fname[:-5], "title": d.get("title", "New chat"), "updated_at": d.get("updated_at", 0)})
+            convs.append({
+                "id": fname[:-5],
+                "title": d.get("title", "New chat"),
+                "updated_at": d.get("updated_at", 0),
+                "folder": d.get("folder"),
+                "pinned": bool(d.get("pinned", False)),
+                "archived": bool(d.get("archived", False)),
+            })
         except Exception:
             continue
-    convs.sort(key=lambda c: c["updated_at"], reverse=True)
+    # Pinned conversations always float to the top, then most-recent first.
+    convs.sort(key=lambda c: (not c["pinned"], -c["updated_at"]))
     return convs
 
 def _load_conversation_file(username, conv_id):
@@ -597,9 +651,92 @@ def _delete_conversation_file(username, conv_id):
         _os.remove(path)
 
 
+def list_folders(username):
+    """Distinct, non-empty folder names currently in use by this user's
+    conversations, alphabetically sorted — used to populate the folder
+    picker in the sidebar without a separate folders table."""
+    names = sorted({c["folder"] for c in list_conversations(username) if c.get("folder")})
+    return names
+
+
 def make_title(first_message):
-    title = (first_message or "Attachment").strip().replace("\n", " ")
+    text = (first_message or "Attachment").strip()
+    # Strip an internal "[Instructions: ...] " tone/length/custom-instructions
+    # prefix (added client-side when Settings → tone/length are set) so it
+    # never leaks into a conversation's saved title in the sidebar.
+    text = re.sub(r'^\[Instructions:.*?\]\s*', '', text, flags=re.DOTALL)
+    title = text.replace("\n", " ").strip() or "New chat"
     return title[:40] + ("…" if len(title) > 40 else "")
+
+
+# ── Document reading (PDF / DOCX / TXT / CSV / MD / JSON / source code) ─────
+# Groq and Cerebras models are text-only — they cannot see images or read
+# binary files directly. So that "attach a file and ask about it" actually
+# works, every text-extractable upload is converted to plain text here and
+# injected into the prompt as context. Images are explicitly labeled as
+# unreadable rather than silently ignored, per "don't pretend" — no OCR/vision
+# is performed since that would require a separate API.
+_TEXT_EXTENSIONS = (
+    ".txt", ".md", ".markdown", ".csv", ".json", ".py", ".js", ".ts", ".tsx",
+    ".jsx", ".html", ".htm", ".css", ".java", ".c", ".cpp", ".cc", ".h", ".cs",
+    ".go", ".rs", ".php", ".rb", ".sql", ".sh", ".ps1", ".kt", ".swift",
+    ".yaml", ".yml", ".xml", ".log", ".ini", ".toml",
+)
+DOCUMENT_EXTRACT_MAX_CHARS = 12000
+
+
+def extract_text_from_attachment(filename, mime_type, raw_bytes):
+    """Returns (extracted_text_or_None, note_or_None).
+    extracted_text is None when the file type isn't text-extractable at all
+    (e.g. an image) — the caller decides what to tell the model in that case.
+    note carries a short caveat (truncation, missing library, empty PDF, etc.)
+    that should be shown to the model/user alongside the text."""
+    name_lower = (filename or "").lower()
+    mime_type = mime_type or ""
+    text = None
+    try:
+        if mime_type == "application/pdf" or name_lower.endswith(".pdf"):
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                return None, "PDF reading isn't available on this server (needs `pip install pypdf`)."
+            import io as _io
+            reader = PdfReader(_io.BytesIO(raw_bytes))
+            pages_text = []
+            for page in reader.pages[:40]:  # cap pages so huge PDFs don't blow up the prompt
+                try:
+                    pages_text.append(page.extract_text() or "")
+                except Exception:
+                    continue
+            text = "\n".join(pages_text).strip()
+            if not text:
+                return "", "No extractable text found — this PDF may be scanned/image-only, which needs OCR (not available without a separate API)."
+
+        elif name_lower.endswith(".docx") or mime_type == (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"):
+            try:
+                import docx as _docx
+            except ImportError:
+                return None, "DOCX reading isn't available on this server (needs `pip install python-docx`)."
+            import io as _io
+            doc = _docx.Document(_io.BytesIO(raw_bytes))
+            text = "\n".join(p.text for p in doc.paragraphs).strip()
+
+        elif mime_type.startswith("text/") or name_lower.endswith(_TEXT_EXTENSIONS):
+            text = raw_bytes.decode("utf-8", errors="replace")
+
+        else:
+            return None, None  # not a recognized text-extractable type (e.g. an image)
+    except Exception as e:
+        return None, f"Could not read this file: {e}"
+
+    if not text:
+        return "", None
+    note = None
+    if len(text) > DOCUMENT_EXTRACT_MAX_CHARS:
+        text = text[:DOCUMENT_EXTRACT_MAX_CHARS]
+        note = f"(showing first {DOCUMENT_EXTRACT_MAX_CHARS} characters — file was longer)"
+    return text, note
 
 
 # ── Downloadable file generation (PDF / DOCX / TXT) ──────────────────────────
@@ -730,8 +867,17 @@ _REENGAGEMENT_SKIP_IF_ACTIVE_WITHIN_HOURS = 1
 # if the cron endpoint is hit multiple times in quick succession (e.g. two
 # external crons, or a manual test). Default 55 minutes so an hourly cron still
 # fires normally, but rapid retries are ignored.
+#
+# NOTE ON SCHEDULES:
+#   - Render (always-on): the in-process background thread below fires
+#     every _REENGAGEMENT_CHECK_INTERVAL_SECONDS (1 hour by default) — see
+#     _reengagement_loop(). Nothing else to configure.
+#   - Vercel (serverless): the in-process thread never runs (frozen between
+#     requests), so /api/cron/reengagement must be triggered externally.
+#     Set up a Vercel Cron Job that hits it ONCE A DAY AT 12:00 — see the
+#     vercel.json example and CRON_SECRET notes near that route below.
 _REENGAGEMENT_MIN_GAP_MINUTES = 55
-_REENGAGEMENT_CHECK_INTERVAL_SECONDS = 60 * 60  # once every hour
+_REENGAGEMENT_CHECK_INTERVAL_SECONDS = 60 * 60  # Render: fires once every hour
 
 
 def _load_all_activity():
@@ -847,6 +993,9 @@ def _run_reengagement_pass():
 
 
 def _reengagement_loop():
+    """Render / always-on hosts only. Fires _run_reengagement_pass() every
+    _REENGAGEMENT_CHECK_INTERVAL_SECONDS (1 hour). Never runs on Vercel —
+    use the /api/cron/reengagement endpoint with an external daily cron there."""
     while True:
         try:
             _run_reengagement_pass()
@@ -1077,10 +1226,6 @@ PAGE = r"""<!DOCTYPE html>
   #scroll-btn.show { display:flex; }
 
   .gen-img { max-width:320px; border-radius:12px; display:block; margin-top:8px; }
-  /* Smooth 300ms fade-in once a watermarked image finishes loading —
-     "when the image finishes generating, fade in the watermark smoothly" */
-  .wm-fade-in { opacity:0; transition:opacity .3s ease; }
-  .wm-fade-in.wm-loaded { opacity:1; }
 
   #pending-attach { max-width:760px; margin:0 auto; width:100%; padding:6px 20px 0;
     display:none; align-items:center; gap:8px; font-size:12.5px; color:var(--muted); flex-shrink:0; }
@@ -1194,7 +1339,14 @@ PAGE = r"""<!DOCTYPE html>
   <div id="sidebar">
     <button id="new-chat-btn">+ New chat</button>
     <div id="conv-list"></div>
-    <div id="sidebar-footer">Mythic AI &middot; by Aarav Singh</div>
+    <div id="sidebar-footer">
+      <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
+        <button id="archived-toggle-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">🗄 Archived</button>
+        <button id="bookmarks-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">🔖 Bookmarks</button>
+        <button id="stats-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">📊 Stats</button>
+      </div>
+      Mythic AI &middot; by Aarav Singh
+    </div>
   </div>
   <div class="app">
     <header>
@@ -1414,61 +1566,6 @@ PAGE = r"""<!DOCTYPE html>
         </button>
       </label>
       <div id="notif-status" style="font-size:11.5px;color:var(--muted);margin-top:6px;"></div>
-    </div>
-
-    <div class="settings-section" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
-      <label style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;">
-        <span>🖼️ Image Watermark</span>
-        <button id="wm-toggle-btn" type="button"
-          style="background:none;border:1.5px solid var(--border);color:var(--muted);border-radius:20px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:inherit;transition:all .15s;">
-          Enabled
-        </button>
-      </label>
-      <div id="wm-panel" style="margin-top:10px;display:flex;flex-direction:column;gap:10px;">
-        <div>
-          <div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--muted);margin-bottom:4px;">
-            <span>Opacity</span><span id="wm-opacity-val">88%</span>
-          </div>
-          <input id="wm-opacity" type="range" min="10" max="100" value="88" style="width:100%;">
-        </div>
-        <div>
-          <div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--muted);margin-bottom:4px;">
-            <span>Size</span><span id="wm-size-val">3.2%</span>
-          </div>
-          <input id="wm-size" type="range" min="2" max="5" step="0.1" value="3.2" style="width:100%;">
-        </div>
-        <div>
-          <label style="font-size:11.5px;color:var(--muted);display:block;margin-bottom:4px;">Position</label>
-          <select id="wm-position" class="settings-select">
-            <option value="br" selected>Bottom Right (recommended)</option>
-            <option value="bl">Bottom Left</option>
-            <option value="tr">Top Right</option>
-            <option value="tl">Top Left</option>
-            <option value="center">Center</option>
-          </select>
-        </div>
-        <div>
-          <div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--muted);margin-bottom:4px;">
-            <span>Margin</span><span id="wm-margin-val">24px</span>
-          </div>
-          <input id="wm-margin" type="range" min="12" max="64" value="24" style="width:100%;">
-        </div>
-        <div>
-          <label style="font-size:11.5px;color:var(--muted);display:block;margin-bottom:4px;">Logo theme</label>
-          <select id="wm-theme" class="settings-select">
-            <option value="auto" selected>Auto (recommended)</option>
-            <option value="light">Always Light Logo</option>
-            <option value="dark">Always Dark Logo</option>
-          </select>
-        </div>
-        <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
-          <input id="wm-shadow" type="checkbox" checked style="accent-color:var(--accent);"> Soft shadow
-        </label>
-        <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
-          <input id="wm-glow" type="checkbox" checked style="accent-color:var(--accent);"> Tiny glow
-        </label>
-        <div class="hint">Applied automatically to every AI-generated image, including downloads. Position auto-shifts to avoid faces/text in the corner.</div>
-      </div>
     </div>
 
     <button id="settings-close-btn" type="button">Done</button>
@@ -1897,8 +1994,7 @@ function addImageMessage(role, base64, caption) {
     div.appendChild(cap);
   }
   const img = document.createElement('img');
-  img.className = 'gen-img wm-fade-in';
-  img.onload = () => img.classList.add('wm-loaded');
+  img.className = 'gen-img';
   img.src = 'data:image/png;base64,' + base64;
   div.appendChild(img);
   messagesEl.appendChild(div);
@@ -2001,7 +2097,7 @@ async function tryGenerateImage(prompt) {
     const r = await fetch('/api/generate-image', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, watermark: getWatermarkSettings() })
+      body: JSON.stringify({ prompt })
     });
     const d = await r.json();
     if (d.image) {
@@ -2068,41 +2164,110 @@ function addFileMessage(fileB64, filename, mimeType, note) {
   scrollToBottom();
 }
 
+let showingArchived = false;
+
+function buildConvItem(c) {
+  const item = document.createElement('div');
+  item.className = 'conv-item' + (c.id === activeConvId ? ' active' : '');
+  item.innerHTML = '<span class="title"></span>'
+    + '<button class="pin-btn" title="' + (c.pinned ? 'Unpin' : 'Pin') + '">' + (c.pinned ? '📌' : '📍') + '</button>'
+    + '<button class="dup-btn" title="Duplicate">⎘</button>'
+    + '<button class="folder-btn" title="Move to folder">📁</button>'
+    + '<button class="archive-btn" title="' + (c.archived ? 'Unarchive' : 'Archive') + '">' + (c.archived ? '📤' : '🗄') + '</button>'
+    + '<button class="rename-btn" title="Rename">✎</button>'
+    + '<button class="del-btn" title="Delete">✕</button>';
+  item.querySelector('.title').textContent = (c.pinned ? '📌 ' : '') + c.title;
+  item.addEventListener('click', (e) => {
+    if (e.target.tagName === 'BUTTON') return;
+    openConversation(c.id);
+  });
+  item.querySelector('.pin-btn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await fetch('/api/conversations/' + c.id, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pinned: !c.pinned })
+    });
+    loadConversationList();
+  });
+  item.querySelector('.folder-btn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const folders = await fetch('/api/folders').then(r => r.json()).then(d => d.folders || []).catch(() => []);
+    const hint = folders.length ? ('Existing: ' + folders.join(', ') + '\n\n') : '';
+    const name = prompt(hint + 'Folder name (blank to remove from folder):', c.folder || '');
+    if (name === null) return;
+    await fetch('/api/conversations/' + c.id, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder: name.trim() })
+    });
+    loadConversationList();
+  });
+  item.querySelector('.dup-btn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const r = await fetch('/api/conversations/' + c.id + '/duplicate', { method: 'POST' });
+    const d = await r.json();
+    if (d.id) openConversation(d.id);
+  });
+  item.querySelector('.archive-btn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await fetch('/api/conversations/' + c.id, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ archived: !c.archived })
+    });
+    if (c.id === activeConvId) startNewChat();
+    else loadConversationList();
+  });
+  item.querySelector('.rename-btn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const newTitle = prompt('Rename chat:', c.title);
+    if (!newTitle || !newTitle.trim() || newTitle.trim() === c.title) return;
+    await fetch('/api/conversations/' + c.id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: newTitle.trim() })
+    });
+    loadConversationList();
+  });
+  item.querySelector('.del-btn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await fetch('/api/conversations/' + c.id, { method: 'DELETE' });
+    if (c.id === activeConvId) startNewChat();
+    else loadConversationList();
+  });
+  return item;
+}
+
 async function loadConversationList() {
   try {
-    const r = await fetch('/api/conversations');
+    const r = await fetch('/api/conversations?archived=' + (showingArchived ? '1' : '0'));
     const d = await r.json();
     const convs = d.conversations || [];
     convListEl.innerHTML = '';
-    convs.forEach(c => {
-      const item = document.createElement('div');
-      item.className = 'conv-item' + (c.id === activeConvId ? ' active' : '');
-      item.innerHTML = '<span class="title"></span>'
-        + '<button class="rename-btn" title="Rename">✎</button>'
-        + '<button class="del-btn" title="Delete">✕</button>';
-      item.querySelector('.title').textContent = c.title;
-      item.addEventListener('click', (e) => {
-        if (!e.target.classList.contains('del-btn') && !e.target.classList.contains('rename-btn')) openConversation(c.id);
+
+    if (!showingArchived) {
+      const byFolder = {};
+      const noFolder = [];
+      convs.forEach(c => {
+        if (c.folder) { (byFolder[c.folder] = byFolder[c.folder] || []).push(c); }
+        else noFolder.push(c);
       });
-      item.querySelector('.rename-btn').addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const newTitle = prompt('Rename chat:', c.title);
-        if (!newTitle || !newTitle.trim() || newTitle.trim() === c.title) return;
-        await fetch('/api/conversations/' + c.id, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: newTitle.trim() })
-        });
-        loadConversationList();
+      Object.keys(byFolder).sort().forEach(folderName => {
+        const header = document.createElement('div');
+        header.textContent = '📁 ' + folderName;
+        header.style.cssText = 'font-size:11px;font-weight:700;color:var(--muted);padding:8px 10px 3px;text-transform:uppercase;letter-spacing:.3px;';
+        convListEl.appendChild(header);
+        byFolder[folderName].forEach(c => convListEl.appendChild(buildConvItem(c)));
       });
-      item.querySelector('.del-btn').addEventListener('click', async (e) => {
-        e.stopPropagation();
-        await fetch('/api/conversations/' + c.id, { method: 'DELETE' });
-        if (c.id === activeConvId) startNewChat();
-        else loadConversationList();
-      });
-      convListEl.appendChild(item);
-    });
+      noFolder.forEach(c => convListEl.appendChild(buildConvItem(c)));
+    } else {
+      convs.forEach(c => convListEl.appendChild(buildConvItem(c)));
+    }
+
+    if (!convs.length) {
+      const empty = document.createElement('div');
+      empty.textContent = showingArchived ? 'No archived chats.' : 'No chats yet.';
+      empty.style.cssText = 'padding:16px 10px;font-size:12.5px;color:var(--muted);text-align:center;';
+      convListEl.appendChild(empty);
+    }
     return convs;
   } catch { return []; }
 }
@@ -2728,8 +2893,18 @@ function renderMarkdown(text) {
   div.className = 'msg-text md-rendered';
   let html = text
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
-    `<pre><code class="lang-${lang}">${code.trim()}</code></pre>`);
+  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const id = 'cb_' + Math.random().toString(36).slice(2, 9);
+    const label = lang ? lang : 'text';
+    const escaped = code.trim();
+    return `<div class="code-block-wrap" style="position:relative;margin:8px 0;border-radius:10px;overflow:hidden;border:1px solid var(--border);">`
+      + `<div style="display:flex;justify-content:space-between;align-items:center;background:var(--panel);padding:6px 10px;font-size:11px;color:var(--muted);">`
+      + `<span>${label}</span>`
+      + `<button class="code-copy-btn" data-target="${id}" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:11px;padding:2px 6px;">📋 Copy</button>`
+      + `</div>`
+      + `<pre style="margin:0;padding:10px 12px;overflow-x:auto;background:var(--bg);"><code id="${id}" class="lang-${label}">${escaped}</code></pre>`
+      + `</div>`;
+  });
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
@@ -3121,68 +3296,6 @@ function getTonePrefix() {
   return parts.length ? '[Instructions: ' + parts.join(' ') + '] ' : '';
 }
 
-// ─── AUTOMATIC IMAGE WATERMARK — settings (Settings → Image Watermark) ───────
-// Persisted in localStorage, sent with every /api/generate-image request so
-// the server applies it before the image is ever returned/downloadable.
-const WATERMARK_STORE_KEY = 'mythic_watermark_settings';
-const WATERMARK_DEFAULTS = {
-  enabled: true, opacity: 88, size_pct: 3.2, position: 'br',
-  margin: 24, theme: 'auto', shadow: true, glow: true,
-};
-
-function getWatermarkSettings() {
-  try {
-    return { ...WATERMARK_DEFAULTS, ...JSON.parse(localStorage.getItem(WATERMARK_STORE_KEY) || '{}') };
-  } catch { return { ...WATERMARK_DEFAULTS }; }
-}
-function saveWatermarkSettings(partial) {
-  const merged = { ...getWatermarkSettings(), ...partial };
-  localStorage.setItem(WATERMARK_STORE_KEY, JSON.stringify(merged));
-  return merged;
-}
-
-(function initWatermarkSettingsUI() {
-  const toggleBtn  = document.getElementById('wm-toggle-btn');
-  const panel      = document.getElementById('wm-panel');
-  const opacityEl  = document.getElementById('wm-opacity');
-  const opacityVal = document.getElementById('wm-opacity-val');
-  const sizeEl     = document.getElementById('wm-size');
-  const sizeVal    = document.getElementById('wm-size-val');
-  const positionEl = document.getElementById('wm-position');
-  const marginEl   = document.getElementById('wm-margin');
-  const marginVal  = document.getElementById('wm-margin-val');
-  const themeEl    = document.getElementById('wm-theme');
-  const shadowEl   = document.getElementById('wm-shadow');
-  const glowEl     = document.getElementById('wm-glow');
-  if (!toggleBtn) return; // settings modal not present in this build
-
-  function refreshUI() {
-    const s = getWatermarkSettings();
-    toggleBtn.textContent = s.enabled ? 'Enabled ✓' : 'Disabled';
-    toggleBtn.style.borderColor = s.enabled ? 'var(--accent)' : 'var(--border)';
-    toggleBtn.style.color = s.enabled ? 'var(--accent)' : 'var(--muted)';
-    panel.style.opacity = s.enabled ? '1' : '.45';
-    panel.style.pointerEvents = s.enabled ? 'auto' : 'none';
-    opacityEl.value = s.opacity; opacityVal.textContent = s.opacity + '%';
-    sizeEl.value = s.size_pct; sizeVal.textContent = s.size_pct + '%';
-    positionEl.value = s.position;
-    marginEl.value = s.margin; marginVal.textContent = s.margin + 'px';
-    themeEl.value = s.theme;
-    shadowEl.checked = !!s.shadow;
-    glowEl.checked = !!s.glow;
-  }
-  refreshUI();
-
-  toggleBtn.addEventListener('click', () => { saveWatermarkSettings({ enabled: !getWatermarkSettings().enabled }); refreshUI(); });
-  opacityEl.addEventListener('input', () => { opacityVal.textContent = opacityEl.value + '%'; saveWatermarkSettings({ opacity: parseInt(opacityEl.value, 10) }); });
-  sizeEl.addEventListener('input', () => { sizeVal.textContent = sizeEl.value + '%'; saveWatermarkSettings({ size_pct: parseFloat(sizeEl.value) }); });
-  positionEl.addEventListener('change', () => saveWatermarkSettings({ position: positionEl.value }));
-  marginEl.addEventListener('input', () => { marginVal.textContent = marginEl.value + 'px'; saveWatermarkSettings({ margin: parseInt(marginEl.value, 10) }); });
-  themeEl.addEventListener('change', () => saveWatermarkSettings({ theme: themeEl.value }));
-  shadowEl.addEventListener('change', () => saveWatermarkSettings({ shadow: shadowEl.checked }));
-  glowEl.addEventListener('change', () => saveWatermarkSettings({ glow: glowEl.checked }));
-})();
-
 const _origFormSubmit = form.onsubmit;
 form.addEventListener('submit', async () => {
   const checkDone = setInterval(() => {
@@ -3369,7 +3482,7 @@ ghibliGenerateBtn.addEventListener('click', async () => {
   ghibliLoading.style.display = 'block';
   ghibliGenerateBtn.disabled = true;
 
-  const bodyPayload = { prompt, watermark: getWatermarkSettings() };
+  const bodyPayload = { prompt };
   if (ghibliBase64) {
     bodyPayload.imageBase64 = ghibliBase64;
     bodyPayload.mimeType = ghibliMimeType;
@@ -3386,8 +3499,6 @@ ghibliGenerateBtn.addEventListener('click', async () => {
     catch { d = {error: `Server error (${r.status}). Please try again in a moment.`}; }
     ghibliLoading.style.display = 'none';
     if (d.image) {
-      ghibliResult.classList.add('wm-fade-in');
-      ghibliResult.onload = () => ghibliResult.classList.add('wm-loaded');
       ghibliResult.src = 'data:image/png;base64,' + d.image;
       ghibliResultWrap.style.display = 'block';
       clearEmptyState();
@@ -3398,8 +3509,6 @@ ghibliGenerateBtn.addEventListener('click', async () => {
       cap.textContent = '🌿 Your Ghibli portrait';
       cap.style.cssText = 'font-size:12px;color:var(--muted);margin-bottom:8px;';
       const img = document.createElement('img');
-      img.className = 'wm-fade-in';
-      img.onload = () => img.classList.add('wm-loaded');
       img.src = 'data:image/png;base64,' + d.image;
       img.style.cssText = 'max-width:100%;border-radius:12px;display:block;cursor:pointer;';
       img.title = 'Click to download';
@@ -3453,7 +3562,7 @@ if (imgGenerateBtn2) imgGenerateBtn2.addEventListener('click', async () => {
     const r = await fetch('/api/generate-image', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({prompt, style, watermark: getWatermarkSettings()})
+      body: JSON.stringify({prompt, style})
     });
     const text = await r.text();
     let d;
@@ -3462,8 +3571,6 @@ if (imgGenerateBtn2) imgGenerateBtn2.addEventListener('click', async () => {
     imgLoadingEl.style.display = 'none';
     if (d.image) {
       lastGeneratedImageB64 = d.image;
-      imgOutputEl.classList.add('wm-fade-in');
-      imgOutputEl.onload = () => imgOutputEl.classList.add('wm-loaded');
       imgOutputEl.src = 'data:image/png;base64,' + d.image;
       imgResultEl.style.display = 'block';
       clearEmptyState();
@@ -3472,8 +3579,6 @@ if (imgGenerateBtn2) imgGenerateBtn2.addEventListener('click', async () => {
       const cap = document.createElement('div'); cap.textContent = '🎨 ' + prompt;
       cap.style.cssText = 'font-size:12px;opacity:.7;margin-bottom:8px;';
       const img = document.createElement('img');
-      img.className = 'wm-fade-in';
-      img.onload = () => img.classList.add('wm-loaded');
       img.src = 'data:image/png;base64,' + d.image;
       img.style.cssText = 'max-width:100%;border-radius:10px;display:block;';
       bubble.appendChild(cap); bubble.appendChild(img); row.appendChild(bubble);
@@ -3654,6 +3759,319 @@ if (weatherLocBtn2) weatherLocBtn2.addEventListener('click', () => {
   );
 });
 renderRecentSearches();
+
+// ─── Code block copy buttons (event delegation — blocks are added dynamically) ─
+messagesEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.code-copy-btn');
+  if (!btn) return;
+  const codeEl = document.getElementById(btn.dataset.target);
+  if (!codeEl) return;
+  try {
+    await navigator.clipboard.writeText(codeEl.textContent);
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  } catch {}
+});
+
+// ─── Archived view toggle ─────────────────────────────────────────────────────
+const archivedToggleBtn = document.getElementById('archived-toggle-btn');
+if (archivedToggleBtn) archivedToggleBtn.addEventListener('click', () => {
+  showingArchived = !showingArchived;
+  archivedToggleBtn.textContent = showingArchived ? '💬 Active Chats' : '🗄 Archived';
+  archivedToggleBtn.style.color = showingArchived ? 'var(--accent)' : '';
+  archivedToggleBtn.style.borderColor = showingArchived ? 'var(--accent)' : 'var(--border)';
+  loadConversationList();
+});
+
+// ─── Message bookmarks (stored per-conversation in localStorage) ──────────────
+function getBookmarks() {
+  try { return JSON.parse(localStorage.getItem('mythic_bookmarks') || '{}'); } catch { return {}; }
+}
+function saveBookmarks(b) { localStorage.setItem('mythic_bookmarks', JSON.stringify(b)); }
+function toggleBookmark(convId, msgIndex, text) {
+  if (!convId) return false;
+  const all = getBookmarks();
+  const list = all[convId] = all[convId] || [];
+  const existingIdx = list.findIndex(b => b.msgIndex === msgIndex);
+  let nowBookmarked;
+  if (existingIdx >= 0) { list.splice(existingIdx, 1); nowBookmarked = false; }
+  else { list.push({ msgIndex, text: (text || '').slice(0, 200), ts: Date.now() }); nowBookmarked = true; }
+  if (!list.length) delete all[convId];
+  saveBookmarks(all);
+  return nowBookmarked;
+}
+function isBookmarked(convId, msgIndex) {
+  const list = getBookmarks()[convId] || [];
+  return list.some(b => b.msgIndex === msgIndex);
+}
+
+const bookmarksBtn = document.getElementById('bookmarks-btn');
+function showBookmarksModal() {
+  const all = getBookmarks();
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;';
+  let rows = '';
+  let count = 0;
+  Object.entries(all).forEach(([convId, list]) => {
+    list.forEach(b => {
+      count++;
+      rows += `<div class="bm-row" data-conv="${convId}" style="padding:10px;border-bottom:1px solid var(--border);cursor:pointer;font-size:12.5px;color:var(--text);">${b.text.replace(/</g,'&lt;')}</div>`;
+    });
+  });
+  if (!count) rows = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:13px;">No bookmarked messages yet. Use the 🔖 icon on any message.</div>';
+  overlay.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;width:90%;max-width:420px;max-height:70vh;overflow-y:auto;">
+    <h3 style="margin:0 0 12px;font-size:16px;">🔖 Bookmarked Messages</h3>
+    <div>${rows}</div>
+    <button id="bm-close" style="margin-top:14px;width:100%;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:9px;cursor:pointer;font-family:inherit;">Close</button>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelectorAll('.bm-row').forEach(row => {
+    row.addEventListener('click', () => { openConversation(row.dataset.conv); overlay.remove(); });
+  });
+  overlay.querySelector('#bm-close').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+if (bookmarksBtn) bookmarksBtn.addEventListener('click', showBookmarksModal);
+
+// ─── Chat statistics ────────────────────────────────────────────────────────
+const statsBtn = document.getElementById('stats-btn');
+async function showStatsModal() {
+  const convs = await fetch('/api/conversations').then(r => r.json()).then(d => d.conversations || []).catch(() => []);
+  const streak = await fetch('/api/streak').then(r => r.json()).then(d => d.streak || 0).catch(() => 0);
+  let totalMsgsGuess = 0;
+  if (activeConvId) {
+    const d = await fetch('/api/conversations/' + activeConvId).then(r => r.json()).catch(() => null);
+    if (d && d.messages) totalMsgsGuess = d.messages.length;
+  }
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;';
+  overlay.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;width:90%;max-width:380px;">
+    <h3 style="margin:0 0 14px;font-size:16px;">📊 Chat Statistics</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+      <div style="background:var(--bg);border-radius:8px;padding:12px;text-align:center;">
+        <div style="font-size:22px;font-weight:700;color:var(--accent);">${convs.length}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px;">Total Chats</div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;padding:12px;text-align:center;">
+        <div style="font-size:22px;font-weight:700;color:var(--accent);">🔥 ${streak}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px;">Day Streak</div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;padding:12px;text-align:center;">
+        <div style="font-size:22px;font-weight:700;color:var(--accent);">${convs.filter(c=>c.pinned).length}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px;">Pinned</div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;padding:12px;text-align:center;">
+        <div style="font-size:22px;font-weight:700;color:var(--accent);">${totalMsgsGuess}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px;">Messages (this chat)</div>
+      </div>
+    </div>
+    <button id="stats-close" style="margin-top:16px;width:100%;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:9px;cursor:pointer;font-family:inherit;">Close</button>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#stats-close').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+if (statsBtn) statsBtn.addEventListener('click', showStatsModal);
+
+// ─── Bookmark button on AI/user messages ───────────────────────────────────
+let _msgIndexCounter = 0;
+const _origBuildActions2 = buildMsgActions;
+buildMsgActions = function(row, textNode, role) {
+  const actions = _origBuildActions2(row, textNode, role);
+  const myIndex = _msgIndexCounter++;
+  row.dataset.msgIndex = myIndex;
+  const bmBtn = document.createElement('button');
+  bmBtn.type = 'button'; bmBtn.title = 'Bookmark';
+  bmBtn.textContent = isBookmarked(activeConvId, myIndex) ? '🔖' : '🏷';
+  bmBtn.addEventListener('click', () => {
+    const on = toggleBookmark(activeConvId, myIndex, textNode.textContent || textNode.innerText || '');
+    bmBtn.textContent = on ? '🔖' : '🏷';
+  });
+  actions.appendChild(bmBtn);
+  return actions;
+};
+
+// ─── Command palette (Ctrl+K) ──────────────────────────────────────────────
+function showCommandPalette() {
+  const existing = document.getElementById('cmd-palette-overlay');
+  if (existing) { existing.remove(); }
+  const overlay = document.createElement('div');
+  overlay.id = 'cmd-palette-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:600;display:flex;align-items:flex-start;justify-content:center;padding-top:12vh;';
+  overlay.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:92%;max-width:480px;box-shadow:0 10px 50px rgba(0,0,0,.4);overflow:hidden;">
+    <input id="cmd-input" placeholder="Type a command or search chats..." autocomplete="off"
+      style="width:100%;box-sizing:border-box;padding:14px 16px;background:transparent;border:none;border-bottom:1px solid var(--border);color:var(--text);font-size:14px;outline:none;font-family:inherit;">
+    <div id="cmd-results" style="max-height:320px;overflow-y:auto;"></div>
+  </div>`;
+  document.body.appendChild(overlay);
+  const input = overlay.querySelector('#cmd-input');
+  const results = overlay.querySelector('#cmd-results');
+  input.focus();
+
+  const staticCommands = [
+    { label: '+ New chat', action: () => { startNewChat(); } },
+    { label: '⚙ Open Settings', action: () => { settingsModalOverlay.style.display = 'flex'; } },
+    { label: '📊 Chat Statistics', action: showStatsModal },
+    { label: '🔖 Bookmarked Messages', action: showBookmarksModal },
+    { label: '🗄 Toggle Archived View', action: () => archivedToggleBtn && archivedToggleBtn.click() },
+    { label: '⬇ Export current chat', action: () => exportBtn.click() },
+    { label: '☰ Toggle sidebar', action: () => sidebarToggle.click() },
+  ];
+
+  async function renderResults(query) {
+    results.innerHTML = '';
+    const q = query.trim().toLowerCase();
+    const cmdMatches = staticCommands.filter(c => !q || c.label.toLowerCase().includes(q));
+    cmdMatches.forEach(c => {
+      const row = document.createElement('div');
+      row.textContent = c.label;
+      row.style.cssText = 'padding:10px 16px;cursor:pointer;font-size:13.5px;color:var(--text);';
+      row.addEventListener('mouseenter', () => row.style.background = 'var(--accent-dim)');
+      row.addEventListener('mouseleave', () => row.style.background = '');
+      row.addEventListener('click', () => { c.action(); overlay.remove(); });
+      results.appendChild(row);
+    });
+    if (q) {
+      const convs = await fetch('/api/conversations').then(r => r.json()).then(d => d.conversations || []).catch(() => []);
+      const chatMatches = convs.filter(c => c.title.toLowerCase().includes(q)).slice(0, 8);
+      chatMatches.forEach(c => {
+        const row = document.createElement('div');
+        row.textContent = '💬 ' + c.title;
+        row.style.cssText = 'padding:10px 16px;cursor:pointer;font-size:13.5px;color:var(--muted);';
+        row.addEventListener('mouseenter', () => row.style.background = 'var(--accent-dim)');
+        row.addEventListener('mouseleave', () => row.style.background = '');
+        row.addEventListener('click', () => { openConversation(c.id); overlay.remove(); });
+        results.appendChild(row);
+      });
+    }
+    if (!results.children.length) {
+      results.innerHTML = '<div style="padding:16px;text-align:center;color:var(--muted);font-size:12.5px;">No matches.</div>';
+    }
+  }
+  renderResults('');
+  input.addEventListener('input', () => renderResults(input.value));
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  input.addEventListener('keydown', e => { if (e.key === 'Escape') overlay.remove(); });
+}
+
+// ─── Extra keyboard shortcuts ───────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); showCommandPalette(); return; }
+  if (mod && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); startNewChat(); return; }
+  if (mod && e.key.toLowerCase() === 'b') { e.preventDefault(); sidebarToggle.click(); return; }
+  // "/" focuses the message input, unless already typing somewhere
+  if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+    e.preventDefault(); input.focus();
+  }
+});
+
+// ─── PIN lock (client-side; hashed PIN kept in localStorage) ───────────────
+async function _sha256Hex(text) {
+  const enc = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function showPinSetupModal() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:700;display:flex;align-items:center;justify-content:center;';
+  overlay.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:22px;width:90%;max-width:320px;text-align:center;">
+    <div style="font-size:30px;margin-bottom:8px;">🔒</div>
+    <div style="font-weight:700;font-size:15px;margin-bottom:12px;">Set a 4-digit PIN</div>
+    <input id="pin-setup-input" type="password" inputmode="numeric" maxlength="4" placeholder="••••"
+      style="width:100%;box-sizing:border-box;text-align:center;letter-spacing:8px;font-size:22px;padding:10px;border-radius:8px;border:1.5px solid var(--border);background:var(--bg);color:var(--text);outline:none;margin-bottom:12px;">
+    <div style="display:flex;gap:8px;">
+      <button id="pin-setup-save" style="flex:1;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px;cursor:pointer;font-family:inherit;">Save</button>
+      <button id="pin-setup-cancel" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:10px;cursor:pointer;font-family:inherit;">Cancel</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  const pinInput = overlay.querySelector('#pin-setup-input');
+  pinInput.focus();
+  overlay.querySelector('#pin-setup-cancel').addEventListener('click', () => overlay.remove());
+  overlay.querySelector('#pin-setup-save').addEventListener('click', async () => {
+    const v = pinInput.value.trim();
+    if (!/^\d{4}$/.test(v)) { pinInput.style.borderColor = '#ef4444'; return; }
+    const hash = await _sha256Hex(v);
+    localStorage.setItem('mythic_pin_hash', hash);
+    overlay.remove();
+  });
+}
+
+function showPinLockScreen() {
+  const overlay = document.createElement('div');
+  overlay.id = 'pin-lock-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:var(--bg);z-index:9000;display:flex;flex-direction:column;align-items:center;justify-content:center;';
+  overlay.innerHTML = `<div style="text-align:center;">
+    <div style="font-size:40px;margin-bottom:10px;">🔒</div>
+    <div style="font-weight:700;font-size:16px;color:var(--accent);margin-bottom:16px;">Mythic AI Locked</div>
+    <input id="pin-unlock-input" type="password" inputmode="numeric" maxlength="4" placeholder="••••"
+      style="width:180px;box-sizing:border-box;text-align:center;letter-spacing:8px;font-size:24px;padding:10px;border-radius:8px;border:1.5px solid var(--border);background:var(--panel);color:var(--text);outline:none;">
+    <div id="pin-unlock-err" style="color:#ef4444;font-size:12px;margin-top:8px;display:none;">Wrong PIN</div>
+  </div>`;
+  document.body.appendChild(overlay);
+  const pinInput = overlay.querySelector('#pin-unlock-input');
+  const errEl = overlay.querySelector('#pin-unlock-err');
+  pinInput.focus();
+  pinInput.addEventListener('input', async () => {
+    if (pinInput.value.length !== 4) return;
+    const hash = await _sha256Hex(pinInput.value);
+    if (hash === localStorage.getItem('mythic_pin_hash')) {
+      overlay.remove();
+    } else {
+      errEl.style.display = 'block';
+      pinInput.value = '';
+    }
+  });
+}
+
+if (localStorage.getItem('mythic_pin_hash')) {
+  showPinLockScreen();
+}
+
+// Wire up PIN lock enable/disable from Settings (adds a row dynamically so
+// it doesn't require restructuring the existing settings modal markup).
+(function addPinLockSettingsRow() {
+  const settingsModal = document.getElementById('settings-modal');
+  const closeBtn = document.getElementById('settings-close-btn');
+  if (!settingsModal || !closeBtn) return;
+  const section = document.createElement('div');
+  section.className = 'settings-section';
+  section.style.cssText = 'border-top:1px solid var(--border);padding-top:14px;margin-top:4px;';
+  section.innerHTML = `<label style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;">
+    <span>🔒 PIN Lock</span>
+    <button id="pin-lock-toggle-btn" type="button"
+      style="background:none;border:1.5px solid var(--border);color:var(--muted);border-radius:20px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:inherit;">
+      ${localStorage.getItem('mythic_pin_hash') ? 'Disable' : 'Enable'}
+    </button>
+  </label>
+  <div class="hint">Locks the app behind a 4-digit PIN on this device. Stored only as a hash in your browser.</div>`;
+  closeBtn.parentNode.insertBefore(section, closeBtn);
+  section.querySelector('#pin-lock-toggle-btn').addEventListener('click', (e) => {
+    if (localStorage.getItem('mythic_pin_hash')) {
+      localStorage.removeItem('mythic_pin_hash');
+      e.target.textContent = 'Enable';
+    } else {
+      showPinSetupModal();
+      setTimeout(() => { e.target.textContent = localStorage.getItem('mythic_pin_hash') ? 'Disable' : 'Enable'; }, 500);
+    }
+  });
+})();
+
+// ─── Auto-generate a smart AI title after the first exchange in a new chat ──
+const _origStreamReply = streamReply;
+streamReply = async function(opts) {
+  const wasNewChat = !activeConvId;
+  await _origStreamReply(opts);
+  if (wasNewChat && activeConvId && !(opts && opts.regenerate)) {
+    fetch('/api/conversations/' + activeConvId + '/generate-title', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(getUserApiKeys())
+    }).then(() => loadConversationList()).catch(() => {});
+  }
+};
 </script>
 </body>
 </html>
@@ -3902,7 +4320,19 @@ def index():
 @app.route("/api/conversations", methods=["GET"])
 @login_required
 def api_list_conversations():
-    return jsonify({"conversations": list_conversations(current_username())})
+    show_archived = request.args.get("archived", "0") == "1"
+    convs = list_conversations(current_username())
+    if show_archived:
+        convs = [c for c in convs if c.get("archived")]
+    else:
+        convs = [c for c in convs if not c.get("archived")]
+    return jsonify({"conversations": convs})
+
+
+@app.route("/api/folders", methods=["GET"])
+@login_required
+def api_list_folders():
+    return jsonify({"folders": list_folders(current_username())})
 
 
 @app.route("/api/conversations/<conv_id>", methods=["GET"])
@@ -3932,17 +4362,148 @@ def api_delete_conversation(conv_id):
 @app.route("/api/conversations/<conv_id>", methods=["PATCH"])
 @login_required
 def api_rename_conversation(conv_id):
+    """Updates one or more of: title, folder, pinned, archived. At least one
+    field must be present; unspecified fields are left unchanged."""
     data = request.get_json(force=True) or {}
-    new_title = (data.get("title") or "").strip()[:120]
-    if not new_title:
-        return jsonify({"error": "title is required"}), 400
     username = current_username()
     conv = load_conversation(username, conv_id)
     if conv is None:
         return jsonify({"error": "not found"}), 404
+
+    changed = {}
+    if "title" in data:
+        new_title = (data.get("title") or "").strip()[:120]
+        if not new_title:
+            return jsonify({"error": "title cannot be empty"}), 400
+        conv["title"] = new_title
+        changed["title"] = new_title
+    if "folder" in data:
+        folder = (data.get("folder") or "").strip()[:60] or None
+        conv["folder"] = folder
+        changed["folder"] = folder
+    if "pinned" in data:
+        conv["pinned"] = bool(data.get("pinned"))
+        changed["pinned"] = conv["pinned"]
+    if "archived" in data:
+        conv["archived"] = bool(data.get("archived"))
+        changed["archived"] = conv["archived"]
+
+    if not changed:
+        return jsonify({"error": "no recognized fields to update "
+                                  "(expected title/folder/pinned/archived)"}), 400
+
+    save_conversation(username, conv_id, conv)
+    return jsonify({"status": "updated", **changed})
+
+
+@app.route("/api/conversations/<conv_id>/duplicate", methods=["POST"])
+@login_required
+def api_duplicate_conversation(conv_id):
+    username = current_username()
+    conv = load_conversation(username, conv_id)
+    if conv is None:
+        return jsonify({"error": "not found"}), 404
+    new_id = str(uuid.uuid4())
+    new_conv = {
+        "title": (conv.get("title") or "New chat") + " (copy)",
+        "messages": json.loads(json.dumps(conv.get("messages", []))),  # deep copy
+        "folder": conv.get("folder"),
+        "pinned": False,
+        "archived": False,
+    }
+    save_conversation(username, new_id, new_conv)
+    return jsonify({"status": "duplicated", "id": new_id, "title": new_conv["title"]})
+
+
+def _collect_full_reply(chunks):
+    return "".join(chunks)
+
+
+@app.route("/api/conversations/<conv_id>/generate-title", methods=["POST"])
+@login_required
+def api_generate_title(conv_id):
+    """Asks the AI to write a short, punchy title from the first exchange in
+    the conversation, replacing the naive first-40-characters title. Safe to
+    call any time; falls back to leaving the title unchanged if the AI can't
+    be reached."""
+    username = current_username()
+    conv = load_conversation(username, conv_id)
+    if conv is None:
+        return jsonify({"error": "not found"}), 404
+    messages = conv.get("messages", [])
+    if not messages:
+        return jsonify({"error": "conversation has no messages yet"}), 400
+
+    convo_excerpt = []
+    for m in messages[:4]:
+        text = "".join(p.get("text", "") for p in m.get("parts", []) if "text" in p)
+        if text:
+            speaker = "User" if m["role"] == "user" else "Assistant"
+            convo_excerpt.append(f"{speaker}: {text[:300]}")
+    excerpt = "\n".join(convo_excerpt)
+    if not excerpt.strip():
+        return jsonify({"error": "no text content to summarize"}), 400
+
+    title_prompt = [{"role": "user", "parts": [{"text":
+        "Write a short chat title (max 6 words, no quotes, no trailing "
+        "punctuation, plain text only) that summarizes this conversation:\n\n"
+        f"{excerpt}"
+    }]}]
+    data = request.get_json(silent=True) or {}
+    user_groq_key = (data.get("groq_api_key") or "").strip()
+    user_cerebras_key = (data.get("cerebras_api_key") or "").strip()
+
+    try:
+        raw_title = _collect_full_reply(
+            auto_stream_chunks(None, title_prompt, SYSTEM_PROMPT, user_groq_key, user_cerebras_key)
+        ).strip()
+    except Exception:
+        raw_title = ""
+
+    raw_title = raw_title.strip().strip('"').strip("'")
+    raw_title = re.sub(r'^\[Instructions:.*?\]\s*', '', raw_title, flags=re.DOTALL)
+    if not raw_title or len(raw_title) > 80:
+        # AI unreachable or returned junk — keep the existing title rather
+        # than overwrite it with something worse.
+        return jsonify({"status": "unchanged", "title": conv.get("title", "New chat")})
+
+    new_title = raw_title[:60]
     conv["title"] = new_title
     save_conversation(username, conv_id, conv)
-    return jsonify({"status": "renamed", "title": new_title})
+    return jsonify({"status": "generated", "title": new_title})
+
+
+# ── Lightweight in-memory response cache ─────────────────────────────────────
+# Used for deterministic, repeat-prone calls (follow-up suggestions, chat-title
+# generation) where an identical prompt is likely to recur and re-hitting the
+# API adds latency/quota use for no benefit. NOT used for normal chat turns,
+# since conversation context differs on every message. TTL + size-capped so it
+# never grows unbounded; resets on process restart (no external cache needed).
+_response_cache = {}
+_RESPONSE_CACHE_TTL_SECONDS = 600
+_RESPONSE_CACHE_MAX_ENTRIES = 300
+
+
+def _cache_key(label, model, messages):
+    raw = json.dumps(messages, sort_keys=True) + "|" + label + "|" + (model or "")
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _cache_get(key):
+    entry = _response_cache.get(key)
+    if not entry:
+        return None
+    text, ts = entry
+    if time.time() - ts > _RESPONSE_CACHE_TTL_SECONDS:
+        _response_cache.pop(key, None)
+        return None
+    return text
+
+
+def _cache_set(key, text):
+    if len(_response_cache) > _RESPONSE_CACHE_MAX_ENTRIES:
+        _response_cache.pop(next(iter(_response_cache)), None)
+    _response_cache[key] = (text, time.time())
 
 
 def to_openai_messages(gemini_messages, system_prompt):
@@ -4001,16 +4562,27 @@ def _openai_style_stream(url, api_key, model, messages, provider_label):
         return
 
     # Streaming path — the normal, preferred flow on always-on hosts
-    try:
-        resp = requests.post(
-            url,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": model, "messages": messages, "stream": True, "max_tokens": 2048},
-            stream=True, timeout=60,
-        )
-    except requests.RequestException as e:
-        print(f"[{provider_label}] network error: {e}")
-        return
+    max_retries = 2
+    resp = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": messages, "stream": True, "max_tokens": 2048},
+                stream=True, timeout=60,
+            )
+        except requests.RequestException as e:
+            print(f"[{provider_label}] network error: {e}")
+            return
+        if resp.status_code == 429 and attempt < max_retries:
+            # Rate-limited — brief backoff, then retry the same model/provider
+            # before giving up on it entirely.
+            print(f"[{provider_label}] rate-limited (429), retrying in "
+                  f"{1.5 * (attempt + 1):.1f}s (attempt {attempt + 1}/{max_retries})")
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        break
 
     if resp.status_code != 200:
         try:
@@ -4041,33 +4613,59 @@ def _openai_style_stream(url, api_key, model, messages, provider_label):
             continue
 
 
-def groq_stream_chunks(messages, api_key=None):
+def _stream_with_model_fallback(url, api_key, primary_model, fallback_model, messages, label):
+    """Tries `primary_model` first (e.g. a model the person picked in the
+    Model Manager). If it yields nothing at all — invalid/decommissioned
+    model, 404, etc. — automatically retries once on `fallback_model` (the
+    server's configured default) before giving up on this provider, so a
+    stale or unavailable model choice doesn't just silently fail."""
+    models_to_try = [primary_model]
+    if fallback_model and fallback_model != primary_model:
+        models_to_try.append(fallback_model)
+    for m in models_to_try:
+        got_any = False
+        for chunk in _openai_style_stream(url, api_key, m, messages, f"{label}:{m}"):
+            got_any = True
+            yield chunk
+        if got_any:
+            return
+
+
+def groq_stream_chunks(messages, api_key=None, model=None):
     """Stream from Groq (primary chat provider). Uses a person's own key
-    (from Settings) when provided, otherwise the server's GROQ_API_KEY."""
-    yield from _openai_style_stream(
+    (from Settings) when provided, otherwise the server's GROQ_API_KEY. An
+    optional `model` overrides GROQ_MODEL for this request (falls back to
+    GROQ_MODEL automatically if the override is unavailable)."""
+    yield from _stream_with_model_fallback(
         "https://api.groq.com/openai/v1/chat/completions",
-        api_key or GROQ_API_KEY, GROQ_MODEL, messages, "Groq",
+        api_key or GROQ_API_KEY, model or GROQ_MODEL, GROQ_MODEL, messages, "Groq",
     )
 
 
-def cerebras_stream_chunks(messages, api_key=None):
+def cerebras_stream_chunks(messages, api_key=None, model=None):
     """Stream from Cerebras (automatic fallback if Groq is unavailable). Uses
     a person's own key (from Settings) when provided, otherwise the
-    server's CEREBRAS_API_KEY."""
-    yield from _openai_style_stream(
+    server's CEREBRAS_API_KEY. An optional `model` overrides CEREBRAS_MODEL
+    for this request (falls back to CEREBRAS_MODEL automatically if the
+    override is unavailable)."""
+    yield from _stream_with_model_fallback(
         "https://api.cerebras.ai/v1/chat/completions",
-        api_key or CEREBRAS_API_KEY, CEREBRAS_MODEL, messages, "Cerebras",
+        api_key or CEREBRAS_API_KEY, model or CEREBRAS_MODEL, CEREBRAS_MODEL, messages, "Cerebras",
     )
 
 
 def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
-                        user_groq_key=None, user_cerebras_key=None):
+                        user_groq_key=None, user_cerebras_key=None,
+                        groq_model=None, cerebras_model=None):
     """Groq first, Cerebras as a silent automatic fallback.
     Never asks the user to pick a provider and never exposes provider errors —
     if Groq yields nothing (rate limit, timeout, invalid model, network error,
     4xx/5xx), we just move on to Cerebras with no visible interruption.
     If the person supplied their own API key(s) in Settings, those are tried
-    first (and exclusively, in that provider's slot) before the server's key."""
+    first (and exclusively, in that provider's slot) before the server's key.
+    `groq_model`/`cerebras_model` optionally override the chosen model within
+    each provider (see Model Manager) — invalid choices auto-fall-back to the
+    server's default model for that provider before moving to the next provider."""
     sp = system_prompt or SYSTEM_PROMPT
     openai_msgs = to_openai_messages(gemini_messages, sp)
 
@@ -4075,15 +4673,14 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
     groq_key = (user_groq_key or "").strip() or GROQ_API_KEY
     cerebras_key = (user_cerebras_key or "").strip() or CEREBRAS_API_KEY
     if PROVIDER in ("auto", "groq") and groq_key:
-        order.append(("Groq", lambda: groq_stream_chunks(openai_msgs, groq_key)))
+        order.append(("Groq", lambda: groq_stream_chunks(openai_msgs, groq_key, groq_model)))
     if PROVIDER in ("auto", "cerebras") and cerebras_key:
-        order.append(("Cerebras", lambda: cerebras_stream_chunks(openai_msgs, cerebras_key)))
+        order.append(("Cerebras", lambda: cerebras_stream_chunks(openai_msgs, cerebras_key, cerebras_model)))
 
     if not order:
-        yield ("I can't reach any AI provider right now. If this is your app, please "
-               "add a `GROQ_API_KEY` (get one free at https://console.groq.com/keys) "
-               "or `CEREBRAS_API_KEY` in your environment variables. If you're the user, "
-               "you can also add your own API key in Settings → My API Keys.")
+        # Kept short and free of internal setup instructions — see chat
+        # request for context.
+        yield "I'm not able to reply right now — please try again shortly."
         return
 
     for _name, fn in order:
@@ -4097,10 +4694,8 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
         except Exception as e:
             print(f"[{_name}] unexpected error: {e}")
 
-    # All configured providers failed silently — give the user something actionable
-    yield ("I couldn't get a reply from the AI right now. This usually means the API "
-           "key on the server is invalid, out of quota, or the provider is temporarily "
-           "down. Please try again in a moment, or add your own API key in Settings.")
+    # All configured providers failed silently — keep it short and generic.
+    yield "I couldn't get a reply just now. Please try again in a moment."
 
 
 # --- Model selector (cosmetic tiers over the same underlying providers) -----
@@ -4221,13 +4816,25 @@ def push_test():
     return jsonify({"status": "sent"})
 
 
-# ── Cron endpoint for hourly notifications ───────────────────────────────────
-# On Vercel serverless, the background thread never fires because functions
-# are frozen between requests. Configure a Vercel Cron Job (or GitHub Actions,
-# cron-job.org, EasyCron, etc.) to hit this endpoint every hour:
+# ── Cron endpoint for scheduled notifications ─────────────────────────────────
+# SCHEDULE SUMMARY:
+#   - Render (or any always-on host): nothing to configure — the in-process
+#     background thread (_reengagement_loop) fires automatically every
+#     _REENGAGEMENT_CHECK_INTERVAL_SECONDS (1 hour).
+#   - Vercel (serverless): the in-process thread never runs there (functions
+#     freeze between requests), so this endpoint must be triggered by an
+#     EXTERNAL cron, once a day at 12:00 (noon). Configure it with:
 #
 #   vercel.json:
-#     { "crons": [{ "path": "/api/cron/reengagement", "schedule": "0 * * * *" }] }
+#     {
+#       "crons": [
+#         { "path": "/api/cron/reengagement", "schedule": "0 12 * * *" }
+#       ]
+#     }
+#
+#   "0 12 * * *" = once a day at 12:00 in the project's configured cron
+#   timezone (UTC by default on Vercel — adjust the hour if you need a
+#   specific local noon).
 #
 # Protection: set CRON_SECRET as an environment variable and pass it in a
 # header:  Authorization: Bearer <CRON_SECRET>
@@ -4274,11 +4881,12 @@ def api_health():
             "configured": _PUSH_AVAILABLE and bool(VAPID_PRIVATE_KEY) and bool(VAPID_PUBLIC_KEY),
             "subscribers": len(_push_subscriptions),
             "cron_endpoint": "/api/cron/reengagement",
+            "cron_schedule": "Render: every 1 hour (built-in thread). Vercel: once daily at 12:00 via external cron.",
             "cron_secret_set": bool(CRON_SECRET),
         },
         "hint": ("Add GROQ_API_KEY or CEREBRAS_API_KEY as environment variables "
                  "if 'configured' is false. On Vercel, also set up a cron job "
-                 "hitting /api/cron/reengagement every hour for notifications.")
+                 "hitting /api/cron/reengagement once a day at 12:00 for notifications.")
     })
 
 
@@ -4462,6 +5070,12 @@ def chat():
     # Optional per-person "bring your own API key" override, set in Settings.
     user_groq_key = (data.get("groq_api_key") or "").strip()
     user_cerebras_key = (data.get("cerebras_api_key") or "").strip()
+    # Optional model overrides from the Model Manager (falls back to the
+    # server's default model automatically if unavailable — see
+    # _stream_with_model_fallback).
+    groq_model_override = (data.get("groq_model") or "").strip() or None
+    cerebras_model_override = (data.get("cerebras_model") or "").strip() or None
+    continue_reply = bool(data.get("continue_reply"))
 
     if ephemeral:
         if not user_message:
@@ -4496,7 +5110,8 @@ def chat():
         if regenerate:
             return jsonify({"error": "conversation not found"}), 404
         conv_id = str(uuid.uuid4())
-        conv = {"title": make_title(user_message), "messages": []}
+        conv = {"title": make_title(user_message), "messages": [],
+                "folder": None, "pinned": False, "archived": False}
 
     messages = conv.setdefault("messages", [])
 
@@ -4512,10 +5127,25 @@ def chat():
         attachment_meta = None
         if attachment:
             mime_type = attachment.get("mimeType", "application/octet-stream")
+            filename = attachment.get("name", "file")
+            extracted_text, extract_note = extract_text_from_attachment(filename, mime_type, raw)
+            if extracted_text is not None:
+                doc_block = f"\n\n[Attached file: {filename}]\n{extracted_text}"
+                if extract_note:
+                    doc_block += f"\n[Note: {extract_note}]"
+                user_parts.append({"text": doc_block})
+            elif mime_type.startswith("image/"):
+                user_parts.append({"text": (
+                    f"\n\n[Attached image: {filename} — I can't see images (only Groq/Cerebras "
+                    f"text models are used here, no vision API is configured). If you need help "
+                    f"with what's in this image, please describe it in words.]"
+                )})
+            elif extract_note:
+                user_parts.append({"text": f"\n\n[Attached file: {filename} — {extract_note}]"})
             user_parts.append({
                 "inline_data": {"mime_type": mime_type, "data": attachment["dataBase64"]}
             })
-            attachment_meta = {"name": attachment.get("name", "file"), "mimeType": mime_type}
+            attachment_meta = {"name": filename, "mimeType": mime_type}
 
         user_entry = {"role": "user", "parts": user_parts}
         if attachment_meta:
@@ -4525,6 +5155,10 @@ def chat():
         _update_user_activity(username)
 
     effective_system_prompt = SYSTEM_PROMPT
+    requested_mode = (data.get("mode") or "default").strip()
+    mode_addition = MODE_PROMPTS.get(requested_mode, "")
+    if mode_addition:
+        effective_system_prompt += " " + mode_addition
     if user_name:
         effective_system_prompt += (
             f" The user has told you their preferred name is \"{user_name}\". "
@@ -4614,439 +5248,6 @@ def generate_file():
         return jsonify({"error": f"File generation failed: {e}"}), 500
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# AUTOMATIC WATERMARK SYSTEM
-# ══════════════════════════════════════════════════════════════════════════
-# Every AI-generated image is automatically watermarked before it ever leaves
-# the server — the frontend never sees, and can never download, an
-# unwatermarked image. Uses Pillow (free, open-source, MIT/BSD-family license)
-# — no paid image APIs of any kind. If Pillow isn't installed, watermarking is
-# skipped gracefully (image generation still works) and a warning is printed
-# once at startup; run `pip install Pillow` to enable it.
-#
-# ADMIN_SECRET (env var, same pattern as CRON_SECRET) protects the admin
-# endpoints for uploading/replacing/resetting the official logo.
-ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "").strip()
-_WATERMARK_DIR = _os.path.join(_DATA_DIR, "watermark")
-_os.makedirs(_WATERMARK_DIR, exist_ok=True)
-_WATERMARK_LOGO_LIGHT_PATH = _os.path.join(_WATERMARK_DIR, "logo_light.png")  # white mark, for dark backgrounds
-_WATERMARK_LOGO_DARK_PATH  = _os.path.join(_WATERMARK_DIR, "logo_dark.png")   # dark mark, for light backgrounds
-
-if not _WATERMARK_AVAILABLE:
-    print("[Watermark] Pillow is not installed — generated images will NOT be "
-          "watermarked. Run `pip install Pillow` (free, no license cost) to enable "
-          "the automatic watermark system.")
-
-
-def _require_admin():
-    """Returns True if the request carries a valid ADMIN_SECRET. If
-    ADMIN_SECRET is unset, admin endpoints are open (dev-only default —
-    always set ADMIN_SECRET in production)."""
-    if not ADMIN_SECRET:
-        return True
-    auth = request.headers.get("Authorization", "")
-    provided = auth[7:].strip() if auth.startswith("Bearer ") else request.args.get("secret", "").strip()
-    return provided == ADMIN_SECRET
-
-
-def _build_default_watermark_logo(size=512, light=True):
-    """Generates the default 'Ꮇ' monogram watermark as a transparent-background
-    RGBA PIL Image — supersampled 4x then downsampled for clean anti-aliasing.
-    `light=True` gives a white mark (for dark image backgrounds); `light=False`
-    gives a near-black mark with a soft white edge (for light backgrounds)."""
-    SS = 4  # supersample factor for anti-aliasing
-    W = H = size * SS
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    fg = (255, 255, 255, 255) if light else (26, 26, 26, 255)
-    s = W / 40
-    pts = [
-        (10 * s, 28 * s), (10 * s, 12 * s), (20 * s, 22 * s),
-        (30 * s, 12 * s), (30 * s, 28 * s),
-    ]
-    lw = max(4, int(W // 11))
-    draw.line(pts, fill=fg, width=lw, joint="curve")
-    # Round off the line caps so ends aren't chopped square
-    r = lw // 2
-    for (x, y) in [pts[0], pts[-1]]:
-        draw.ellipse([x - r, y - r, x + r, y + r], fill=fg)
-
-    if not light:
-        # Soft white outline so the dark mark stays visible on busy/colorful
-        # backgrounds too ("if background is colorful, add a subtle outline").
-        outline = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ImageDraw.Draw(outline).line(pts, fill=(255, 255, 255, 160), width=lw + max(6, W // 40), joint="curve")
-        outline = outline.filter(ImageFilter.GaussianBlur(W / 60))
-        combined = Image.alpha_composite(outline, img)
-        img = combined
-
-    return img.resize((size, size), Image.LANCZOS)
-
-
-_default_logo_cache = {}
-
-def _get_default_watermark_logo(light=True):
-    key = "light" if light else "dark"
-    if key not in _default_logo_cache:
-        _default_logo_cache[key] = _build_default_watermark_logo(512, light=light)
-    return _default_logo_cache[key]
-
-
-def _load_watermark_logo(light=True):
-    """Returns the active logo as an RGBA PIL Image — an admin-uploaded custom
-    logo if one exists on disk, otherwise the built-in default monogram."""
-    path = _WATERMARK_LOGO_LIGHT_PATH if light else _WATERMARK_LOGO_DARK_PATH
-    if _os.path.exists(path):
-        try:
-            return Image.open(path).convert("RGBA")
-        except Exception:
-            pass
-    return _get_default_watermark_logo(light=light)
-
-
-# Position presets: fractional anchor point within the safe area
-_WM_POSITIONS = {
-    "br": ("right", "bottom"), "bottom-right": ("right", "bottom"),
-    "bl": ("left", "bottom"),  "bottom-left": ("left", "bottom"),
-    "tr": ("right", "top"),    "top-right": ("right", "top"),
-    "tl": ("left", "top"),     "top-left": ("left", "top"),
-    "center": ("center", "center"),
-}
-
-
-def _region_edge_density(gray_img, box):
-    """Cheap 'is something important here?' heuristic — no face-detection
-    model needed (keeps this 100% free/dependency-light). Crops the region,
-    runs an edge filter, and returns mean edge intensity: faces, text, and
-    other detailed subjects have much higher edge density than open sky,
-    plain backgrounds, or empty corners."""
-    crop = gray_img.crop(box)
-    if crop.width < 2 or crop.height < 2:
-        return 0.0
-    edges = crop.filter(ImageFilter.FIND_EDGES)
-    return ImageStat.Stat(edges).mean[0]
-
-
-def _pick_watermark_geometry(base_rgba, logo_w, logo_h, margin, position_pref):
-    """Chooses the final (x, y) box for the watermark. Starts from the
-    requested position (default bottom-right) and, if that spot is unusually
-    'busy' (likely a face/text/important subject), tries nearby alternatives
-    that stay within the same corner's safe lower-right band, per spec:
-    'move the watermark slightly while keeping it in the lower-right
-    safe area.'"""
-    W, H = base_rgba.size
-    anchor_x, anchor_y = _WM_POSITIONS.get(position_pref, _WM_POSITIONS["br"])
-
-    def box_for(dx_off, dy_off):
-        if anchor_x == "right":
-            x = W - margin - logo_w - dx_off
-        elif anchor_x == "left":
-            x = margin + dx_off
-        else:
-            x = (W - logo_w) // 2
-        if anchor_y == "bottom":
-            y = H - margin - logo_h - dy_off
-        elif anchor_y == "top":
-            y = margin + dy_off
-        else:
-            y = (H - logo_h) // 2
-        x = max(0, min(W - logo_w, int(x)))
-        y = max(0, min(H - logo_h, int(y)))
-        return (x, y, x + logo_w, y + logo_h)
-
-    default_box = box_for(0, 0)
-
-    # Only bother with avoidance for corner positions (center has no "safe
-    # area" concept to shift within) and only if Pillow's edge filter is cheap
-    # enough at this size (always is — this is a small crop, not the whole image).
-    if anchor_x == "center":
-        return default_box
-
-    try:
-        gray = base_rgba.convert("L")
-        overall = ImageStat.Stat(gray.filter(ImageFilter.FIND_EDGES)).mean[0]
-        busy = _region_edge_density(gray, default_box)
-        # If this spot's edge density is notably above the image's average,
-        # something detailed (a face, text, etc.) likely sits there.
-        if busy > overall * 1.6 and busy > 8:
-            shift = int(max(logo_w, logo_h) * 0.9)
-            candidates = [box_for(shift, 0), box_for(0, shift), box_for(shift, shift)]
-            best_box, best_score = default_box, busy
-            for cand in candidates:
-                score = _region_edge_density(gray, cand)
-                if score < best_score:
-                    best_box, best_score = cand, score
-            return best_box
-    except Exception:
-        pass
-    return default_box
-
-
-def _analyze_background_theme(base_rgba, box):
-    """Returns ('light'|'dark', is_colorful) for the region the watermark
-    will sit on, so the mark's own color adapts for contrast: 'if background
-    is dark, use light logo; if background is bright, use dark logo; if
-    colorful, add a subtle outline' (outline is handled inside the dark-logo
-    variant itself, generated with a soft white edge)."""
-    crop = base_rgba.convert("RGB").crop(box)
-    stat = ImageStat.Stat(crop)
-    r, g, b = stat.mean
-    luminance = 0.299 * r + 0.587 * g + 0.114 * b
-    # Colorfulness: how far apart the channel means are (low for grayscale-ish
-    # backgrounds, high for saturated/varied ones)
-    colorfulness = (max(r, g, b) - min(r, g, b))
-    is_colorful = colorfulness > 40 or (sum(stat.stddev) / 3) > 55
-    return ("dark" if luminance < 128 else "light"), is_colorful
-
-
-def _add_shadow_and_glow(logo_rgba, want_shadow=True, want_glow=True, is_dark_bg=True):
-    """Composites a soft drop shadow and/or tiny glow behind the logo,
-    returning a new (possibly larger, padded) RGBA image with the logo
-    centered on top — 'Premium Effects: Soft Shadow, Tiny Glow'."""
-    pad = max(8, logo_rgba.width // 6)
-    canvas_w, canvas_h = logo_rgba.width + pad * 2, logo_rgba.height + pad * 2
-    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-
-    if want_glow:
-        glow_color = (255, 255, 255, 90) if is_dark_bg else (0, 0, 0, 60)
-        glow_mask = logo_rgba.split()[-1]
-        glow = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-        glow_layer = Image.new("RGBA", (canvas_w, canvas_h), glow_color)
-        mask_canvas = Image.new("L", (canvas_w, canvas_h), 0)
-        mask_canvas.paste(glow_mask, (pad, pad))
-        mask_canvas = mask_canvas.filter(ImageFilter.GaussianBlur(pad / 2.2))
-        glow.paste(glow_layer, (0, 0), mask_canvas)
-        canvas = Image.alpha_composite(canvas, glow)
-
-    if want_shadow:
-        shadow_mask = logo_rgba.split()[-1]
-        shadow = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-        shadow_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 130))
-        mask_canvas = Image.new("L", (canvas_w, canvas_h), 0)
-        offset = max(2, logo_rgba.width // 40)
-        mask_canvas.paste(shadow_mask, (pad + offset, pad + offset))
-        mask_canvas = mask_canvas.filter(ImageFilter.GaussianBlur(pad / 4))
-        shadow.paste(shadow_layer, (0, 0), mask_canvas)
-        canvas = Image.alpha_composite(canvas, shadow)
-
-    canvas.alpha_composite(logo_rgba, (pad, pad))
-    return canvas, pad
-
-
-def apply_watermark_to_frame(base_rgba, opts):
-    """Applies the watermark to a single RGBA frame and returns the result.
-    `opts` keys (all optional, sane defaults applied):
-      enabled (bool, default True), opacity (0-100, default 88),
-      size_pct (float, default 3.2 — 2-5% of image width recommended),
-      position (br/bl/tr/tl/center, default 'br'), margin (px, default auto),
-      shadow (bool, default True), glow (bool, default True),
-      theme ('auto'|'light'|'dark', default 'auto')."""
-    if not opts.get("enabled", True):
-        return base_rgba
-
-    W, H = base_rgba.size
-    size_pct = max(2.0, min(5.0, float(opts.get("size_pct", 3.2))))
-    logo_w = max(20, int(W * size_pct / 100.0))
-    margin = opts.get("margin")
-    margin = int(margin) if margin else max(24, int(W * 0.02))
-    position_pref = opts.get("position", "br")
-
-    # Provisional box (before we know the exact logo size with shadow padding)
-    # just to sample background theme/contrast at roughly the right spot.
-    probe_box = _pick_watermark_geometry(base_rgba, logo_w, logo_w, margin, position_pref)
-    theme_pref = opts.get("theme", "auto")
-    if theme_pref == "auto":
-        bg_theme, is_colorful = _analyze_background_theme(base_rgba, probe_box)
-    else:
-        bg_theme, is_colorful = theme_pref, False
-
-    use_light_logo = (bg_theme == "dark")
-    logo = _load_watermark_logo(light=use_light_logo)
-    logo_h = int(logo.height * (logo_w / logo.width))
-    logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
-
-    logo_with_fx, pad = _add_shadow_and_glow(
-        logo, want_shadow=opts.get("shadow", True), want_glow=opts.get("glow", True),
-        is_dark_bg=use_light_logo,
-    )
-
-    opacity = max(10, min(100, int(opts.get("opacity", 88)))) / 100.0
-    if opacity < 1.0:
-        alpha = logo_with_fx.split()[-1].point(lambda a: int(a * opacity))
-        logo_with_fx.putalpha(alpha)
-
-    final_box = _pick_watermark_geometry(base_rgba, logo_with_fx.width, logo_with_fx.height, max(0, margin - pad), position_pref)
-    x, y, _, _ = final_box
-
-    result = base_rgba.copy()
-    result.alpha_composite(logo_with_fx, (x, y))
-    return result
-
-
-def apply_watermark(image_bytes, opts):
-    """Top-level entry point: watermarks `image_bytes` (any format Pillow can
-    read) and returns new bytes in the same format, preserving animation
-    (GIF/animated WebP get every frame watermarked, durations/loop kept).
-    If watermarking is disabled or Pillow is unavailable, returns the
-    original bytes completely untouched (no re-encoding, no quality loss)."""
-    if not _WATERMARK_AVAILABLE or not (opts or {}).get("enabled", True):
-        return image_bytes
-    try:
-        import io as _io
-        src = Image.open(_io.BytesIO(image_bytes))
-        fmt = (src.format or "PNG").upper()
-
-        is_animated = getattr(src, "is_animated", False) and src.n_frames > 1
-        if is_animated and fmt in ("GIF", "WEBP"):
-            frames = []
-            durations = []
-            for frame in ImageSequence.Iterator(src):
-                rgba = frame.convert("RGBA")
-                watermarked = apply_watermark_to_frame(rgba, opts)
-                frames.append(watermarked)
-                durations.append(frame.info.get("duration", 80))
-            out = _io.BytesIO()
-            save_kwargs = {"save_all": True, "append_images": frames[1:], "duration": durations,
-                           "loop": src.info.get("loop", 0), "disposal": 2}
-            if fmt == "GIF":
-                frames[0].save(out, format="GIF", **save_kwargs)
-            else:
-                frames[0].save(out, format="WEBP", **save_kwargs)
-            return out.getvalue()
-
-        rgba = src.convert("RGBA")
-        watermarked = apply_watermark_to_frame(rgba, opts)
-        out = _io.BytesIO()
-        if fmt in ("JPEG", "JPG"):
-            watermarked.convert("RGB").save(out, format="JPEG", quality=95, optimize=True)
-        elif fmt == "WEBP":
-            watermarked.save(out, format="WEBP", quality=95, lossless=False)
-        else:
-            watermarked.save(out, format="PNG", optimize=True)
-        return out.getvalue()
-    except Exception as e:
-        print(f"[Watermark] failed to apply, returning original image unmodified: {e}")
-        return image_bytes
-
-
-def _finalize_generated_image(raw_bytes, watermark_opts):
-    """Applies the automatic watermark (unless the caller explicitly disabled
-    it) and returns a base64 string ready to send to the frontend. This is
-    the single choke point every image-generation branch routes through, so
-    the watermark can never be 'forgotten' for any provider."""
-    opts = dict(watermark_opts or {})
-    opts.setdefault("enabled", True)
-    watermarked_bytes = apply_watermark(raw_bytes, opts)
-    return base64.b64encode(watermarked_bytes).decode("utf-8")
-
-
-# ── Admin endpoints: upload / replace / reset / preview the official logo ────
-
-@app.route("/api/admin/watermark/upload", methods=["POST"])
-def admin_watermark_upload():
-    if not _require_admin():
-        return jsonify({"error": "unauthorized"}), 401
-    if not _WATERMARK_AVAILABLE:
-        return jsonify({"error": "Pillow is not installed on the server — run `pip install Pillow`"}), 503
-    data = request.get_json(force=True) or {}
-    saved = []
-    for key, path in (("logo_light_base64", _WATERMARK_LOGO_LIGHT_PATH),
-                       ("logo_dark_base64", _WATERMARK_LOGO_DARK_PATH)):
-        b64 = data.get(key)
-        if not b64:
-            continue
-        try:
-            raw = base64.b64decode(b64, validate=True)
-        except Exception:
-            return jsonify({"error": f"{key} is not valid base64"}), 400
-
-        # SVG support: rasterize at high resolution if cairosvg is available;
-        # otherwise politely decline with a clear message (no broken output).
-        is_svg = raw.lstrip().startswith(b"<?xml") or raw.lstrip().startswith(b"<svg") or b"<svg" in raw[:200]
-        if is_svg:
-            try:
-                import cairosvg
-                raw = cairosvg.svg2png(bytestring=raw, output_width=1024, output_height=1024)
-            except ImportError:
-                return jsonify({
-                    "error": "SVG upload requires `pip install cairosvg` on the server. "
-                             "Please upload a transparent PNG or WebP instead, or install "
-                             "cairosvg (free/open-source) to enable SVG."
-                }), 503
-            except Exception as e:
-                return jsonify({"error": f"Could not rasterize SVG: {e}"}), 400
-
-        try:
-            img = Image.open(_io_BytesIO(raw)).convert("RGBA")
-        except Exception as e:
-            return jsonify({"error": f"Could not read image for {key}: {e}"}), 400
-        img.save(path, format="PNG")
-        saved.append(key)
-
-    if not saved:
-        return jsonify({"error": "no logo_light_base64 or logo_dark_base64 provided"}), 400
-    global _default_logo_cache
-    _default_logo_cache = {}
-    return jsonify({"status": "saved", "updated": saved})
-
-
-@app.route("/api/admin/watermark/reset", methods=["POST"])
-def admin_watermark_reset():
-    if not _require_admin():
-        return jsonify({"error": "unauthorized"}), 401
-    for path in (_WATERMARK_LOGO_LIGHT_PATH, _WATERMARK_LOGO_DARK_PATH):
-        if _os.path.exists(path):
-            _os.remove(path)
-    global _default_logo_cache
-    _default_logo_cache = {}
-    return jsonify({"status": "reset to default logo"})
-
-
-@app.route("/api/admin/watermark/preview", methods=["GET"])
-def admin_watermark_preview():
-    if not _require_admin():
-        return jsonify({"error": "unauthorized"}), 401
-    if not _WATERMARK_AVAILABLE:
-        return jsonify({"error": "Pillow is not installed on the server"}), 503
-    import io as _io
-    size = 640
-    # Half-light / half-dark / a saturated patch, so both logo variants and
-    # the "colorful outline" behavior are all visible in one preview image.
-    preview = Image.new("RGB", (size, size), (235, 235, 235))
-    draw = ImageDraw.Draw(preview)
-    draw.rectangle([0, 0, size, size // 2], fill=(30, 30, 34))
-    draw.rectangle([0, size // 2, size // 2, size], fill=(230, 60, 90))
-    opts = {
-        "enabled": True, "opacity": int(request.args.get("opacity", 88)),
-        "size_pct": float(request.args.get("size_pct", 3.2)),
-        "position": request.args.get("position", "br"),
-        "shadow": request.args.get("shadow", "1") != "0",
-        "glow": request.args.get("glow", "1") != "0",
-        "theme": request.args.get("theme", "auto"),
-    }
-    watermarked = apply_watermark_to_frame(preview.convert("RGBA"), opts)
-    out = _io.BytesIO()
-    watermarked.convert("RGB").save(out, format="PNG")
-    return Response(out.getvalue(), mimetype="image/png")
-
-
-@app.route("/api/watermark/info", methods=["GET"])
-def watermark_info():
-    """Lets the frontend know whether watermarking is active and whether a
-    custom logo is installed — purely informational, no secrets required."""
-    return jsonify({
-        "available": _WATERMARK_AVAILABLE,
-        "custom_logo_light": _os.path.exists(_WATERMARK_LOGO_LIGHT_PATH),
-        "custom_logo_dark": _os.path.exists(_WATERMARK_LOGO_DARK_PATH),
-    })
-
-
-def _io_BytesIO(b):
-    import io as _io
-    return _io.BytesIO(b)
-
-
 @app.route("/api/generate-image", methods=["POST"])
 @login_required
 def generate_image():
@@ -5056,12 +5257,6 @@ def generate_image():
         image_b64 = data.get("imageBase64")
         mime_type = data.get("mimeType", "image/jpeg")
         style = data.get("style", "").strip()
-        # Per-request watermark settings (from Settings → Image Watermark in
-        # the frontend, or sane defaults if not sent). See "AUTOMATIC
-        # WATERMARK SYSTEM" section above — every branch below routes its
-        # result through _finalize_generated_image() so the mark can never
-        # be skipped for any current or future image provider.
-        watermark_opts = data.get("watermark") or {}
         if not prompt:
             return jsonify({"error": "prompt required"}), 400
 
@@ -5136,7 +5331,7 @@ def generate_image():
                     if not err:
                         img_resp = requests.get(result_url, timeout=30)
                         img_resp.raise_for_status()
-                        return jsonify({"image": _finalize_generated_image(img_resp.content, watermark_opts)})
+                        return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
             except Exception:
                 pass
 
@@ -5149,7 +5344,7 @@ def generate_image():
                     timeout=90,
                 )
                 if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
-                    return jsonify({"image": _finalize_generated_image(resp.content, watermark_opts)})
+                    return jsonify({"image": base64.b64encode(resp.content).decode("utf-8")})
             except Exception:
                 pass
 
@@ -5164,7 +5359,7 @@ def generate_image():
         )
         img_resp = requests.get(poll_url, timeout=120)
         if img_resp.status_code == 200 and img_resp.headers.get("content-type", "").startswith("image/"):
-            return jsonify({"image": _finalize_generated_image(img_resp.content, watermark_opts)})
+            return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
         return jsonify({"error": f"Image generation failed (status {img_resp.status_code}). Please try again."}), 502
 
     except Exception as e:
@@ -5174,7 +5369,8 @@ def generate_image():
 _reengagement_thread_started = False
 
 def _start_reengagement_thread_once():
-    """Starts the hourly notification background thread exactly once."""
+    """Starts the hourly notification background thread exactly once.
+    Render/always-on only — never starts on Vercel (use the cron route)."""
     global _reengagement_thread_started
     if _reengagement_thread_started or IS_SERVERLESS:
         return
@@ -5197,6 +5393,8 @@ if __name__ == "__main__":
     print(f"Starting Mythic AI at http://localhost:5000")
     print(f"Providers (Groq primary, Cerebras fallback): {providers_str}")
     print(f"Image generation: {image_provider}")
+    print(f"Re-engagement notifications: Render/always-on -> hourly background "
+          f"thread. Vercel -> daily at 12:00 via /api/cron/reengagement (external cron).")
     if IS_SERVERLESS:
         print("NOTE: detected a serverless environment (Vercel) — see the "
               "IS_SERVERLESS comment near the top of this file for the "
