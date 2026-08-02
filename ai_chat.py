@@ -514,8 +514,10 @@ def list_conversations(username):
             rows = r.json()
             rows.sort(key=lambda c: (not c.get("pinned", False), -(c.get("updated_at") or 0)))
             return rows
-    except Exception:
-        pass
+        else:
+            print(f"[Supabase] list_conversations failed: HTTP {r.status_code} — {r.text[:300]}")
+    except Exception as e:
+        print(f"[Supabase] list_conversations exception: {e}")
     return []
 
 
@@ -536,8 +538,10 @@ def load_conversation(username, conv_id):
                     "updated_at": row["updated_at"],
                     "messages": row["messages"] if isinstance(row["messages"], list) else json.loads(row["messages"]),
                 }
-    except Exception:
-        pass
+        else:
+            print(f"[Supabase] load_conversation failed: HTTP {r.status_code} — {r.text[:300]}")
+    except Exception as e:
+        print(f"[Supabase] load_conversation exception: {e}")
     return None
 
 
@@ -548,7 +552,7 @@ def save_conversation(username, conv_id, data):
         return
     try:
         headers = {**sb_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"}
-        requests.post(
+        r = requests.post(
             sb("conversations"),
             headers=headers,
             json={
@@ -563,8 +567,10 @@ def save_conversation(username, conv_id, data):
             },
             timeout=15,
         )
-    except Exception:
-        pass
+        if r.status_code not in (200, 201, 204):
+            print(f"[Supabase] save_conversation failed: HTTP {r.status_code} — {r.text[:500]}")
+    except Exception as e:
+        print(f"[Supabase] save_conversation exception: {e}")
 
 
 def delete_conversation(username, conv_id):
@@ -5718,12 +5724,34 @@ def cron_reengagement():
 # ── /api/health: quick diagnostic so admins can see what's configured ────────
 @app.route("/api/health", methods=["GET"])
 def api_health():
+    supabase_status = {"configured": bool(SUPABASE_URL and SUPABASE_KEY)}
+    if supabase_status["configured"]:
+        try:
+            r = requests.get(sb("conversations?limit=1"), headers=sb_headers(), timeout=8)
+            supabase_status["reachable"] = r.status_code == 200
+            supabase_status["status_code"] = r.status_code
+            if r.status_code != 200:
+                supabase_status["error"] = r.text[:300]
+        except Exception as e:
+            supabase_status["reachable"] = False
+            supabase_status["error"] = str(e)
     return jsonify({
         "app": "Mythic AI",
         "serverless": IS_SERVERLESS,
         "providers": {
             "groq":     {"configured": bool(GROQ_API_KEY),     "model": GROQ_MODEL},
             "cerebras": {"configured": bool(CEREBRAS_API_KEY), "model": CEREBRAS_MODEL},
+        },
+        "storage": {
+            "supabase": supabase_status,
+            "using": "supabase" if supabase_status["configured"] else "local_json_files",
+            "note": ("If 'configured' is true but 'reachable' is false or status_code isn't 200, "
+                     "check that the 'conversations' table exists with the right columns, and that "
+                     "SUPABASE_KEY is your service-role/secret key with insert/select access — see "
+                     "the 'error' field above for the exact Supabase response.") if supabase_status["configured"] else
+                    ("No SUPABASE_URL set — conversations are saved to local disk on the server. "
+                     "On Render this works fine while the instance stays up, but is wiped on redeploy "
+                     "and isn't shared across instances."),
         },
         "image_generation": {
             "nano_banana":  bool(NANO_BANANA_API_KEY),
