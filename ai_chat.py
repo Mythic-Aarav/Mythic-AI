@@ -4757,99 +4757,6 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// ─── PIN lock (client-side; hashed PIN kept in localStorage) ───────────────
-async function _sha256Hex(text) {
-  const enc = new TextEncoder().encode(text);
-  const digest = await crypto.subtle.digest('SHA-256', enc);
-  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-function showPinSetupModal() {
-  const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:700;display:flex;align-items:center;justify-content:center;';
-  overlay.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:22px;width:90%;max-width:320px;text-align:center;">
-    <div style="font-size:30px;margin-bottom:8px;">🔒</div>
-    <div style="font-weight:700;font-size:15px;margin-bottom:12px;">Set a 4-digit PIN</div>
-    <input id="pin-setup-input" type="password" inputmode="numeric" maxlength="4" placeholder="••••"
-      style="width:100%;box-sizing:border-box;text-align:center;letter-spacing:8px;font-size:22px;padding:10px;border-radius:8px;border:1.5px solid var(--border);background:var(--bg);color:var(--text);outline:none;margin-bottom:12px;">
-    <div style="display:flex;gap:8px;">
-      <button id="pin-setup-save" style="flex:1;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px;cursor:pointer;font-family:inherit;">Save</button>
-      <button id="pin-setup-cancel" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:10px;cursor:pointer;font-family:inherit;">Cancel</button>
-    </div>
-  </div>`;
-  document.body.appendChild(overlay);
-  const pinInput = overlay.querySelector('#pin-setup-input');
-  pinInput.focus();
-  overlay.querySelector('#pin-setup-cancel').addEventListener('click', () => overlay.remove());
-  overlay.querySelector('#pin-setup-save').addEventListener('click', async () => {
-    const v = pinInput.value.trim();
-    if (!/^\d{4}$/.test(v)) { pinInput.style.borderColor = '#ef4444'; return; }
-    const hash = await _sha256Hex(v);
-    localStorage.setItem('mythic_pin_hash', hash);
-    overlay.remove();
-  });
-}
-
-function showPinLockScreen() {
-  const overlay = document.createElement('div');
-  overlay.id = 'pin-lock-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:var(--bg);z-index:9000;display:flex;flex-direction:column;align-items:center;justify-content:center;';
-  overlay.innerHTML = `<div style="text-align:center;">
-    <div style="font-size:40px;margin-bottom:10px;">🔒</div>
-    <div style="font-weight:700;font-size:16px;color:var(--accent);margin-bottom:16px;">Mythic AI Locked</div>
-    <input id="pin-unlock-input" type="password" inputmode="numeric" maxlength="4" placeholder="••••"
-      style="width:180px;box-sizing:border-box;text-align:center;letter-spacing:8px;font-size:24px;padding:10px;border-radius:8px;border:1.5px solid var(--border);background:var(--panel);color:var(--text);outline:none;">
-    <div id="pin-unlock-err" style="color:#ef4444;font-size:12px;margin-top:8px;display:none;">Wrong PIN</div>
-  </div>`;
-  document.body.appendChild(overlay);
-  const pinInput = overlay.querySelector('#pin-unlock-input');
-  const errEl = overlay.querySelector('#pin-unlock-err');
-  pinInput.focus();
-  pinInput.addEventListener('input', async () => {
-    if (pinInput.value.length !== 4) return;
-    const hash = await _sha256Hex(pinInput.value);
-    if (hash === localStorage.getItem('mythic_pin_hash')) {
-      overlay.remove();
-    } else {
-      errEl.style.display = 'block';
-      pinInput.value = '';
-    }
-  });
-}
-
-if (localStorage.getItem('mythic_pin_hash')) {
-  showPinLockScreen();
-}
-
-// Wire up PIN lock enable/disable from Settings (adds a row dynamically so
-// it doesn't require restructuring the existing settings modal markup).
-(function addPinLockSettingsRow() {
-  const settingsModal = document.getElementById('settings-modal');
-  const closeBtn = document.getElementById('settings-close-btn');
-  if (!settingsModal || !closeBtn) return;
-  const section = document.createElement('div');
-  section.className = 'settings-section';
-  section.style.cssText = 'border-top:1px solid var(--border);padding-top:14px;margin-top:4px;';
-  section.innerHTML = `<label style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;">
-    <span>🔒 PIN Lock</span>
-    <button id="pin-lock-toggle-btn" type="button"
-      style="background:none;border:1.5px solid var(--border);color:var(--muted);border-radius:20px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:inherit;">
-      ${localStorage.getItem('mythic_pin_hash') ? 'Disable' : 'Enable'}
-    </button>
-  </label>
-  <div class="hint">Locks the app behind a 4-digit PIN on this device. Stored only as a hash in your browser.</div>`;
-  closeBtn.parentNode.insertBefore(section, closeBtn);
-  section.querySelector('#pin-lock-toggle-btn').addEventListener('click', (e) => {
-    if (localStorage.getItem('mythic_pin_hash')) {
-      localStorage.removeItem('mythic_pin_hash');
-      e.target.textContent = 'Enable';
-    } else {
-      showPinSetupModal();
-      setTimeout(() => { e.target.textContent = localStorage.getItem('mythic_pin_hash') ? 'Disable' : 'Enable'; }, 500);
-    }
-  });
-})();
-
 // ─── Auto-generate a smart AI title after the first exchange in a new chat ──
 const _origStreamReply = streamReply;
 streamReply = async function(opts) {
@@ -5735,6 +5642,38 @@ def api_health():
         except Exception as e:
             supabase_status["reachable"] = False
             supabase_status["error"] = str(e)
+
+        # A GET succeeding only proves the API key + table exist for reads.
+        # The actual bug people hit is on INSERT (missing column, wrong
+        # type, RLS blocking writes) — so actually try writing and deleting
+        # a throwaway row and report the exact PostgREST error if it fails.
+        if supabase_status.get("reachable"):
+            test_id = "healthcheck-" + uuid.uuid4().hex[:8]
+            try:
+                w = requests.post(
+                    sb("conversations"),
+                    headers={**sb_headers(), "Prefer": "return=minimal"},
+                    json={
+                        "id": test_id, "username": "healthcheck", "title": "healthcheck",
+                        "updated_at": time.time(), "messages": [],
+                        "folder": None, "pinned": False, "archived": False,
+                    },
+                    timeout=10,
+                )
+                supabase_status["write_test"] = {
+                    "status_code": w.status_code,
+                    "success": w.status_code in (200, 201, 204),
+                }
+                if w.status_code not in (200, 201, 204):
+                    supabase_status["write_test"]["error"] = w.text[:500]
+                else:
+                    requests.delete(
+                        sb(f"conversations?id=eq.{test_id}"),
+                        headers=sb_headers(), timeout=10,
+                    )
+            except Exception as e:
+                supabase_status["write_test"] = {"success": False, "error": str(e)}
+
     return jsonify({
         "app": "Mythic AI",
         "serverless": IS_SERVERLESS,
