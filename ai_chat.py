@@ -20,6 +20,16 @@ Optional — NanoBanana (nanobananaapi.ai) powers real image-to-image editing fo
 "Ghibli Me"; without it, image generation falls back to HuggingFace FLUX
 (text-to-image only). Weather uses Open-Meteo, which needs no API key at all.
 
+Optional — "Paste URL" book/document support:
+    pip install beautifulsoup4          (readable text extraction from ordinary webpages)
+    pip install playwright pytesseract  (OCR reading of flipbook-style viewers, e.g.
+                                          FlippingBook/Issuu/Yumpu/mmdigital-style sites)
+    playwright install --with-deps chromium
+    Also install the tesseract-ocr system package (e.g. `apt-get install tesseract-ocr`
+    in your Render build). Without these, direct PDF/DOCX/TXT links and ordinary
+    webpages still work fine — only flipbook OCR is disabled, with a clear message
+    telling the user what's missing.
+
 Supabase (optional — for accounts/conversation storage across restarts & devices):
     Set these as environment variables (never hardcode secrets in this file):
          SUPABASE_URL   e.g. https://xxxxx.supabase.co
@@ -64,6 +74,33 @@ try:
     _WATERMARK_AVAILABLE = True
 except ImportError:
     _WATERMARK_AVAILABLE = False
+# bs4 — used to pull clean readable text out of ordinary webpages (the
+# "Paste URL" box, when the link isn't a direct PDF/DOCX/TXT download).
+try:
+    from bs4 import BeautifulSoup
+    _BS4_AVAILABLE = True
+except ImportError:
+    _BS4_AVAILABLE = False
+# playwright + pytesseract — power OCR extraction for "flipbook" style book
+# viewers (FlippingBook, Issuu, Yumpu, Calameo, AnyFlip, and similar), which
+# render pages as images/canvas rather than sending any real text. Both are
+# optional: if either is missing, flipbook OCR is silently disabled and the
+# app falls back to a clear "can't read this" message instead of crashing.
+# Install with:
+#   pip install playwright pytesseract
+#   playwright install --with-deps chromium
+#   apt-get install -y tesseract-ocr   (or the equivalent on your host/Render build)
+try:
+    from playwright.sync_api import sync_playwright
+    _PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    _PLAYWRIGHT_AVAILABLE = False
+try:
+    import pytesseract
+    _OCR_AVAILABLE = True
+except ImportError:
+    _OCR_AVAILABLE = False
+_FLIPBOOK_OCR_AVAILABLE = _PLAYWRIGHT_AVAILABLE and _OCR_AVAILABLE and _WATERMARK_AVAILABLE  # needs PIL too
 from flask import (
     Flask, request, jsonify, Response, session,
     stream_with_context
@@ -5985,18 +6022,169 @@ def _aqi_label(us_aqi):
     return f"{us_aqi} (Hazardous)"
 
 
+# ── "Paste URL" helpers: ordinary webpages + flipbook viewers ────────────────
+
+# Known flipbook/page-turn viewer platforms — if the URL's host matches one
+# of these, it's almost certainly a JS canvas/image viewer with no real text
+# in the page source, so we go straight to the embedded-PDF search / OCR path
+# instead of trying (and failing) to scrape "readable text" from the shell.
+_FLIPBOOK_DOMAINS = (
+    "flippingbook.com", "issuu.com", "yumpu.com", "calameo.com",
+    "anyflip.com", "joomag.com", "publitas.com", "heyzine.com",
+    "flipsnack.com", "fliphtml5.com", "mmdigital.co.in",
+)
+# Telltale strings that show up in a flipbook viewer's HTML/JS even on
+# self-hosted / white-labelled platforms we don't know by domain.
+_FLIPBOOK_HTML_SIGNATURES = (
+    "flipbook", "flip-book", "df-page", "page-flip", "pageflip",
+    "turn.js", "df-parent", "flippingbook",
+)
+
+
+def _looks_like_flipbook(url: str, html: str) -> bool:
+    host = urllib.parse.urlparse(url).netloc.lower()
+    if any(d in host for d in _FLIPBOOK_DOMAINS):
+        return True
+    sample = (html or "")[:20000].lower()
+    return any(sig in sample for sig in _FLIPBOOK_HTML_SIGNATURES)
+
+
+def _find_embedded_document_link(html: str, base_url: str):
+    """Many flipbook widgets (and some webpages) are generated from an
+    uploaded PDF/DOCX that's still linked somewhere in the HTML or JS config
+    — e.g. a hidden 'download original' link, or a `"pdfUrl": "...pdf"` entry
+    in an embedded script. Grabbing that directly is far more reliable than
+    OCR, so we check for it first. Returns an absolute URL or None."""
+    if not html:
+        return None
+    candidates = []
+    # href="....pdf" / .docx / .txt (typical <a> download links)
+    for m in re.finditer(r'''href=["']([^"']+\.(?:pdf|docx|txt))(?:[?"'][^"']*)?["']''', html, re.IGNORECASE):
+        candidates.append(m.group(1))
+    # "file": "....pdf" / "pdfUrl": "....pdf" style JS config values
+    for m in re.finditer(r'''["'](?:pdf|pdfUrl|file|source|bookFile|fileUrl)["']\s*:\s*["']([^"']+\.(?:pdf|docx|txt))["']''', html, re.IGNORECASE):
+        candidates.append(m.group(1))
+    for c in candidates:
+        absolute = urllib.parse.urljoin(base_url, c)
+        if absolute.lower().split("?")[0].endswith((".pdf", ".docx", ".txt")):
+            return absolute
+    return None
+
+
+def _extract_readable_webpage_text(html: str) -> str:
+    """Pulls readable body text out of an ordinary webpage, stripping nav,
+    scripts, styles, and other chrome. Uses BeautifulSoup when available;
+    falls back to a crude regex tag-strip so this still degrades gracefully
+    if bs4 isn't installed."""
+    if _BS4_AVAILABLE:
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style", "nav", "header", "footer", "noscript", "svg", "form"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n")
+    else:
+        text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+    lines = [ln.strip() for ln in text.splitlines()]
+    lines = [ln for ln in lines if ln]
+    return "\n".join(lines)
+
+
+def _webpage_title(html: str, fallback: str) -> str:
+    m = re.search(r"(?is)<title[^>]*>(.*?)</title>", html or "")
+    if m:
+        title = re.sub(r"\s+", " ", m.group(1)).strip()
+        if title:
+            return title
+    return fallback
+
+
+def _extract_flipbook_via_ocr(url: str, max_pages: int = 40):
+    """Best-effort flipbook reader: opens the page in a headless browser,
+    clicks through it page by page, screenshots the viewer, and OCRs each
+    screenshot. This is inherently fragile — every flipbook platform uses a
+    different DOM/selector for its "next page" control — so it tries a list
+    of common selectors and stops early if none of them seem to advance the
+    book. Returns (text, note) or (None, error_message).
+
+    Requires: playwright (+ `playwright install chromium`), pytesseract,
+    and the tesseract-ocr binary installed on the host. See the import block
+    near the top of this file for install instructions."""
+    if not _FLIPBOOK_OCR_AVAILABLE:
+        missing = []
+        if not _PLAYWRIGHT_AVAILABLE:
+            missing.append("playwright (`pip install playwright` + `playwright install chromium`)")
+        if not _OCR_AVAILABLE:
+            missing.append("pytesseract (`pip install pytesseract`) + the tesseract-ocr system package")
+        if not _WATERMARK_AVAILABLE:
+            missing.append("Pillow (`pip install Pillow`)")
+        return None, ("This looks like a flipbook viewer. Reading it requires OCR support that "
+                       "isn't installed on this server yet. Missing: " + "; ".join(missing) + ".")
+
+    # Common "next page" selectors across popular flipbook platforms —
+    # tried in order; the first one that's clickable AND changes the page
+    # content wins. Add more as you encounter new platforms.
+    NEXT_SELECTORS = [
+        ".df-next-page", ".flipbook-next", ".next-page", "[aria-label='Next page']",
+        "[aria-label='next']", ".turn-page-next", "button.next", ".df-arrow-right",
+    ]
+    texts = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page(viewport={"width": 1400, "height": 1000})
+            page.goto(url, timeout=30000, wait_until="networkidle")
+            page.wait_for_timeout(2000)  # let the viewer finish initial render
+
+            next_selector = None
+            for sel in NEXT_SELECTORS:
+                if page.locator(sel).count() > 0:
+                    next_selector = sel
+                    break
+
+            seen_hashes = set()
+            for i in range(max_pages):
+                shot = page.screenshot()
+                img_hash = hashlib.md5(shot).hexdigest()
+                if img_hash in seen_hashes:
+                    break  # page didn't change — we've reached the end or got stuck
+                seen_hashes.add(img_hash)
+                try:
+                    from io import BytesIO
+                    page_text = pytesseract.image_to_string(Image.open(BytesIO(shot)))
+                except Exception:
+                    page_text = ""
+                if page_text.strip():
+                    texts.append(page_text.strip())
+                if not next_selector:
+                    break  # can't advance — only OCR the first visible page/spread
+                try:
+                    page.click(next_selector, timeout=3000)
+                    page.wait_for_timeout(900)
+                except Exception:
+                    break
+            browser.close()
+    except Exception as e:
+        return None, f"Flipbook OCR failed: {e}"
+
+    full_text = "\n\n".join(texts).strip()
+    if not full_text:
+        return None, ("Couldn't read any text from this flipbook — OCR ran but found nothing "
+                       "recognizable. The page images may be too low-resolution or stylized to OCR.")
+    note = f"Read via OCR from a flipbook viewer ({len(texts)} page(s) scanned — may be incomplete)."
+    return full_text, note
+
+
 @app.route("/api/fetch-url-document", methods=["POST"])
 @login_required
 def api_fetch_url_document():
-    """Downloads a document from a URL (PDF/DOCX/TXT) and extracts its text,
-    for the Study Book feature's 'paste a URL instead of uploading' option.
-    Reuses extract_text_from_attachment so PDF/DOCX handling stays identical
-    to file uploads. Caps download size to DOCUMENT_UPLOAD_BYTES and aborts
-    early via streaming rather than reading an arbitrarily large body first."""
-    NOT_A_BOOK_MSG = ("That doesn't look like a book/document link. Please paste a direct link "
-                       "to a PDF, DOCX, or TXT file (e.g. one that ends in .pdf, .docx, or .txt) "
-                       "— not a website or app URL.")
-
+    """Pulls readable text from whatever kind of 'book URL' the user pastes:
+      1. A direct PDF/DOCX/TXT download link       -> parsed like a file upload
+      2. An ordinary webpage (article, story, etc.) -> readable text scraped from the HTML
+      3. A flipbook-style viewer (FlippingBook, Issuu, Yumpu, mmdigital, ...)
+           a. first tries to find an embedded/original PDF link on the page
+           b. falls back to headless-browser + OCR page-by-page (if configured)
+    Caps document downloads to DOCUMENT_UPLOAD_BYTES, streaming so we abort
+    early instead of reading an arbitrarily large body first."""
     DOC_EXTENSIONS = (".pdf", ".docx", ".doc", ".txt")
     DOC_CONTENT_TYPES = (
         "application/pdf",
@@ -6010,40 +6198,83 @@ def api_fetch_url_document():
     if not url or not (url.startswith("http://") or url.startswith("https://")):
         return jsonify({"error": "Please enter a valid http:// or https:// URL"}), 400
 
-    # Quick upfront check: if the URL's path doesn't end in a known document
-    # extension, don't even bother hitting the network (this also avoids
-    # long/hanging requests to general websites or apps, e.g. Render homepages
-    # that can be slow to wake up and would otherwise time out).
-    path = urllib.parse.urlparse(url).path.lower()
-    if not path.endswith(DOC_EXTENSIONS):
-        return jsonify({"error": NOT_A_BOOK_MSG}), 400
-
-    try:
-        resp = requests.get(url, timeout=20, stream=True, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        content_type = resp.headers.get("Content-Type", "").split(";")[0].strip()
+    def _download_and_extract_doc(doc_url, timeout=20):
+        """Shared path for downloading + parsing a direct PDF/DOCX/TXT link."""
+        r = requests.get(doc_url, timeout=timeout, stream=True, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        ct = r.headers.get("Content-Type", "").split(";")[0].strip()
         raw = bytearray()
-        for chunk in resp.iter_content(chunk_size=65536):
+        for chunk in r.iter_content(chunk_size=65536):
             raw.extend(chunk)
             if len(raw) > DOCUMENT_UPLOAD_BYTES:
                 limit_mb = DOCUMENT_UPLOAD_BYTES // (1024 * 1024)
-                return jsonify({"error": f"That file is larger than {limit_mb}MB — please download it and upload it directly instead."}), 400
+                raise ValueError(f"That file is larger than {limit_mb}MB — please download it and upload it directly instead.")
+        fname = (doc_url.split("/")[-1].split("?")[0] or "document").strip() or "document"
+        txt, note = extract_text_from_attachment(fname, ct, bytes(raw))
+        return txt, note, fname, ct
+
+    path = urllib.parse.urlparse(url).path.lower()
+
+    # ── Case 1: direct document link ─────────────────────────────────────
+    if path.endswith(DOC_EXTENSIONS):
+        try:
+            text, note, filename, content_type = _download_and_extract_doc(url)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except requests.RequestException:
+            return jsonify({"error": "Could not reach that link — please double-check it's a direct, "
+                                      "publicly accessible file link and try again."}), 502
+        if content_type and content_type not in DOC_CONTENT_TYPES:
+            return jsonify({"error": "That link didn't actually return a PDF/DOCX/TXT file "
+                                      "(the server sent something else back)."}), 400
+        if text is None:
+            return jsonify({"error": "Couldn't read that as a PDF, DOCX, or TXT file."}), 400
+        if not text.strip():
+            return jsonify({"error": note or "No readable text was found in that document."}), 400
+        return jsonify({"text": text, "note": note, "filename": filename})
+
+    # ── Fetch the page as HTML so we can figure out what we're looking at ──
+    try:
+        resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
     except requests.RequestException:
-        return jsonify({"error": "Could not reach that link — please double-check it's a direct, "
-                                  "publicly accessible link to a PDF, DOCX, or TXT file and try again."}), 502
+        return jsonify({"error": "Could not reach that link — please double-check the URL and try again."}), 502
 
-    # Even with a document-looking extension, the server might have actually
-    # served back an HTML error/landing page instead — catch that too.
-    if content_type and content_type not in DOC_CONTENT_TYPES:
-        return jsonify({"error": NOT_A_BOOK_MSG}), 400
+    content_type = resp.headers.get("Content-Type", "").split(";")[0].strip()
 
-    filename = (url.split("/")[-1].split("?")[0] or "document").strip() or "document"
-    text, note = extract_text_from_attachment(filename, content_type, bytes(raw))
-    if text is None:
-        return jsonify({"error": NOT_A_BOOK_MSG}), 400
+    # A no-extension URL might still redirect straight to a real document.
+    if content_type in DOC_CONTENT_TYPES:
+        fname = (url.split("/")[-1].split("?")[0] or "document").strip() or "document"
+        text, note = extract_text_from_attachment(fname, content_type, resp.content)
+        if text and text.strip():
+            return jsonify({"text": text, "note": note, "filename": fname})
+
+    html = resp.text
+
+    # ── Case 2/3: figure out if this is a flipbook, and try the embedded-PDF shortcut either way ──
+    embedded_doc_url = _find_embedded_document_link(html, url)
+    if embedded_doc_url:
+        try:
+            text, note, filename, doc_ct = _download_and_extract_doc(embedded_doc_url)
+            if text and text.strip() and (not doc_ct or doc_ct in DOC_CONTENT_TYPES):
+                note = (note + " " if note else "") + "(Found the original document embedded in that page.)"
+                return jsonify({"text": text, "note": note.strip(), "filename": filename})
+        except Exception:
+            pass  # fall through to OCR / webpage scraping below
+
+    if _looks_like_flipbook(url, html):
+        text, note_or_error = _extract_flipbook_via_ocr(url)
+        if text:
+            title = _webpage_title(html, "flipbook")
+            return jsonify({"text": text, "note": note_or_error, "filename": f"{title}.txt"})
+        return jsonify({"error": note_or_error}), 501 if not _FLIPBOOK_OCR_AVAILABLE else 502
+
+    # ── Case 2: ordinary webpage ─────────────────────────────────────────
+    text = _extract_readable_webpage_text(html)
     if not text.strip():
-        return jsonify({"error": note or "No readable text was found in that document."}), 400
-    return jsonify({"text": text, "note": note, "filename": filename})
+        return jsonify({"error": "That page didn't have any readable text to extract."}), 400
+    title = _webpage_title(html, url.split("/")[-1] or "page")
+    return jsonify({"text": text, "note": "Extracted readable text from a webpage.", "filename": f"{title}.txt"})
 
 
 @app.route("/api/weather", methods=["POST"])
