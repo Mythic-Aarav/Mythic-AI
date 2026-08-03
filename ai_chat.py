@@ -1472,14 +1472,11 @@ PAGE = r"""<!DOCTYPE html>
   .conv-item:hover { background:var(--accent-dim); color:var(--text); }
   .conv-item.active { background:var(--accent-dim); color:var(--accent); font-weight:500; }
   .conv-item .title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
-  .conv-item .rename-btn { opacity:0; background:none; border:none; color:var(--muted);
-    cursor:pointer; font-size:12px; padding:2px 5px; flex-shrink:0; touch-action:manipulation; }
-  .conv-item .del-btn { opacity:0; background:none; border:none; color:var(--muted);
-    cursor:pointer; font-size:13px; padding:2px 5px; flex-shrink:0; touch-action:manipulation; }
-  .conv-item:hover .rename-btn { opacity:1; }
-  .conv-item:hover .del-btn { opacity:1; }
-  .conv-item .rename-btn:hover { color:var(--accent); }
-  .conv-item .del-btn:hover { color:#ef4444; }
+  .conv-item .menu-btn { opacity:0; background:none; border:none; color:var(--muted);
+    cursor:pointer; font-size:16px; padding:2px 8px; border-radius:5px; flex-shrink:0;
+    touch-action:manipulation; }
+  .conv-item:hover .menu-btn { opacity:1; }
+  .conv-item .menu-btn:hover { color:var(--accent); background:rgba(255,255,255,.06); }
   #sidebar-footer { padding:12px; font-size:11px; color:var(--muted); border-top:1px solid var(--border); }
 
   .app { display:flex; flex-direction:column; height:100vh;
@@ -1741,8 +1738,7 @@ PAGE = r"""<!DOCTYPE html>
 
     #new-chat-btn { margin:10px; padding:10px 12px; font-size:13.5px; }
     .conv-item { padding:10px 8px; font-size:13px; min-height:44px; }
-    .conv-item .rename-btn { opacity:1; }
-    .conv-item .del-btn { opacity:1; }
+    .conv-item .menu-btn { opacity:1; }
     #sidebar-footer { font-size:11px; padding:10px 12px; }
   }
 
@@ -1762,7 +1758,7 @@ PAGE = r"""<!DOCTYPE html>
     <div id="conv-list"></div>
     <div id="sidebar-footer">
       <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
-        <button id="archived-toggle-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">🗄 Archived</button>
+        <button id="archived-toggle-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">⭐ Starred</button>
         <button id="bookmarks-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">⭐ Bookmarks</button>
         <button id="stats-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">📊 Stats</button>
       </div>
@@ -1861,10 +1857,11 @@ PAGE = r"""<!DOCTYPE html>
       <button class="quick-btn" id="weather-btn">🌤 Weather</button>
       <button class="quick-btn" id="search-btn">🔍 Search</button>
       <button class="quick-btn" id="code-workspace-btn">💻 Code</button>
+      <button class="quick-btn" id="book-study-btn">📚 Study Book</button>
     </div>
       <form id="chat-form">
         <div class="input-row">
-          <input type="file" id="file-input" accept="image/*,.txt,.md,.csv,.json,.pdf" style="display:none">
+          <input type="file" id="file-input" accept="image/*,.txt,.md,.csv,.json,.pdf,.docx" style="display:none">
           <button class="tool-btn" id="attach-btn" type="button" title="Attach file">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
@@ -2385,6 +2382,7 @@ const stopSpeakBtn = document.getElementById('stop-speak-btn');
 
 let activeConvId = null;
 let pendingFile  = null;
+let _bookStudyPending = false;
 let recognition  = null;
 let currentUtterance = null;
 
@@ -2586,7 +2584,14 @@ function handleFileSelect(file) {
 }
 attachBtn.addEventListener('click', () => fileInput.click());
 cameraBtn.addEventListener('click', () => cameraInput.click());
-fileInput.addEventListener('change', () => handleFileSelect(fileInput.files[0]));
+fileInput.addEventListener('change', () => {
+  handleFileSelect(fileInput.files[0]);
+  if (fileInput.files[0] && _bookStudyPending) {
+    _bookStudyPending = false;
+    input.value = "This is a book/document I'm studying. First list the chapters you can see and tell me which chapter you're focusing on. Then prepare the hardest, most exam-relevant questions for that chapter first, before easier ones.";
+    autoResize();
+  }
+});
 cameraInput.addEventListener('change', () => handleFileSelect(cameraInput.files[0]));
 pendingRemove.addEventListener('click', () => {
   pendingFile = null;
@@ -2668,86 +2673,93 @@ function addFileMessage(fileB64, filename, mimeType, note) {
   scrollToBottom();
 }
 
-let showingArchived = false;
+let showingStarredOnly = false;
 
 function buildConvItem(c) {
   const item = document.createElement('div');
   item.className = 'conv-item' + (c.id === activeConvId ? ' active' : '');
   item.innerHTML = '<span class="title"></span>'
-    + '<button class="pin-btn" title="' + (c.pinned ? 'Unpin' : 'Pin') + '">' + (c.pinned ? '📌' : '📍') + '</button>'
-    + '<button class="dup-btn" title="Duplicate">⎘</button>'
-    + '<button class="folder-btn" title="Move to folder">📁</button>'
-    + '<button class="archive-btn" title="' + (c.archived ? 'Unarchive' : 'Archive') + '">' + (c.archived ? '📤' : '🗄') + '</button>'
-    + '<button class="rename-btn" title="Rename">✎</button>'
-    + '<button class="del-btn" title="Delete">✕</button>';
-  item.querySelector('.title').textContent = (c.pinned ? '📌 ' : '') + c.title;
+    + '<button class="menu-btn" title="More">⋮</button>';
+  item.querySelector('.title').textContent = (c.pinned ? '⭐ ' : '') + c.title;
+
   item.addEventListener('click', (e) => {
-    if (e.target.tagName === 'BUTTON') return;
+    if (e.target.closest('.menu-btn')) return;
     openConversation(c.id);
   });
-  item.querySelector('.pin-btn').addEventListener('click', async (e) => {
+
+  item.querySelector('.menu-btn').addEventListener('click', (e) => {
     e.stopPropagation();
-    await fetch('/api/conversations/' + c.id, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pinned: !c.pinned })
+    document.querySelectorAll('.conv-menu-dropdown').forEach(el => el.remove());
+    const menu = document.createElement('div');
+    menu.className = 'conv-menu-dropdown';
+    menu.style.cssText = 'position:fixed;background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.3);z-index:400;min-width:170px;overflow:hidden;';
+    const rect = e.target.getBoundingClientRect();
+    menu.style.top = (rect.bottom + 4) + 'px';
+    menu.style.left = Math.max(8, rect.right - 180) + 'px';
+
+    const menuItems = [
+      { label: (c.pinned ? '⭐ Unstar' : '☆ Star'), action: async () => {
+          await fetch('/api/conversations/' + c.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pinned: !c.pinned }) });
+          loadConversationList();
+        } },
+      { label: '⎘ Duplicate', action: async () => {
+          const r = await fetch('/api/conversations/' + c.id + '/duplicate', { method: 'POST' });
+          const d = await r.json();
+          if (d.id) openConversation(d.id);
+        } },
+      { label: '📁 Move to folder', action: async () => {
+          const folders = await fetch('/api/folders').then(r => r.json()).then(d => d.folders || []).catch(() => []);
+          const hint = folders.length ? ('Existing: ' + folders.join(', ') + '\n\n') : '';
+          const name = prompt(hint + 'Folder name (blank to remove from folder):', c.folder || '');
+          if (name === null) return;
+          await fetch('/api/conversations/' + c.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder: name.trim() }) });
+          loadConversationList();
+        } },
+      { label: '✎ Rename', action: async () => {
+          const newTitle = prompt('Rename chat:', c.title);
+          if (!newTitle || !newTitle.trim() || newTitle.trim() === c.title) return;
+          await fetch('/api/conversations/' + c.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: newTitle.trim() }) });
+          loadConversationList();
+        } },
+      { label: (c.archived ? '📤 Unarchive' : '🗄 Archive'), action: async () => {
+          await fetch('/api/conversations/' + c.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ archived: !c.archived }) });
+          if (c.id === activeConvId) startNewChat(); else loadConversationList();
+        } },
+      { label: '✕ Delete', danger: true, action: async () => {
+          await fetch('/api/conversations/' + c.id, { method: 'DELETE' });
+          if (c.id === activeConvId) startNewChat(); else loadConversationList();
+        } },
+    ];
+    menuItems.forEach(it => {
+      const row = document.createElement('div');
+      row.textContent = it.label;
+      row.style.cssText = 'padding:9px 14px;font-size:12.5px;cursor:pointer;color:' + (it.danger ? '#ef4444' : 'var(--text)') + ';';
+      row.addEventListener('mouseenter', () => row.style.background = 'var(--accent-dim)');
+      row.addEventListener('mouseleave', () => row.style.background = '');
+      row.addEventListener('click', () => { it.action(); menu.remove(); });
+      menu.appendChild(row);
     });
-    loadConversationList();
+    document.body.appendChild(menu);
+    setTimeout(() => {
+      document.addEventListener('click', function closeConvMenu() {
+        menu.remove();
+        document.removeEventListener('click', closeConvMenu);
+      }, { once: true });
+    }, 0);
   });
-  item.querySelector('.folder-btn').addEventListener('click', async (e) => {
-    e.stopPropagation();
-    const folders = await fetch('/api/folders').then(r => r.json()).then(d => d.folders || []).catch(() => []);
-    const hint = folders.length ? ('Existing: ' + folders.join(', ') + '\n\n') : '';
-    const name = prompt(hint + 'Folder name (blank to remove from folder):', c.folder || '');
-    if (name === null) return;
-    await fetch('/api/conversations/' + c.id, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ folder: name.trim() })
-    });
-    loadConversationList();
-  });
-  item.querySelector('.dup-btn').addEventListener('click', async (e) => {
-    e.stopPropagation();
-    const r = await fetch('/api/conversations/' + c.id + '/duplicate', { method: 'POST' });
-    const d = await r.json();
-    if (d.id) openConversation(d.id);
-  });
-  item.querySelector('.archive-btn').addEventListener('click', async (e) => {
-    e.stopPropagation();
-    await fetch('/api/conversations/' + c.id, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ archived: !c.archived })
-    });
-    if (c.id === activeConvId) startNewChat();
-    else loadConversationList();
-  });
-  item.querySelector('.rename-btn').addEventListener('click', async (e) => {
-    e.stopPropagation();
-    const newTitle = prompt('Rename chat:', c.title);
-    if (!newTitle || !newTitle.trim() || newTitle.trim() === c.title) return;
-    await fetch('/api/conversations/' + c.id, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: newTitle.trim() })
-    });
-    loadConversationList();
-  });
-  item.querySelector('.del-btn').addEventListener('click', async (e) => {
-    e.stopPropagation();
-    await fetch('/api/conversations/' + c.id, { method: 'DELETE' });
-    if (c.id === activeConvId) startNewChat();
-    else loadConversationList();
-  });
+
   return item;
 }
 
 async function loadConversationList() {
   try {
-    const r = await fetch('/api/conversations?archived=' + (showingArchived ? '1' : '0'));
+    const r = await fetch('/api/conversations?archived=0');
     const d = await r.json();
-    const convs = d.conversations || [];
+    let convs = d.conversations || [];
+    if (showingStarredOnly) convs = convs.filter(c => c.pinned);
     convListEl.innerHTML = '';
 
-    if (!showingArchived) {
+    if (!showingStarredOnly) {
       const byFolder = {};
       const noFolder = [];
       convs.forEach(c => {
@@ -2768,7 +2780,7 @@ async function loadConversationList() {
 
     if (!convs.length) {
       const empty = document.createElement('div');
-      empty.textContent = showingArchived ? 'No archived chats.' : 'No chats yet.';
+      empty.textContent = showingStarredOnly ? 'No starred chats yet.' : 'No chats yet.';
       empty.style.cssText = 'padding:16px 10px;font-size:12.5px;color:var(--muted);text-align:center;';
       convListEl.appendChild(empty);
     }
@@ -3850,6 +3862,11 @@ if (searchBtn) searchBtn.addEventListener('click', () => {
   if (!q || !q.trim()) return;
   input.value = 'Search: ' + q.trim(); autoResize(); form.requestSubmit();
 });
+const bookStudyBtn = document.getElementById('book-study-btn');
+if (bookStudyBtn) bookStudyBtn.addEventListener('click', () => {
+  _bookStudyPending = true;
+  fileInput.click();
+});
 
 // ─── FILE / PDF GENERATION MODAL JS ───────────────────────────────────────────
 const fileModal        = document.getElementById('file-modal-overlay');
@@ -4564,13 +4581,13 @@ if (artifactsTabBtn) artifactsTabBtn.addEventListener('click', () => requireVipM
   showArtifactsModal();
 }));
 
-// ─── Archived view toggle ─────────────────────────────────────────────────────
+// ─── Starred view toggle ─────────────────────────────────────────────────────
 const archivedToggleBtn = document.getElementById('archived-toggle-btn');
 if (archivedToggleBtn) archivedToggleBtn.addEventListener('click', () => requirePassword(() => {
-  showingArchived = !showingArchived;
-  archivedToggleBtn.textContent = showingArchived ? '💬 Active Chats' : '🗄 Archived';
-  archivedToggleBtn.style.color = showingArchived ? 'var(--accent)' : '';
-  archivedToggleBtn.style.borderColor = showingArchived ? 'var(--accent)' : 'var(--border)';
+  showingStarredOnly = !showingStarredOnly;
+  archivedToggleBtn.textContent = showingStarredOnly ? '💬 All Chats' : '⭐ Starred';
+  archivedToggleBtn.style.color = showingStarredOnly ? 'var(--accent)' : '';
+  archivedToggleBtn.style.borderColor = showingStarredOnly ? 'var(--accent)' : 'var(--border)';
   loadConversationList();
 }));
 
@@ -4704,7 +4721,7 @@ function showCommandPalette() {
     { label: '⚙ Open Settings', action: () => { settingsModalOverlay.style.display = 'flex'; } },
     { label: '📊 Chat Statistics', action: showStatsModal },
     { label: '⭐ Bookmarked Messages', action: showBookmarksModal },
-    { label: '🗄 Toggle Archived View', action: () => archivedToggleBtn && archivedToggleBtn.click() },
+    { label: '⭐ Toggle Starred View', action: () => archivedToggleBtn && archivedToggleBtn.click() },
     { label: '⬇ Export current chat', action: () => exportBtn.click() },
     { label: '☰ Toggle sidebar', action: () => sidebarToggle.click() },
   ];
@@ -5413,9 +5430,17 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
     ]
     result = _quick_completion(messages, api_key_groq, api_key_cerebras, max_tokens=16)
     if result:
-        title = result.strip().strip('"').strip("'").split("\n")[0].strip()
+        title = result.strip()
+        title = title.strip('"\'“”‘’').strip()
+        title = title.split("\n")[0].strip()
+        title = re.sub(r'^\[.*?\]\s*', '', title).strip()  # strip any leaked [Instructions: ...] / bracketed prefix
         title = re.sub(r'[.!?]+$', '', title).strip()
-        if title:
+        looks_bad = (
+            len(title) < 3 or
+            any(ch in title for ch in '[]"“”') or
+            title.lower().startswith(('based on', 'here is', 'here\'s', 'sure,', 'title:'))
+        )
+        if title and not looks_bad:
             return title[:60]
     return make_title(first_user_message)
 
