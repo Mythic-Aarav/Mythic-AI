@@ -1,8 +1,8 @@
 services:
   - type: web
-    name: PUT-YOUR-EXISTING-SERVICE-NAME-HERE
+    name: Mythic AI
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    plan: starter          # match whatever plan your existing service is on
+    plan: free
     autoDeploy: true
