@@ -380,7 +380,8 @@ def _persistent_secret_key():
 
 app.secret_key = _persistent_secret_key()
 
-MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB — images and general attachments
+DOCUMENT_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1 GB — books/PDFs/docs specifically
 
 # --- Temporary public image hosting (for NanoBanana image-to-image editing) --
 # NanoBanana's /generate endpoint needs a publicly reachable image URL for
@@ -1853,11 +1854,10 @@ PAGE = r"""<!DOCTYPE html>
       <button class="quick-btn" id="img-gen-btn">🎨 Image</button>
       <button class="quick-btn" id="ghibli-btn">🌿 Ghibli Me</button>
       <button class="quick-btn" id="file-gen-btn">📄 File / PDF</button>
-      <button class="quick-btn" id="homework-btn">📚 Homework</button>
+      <button class="quick-btn" id="homework-btn">📚 Homework & Study</button>
       <button class="quick-btn" id="weather-btn">🌤 Weather</button>
       <button class="quick-btn" id="search-btn">🔍 Search</button>
       <button class="quick-btn" id="code-workspace-btn">💻 Code</button>
-      <button class="quick-btn" id="book-study-btn">📚 Study Book</button>
     </div>
       <form id="chat-form">
         <div class="input-row">
@@ -2171,6 +2171,43 @@ PAGE = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<!-- ─── HOMEWORK & STUDY BOOK — question, upload, or URL ───────────────────── -->
+<div id="homework-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:300;align-items:center;justify-content:center;padding:16px;">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:24px;width:92%;max-width:460px;max-height:90vh;overflow-y:auto;">
+    <h3 style="margin:0 0 4px;font-size:18px;">📚 Homework &amp; Study</h3>
+    <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">Ask a question, upload a book/PDF, or paste a link to one — or all three.</p>
+
+    <textarea id="homework-question" rows="3" placeholder="e.g. Help me with question 4 on quadratic equations, or leave blank if you're just uploading a book"
+      style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:13px;outline:none;margin-bottom:12px;font-family:inherit;resize:vertical;"></textarea>
+
+    <div style="display:flex;gap:6px;margin-bottom:10px;">
+      <button id="hw-mode-upload" class="hw-mode-btn" data-mode="upload" style="flex:1;padding:9px;border-radius:8px;border:1.5px solid var(--accent);background:var(--accent-dim);color:var(--accent);cursor:pointer;font-size:12.5px;font-family:inherit;">📎 Upload File</button>
+      <button id="hw-mode-url" class="hw-mode-btn" data-mode="url" style="flex:1;padding:9px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--muted);cursor:pointer;font-size:12.5px;font-family:inherit;">🔗 Paste URL</button>
+    </div>
+
+    <div id="hw-upload-area">
+      <div id="hw-upload-dropzone" style="border:2px dashed var(--border);border-radius:12px;padding:18px;text-align:center;cursor:pointer;margin-bottom:8px;">
+        <div style="font-size:13px;color:var(--muted);">📄 Click to choose a PDF, DOCX, or text file</div>
+      </div>
+      <input type="file" id="hw-file-input" accept=".pdf,.docx,.txt,.md,.csv,.json" style="display:none">
+      <div id="hw-file-name" style="font-size:12px;color:var(--accent);display:none;margin-bottom:8px;"></div>
+    </div>
+
+    <div id="hw-url-area" style="display:none;">
+      <input id="hw-url-input" type="text" placeholder="https://example.com/book.pdf"
+        style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:13px;outline:none;margin-bottom:8px;font-family:inherit;">
+    </div>
+
+    <div id="hw-loading" style="display:none;text-align:center;padding:14px;color:var(--muted);font-size:13px;">Fetching document...</div>
+    <div id="hw-error" style="display:none;color:#ef4444;font-size:12px;margin-bottom:8px;padding:8px;background:#fef2f2;border-radius:6px;"></div>
+
+    <div style="display:flex;gap:8px;margin-top:6px;">
+      <button id="hw-send-btn" style="flex:1;background:linear-gradient(135deg,#10a37f,#0d7a5f);color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">Send</button>
+      <button id="hw-close-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:12px 16px;font-size:14px;cursor:pointer;">✕</button>
+    </div>
+  </div>
+</div>
+
 <!-- ─── CODE WORKSPACE — HTML/CSS/JS editor with live preview ──────────────── -->
 <div id="code-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:300;align-items:center;justify-content:center;padding:16px;">
   <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;width:100%;max-width:1100px;height:88vh;display:flex;flex-direction:column;overflow:hidden;">
@@ -2382,7 +2419,6 @@ const stopSpeakBtn = document.getElementById('stop-speak-btn');
 
 let activeConvId = null;
 let pendingFile  = null;
-let _bookStudyPending = false;
 let recognition  = null;
 let currentUtterance = null;
 
@@ -2584,14 +2620,7 @@ function handleFileSelect(file) {
 }
 attachBtn.addEventListener('click', () => fileInput.click());
 cameraBtn.addEventListener('click', () => cameraInput.click());
-fileInput.addEventListener('change', () => {
-  handleFileSelect(fileInput.files[0]);
-  if (fileInput.files[0] && _bookStudyPending) {
-    _bookStudyPending = false;
-    input.value = "This is a book/document I'm studying. First list the chapters you can see and tell me which chapter you're focusing on. Then prepare the hardest, most exam-relevant questions for that chapter first, before easier ones.";
-    autoResize();
-  }
-});
+fileInput.addEventListener('change', () => handleFileSelect(fileInput.files[0]));
 cameraInput.addEventListener('change', () => handleFileSelect(cameraInput.files[0]));
 pendingRemove.addEventListener('click', () => {
   pendingFile = null;
@@ -2858,7 +2887,17 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
     });
     if (!r.ok || !r.body) {
       hideTyping();
-      addMessage('error', 'Something went wrong. Try again.');
+      let errMsg = 'Something went wrong. Try again.';
+      try {
+        const errData = await r.clone().json();
+        if (errData && errData.error) errMsg = errData.error;
+      } catch {
+        try {
+          const errText = await r.clone().text();
+          if (errText && errText.trim()) errMsg = errText.trim().slice(0, 300);
+        } catch {}
+      }
+      addMessage('error', errMsg + ` (HTTP ${r.status})`);
       return;
     }
     hideTyping();
@@ -3850,8 +3889,8 @@ if (imgGenBtn) imgGenBtn.addEventListener('click', () => {
   if (imgModal) { imgModal.style.display = 'flex'; document.getElementById('img-prompt').focus(); }
 });
 if (homeworkBtn) homeworkBtn.addEventListener('click', () => {
-  input.value = 'Help me with my homework: '; input.focus(); autoResize();
-  input.setSelectionRange(input.value.length, input.value.length);
+  const hwModal = document.getElementById('homework-modal-overlay');
+  if (hwModal) { hwModal.style.display = 'flex'; document.getElementById('homework-question').focus(); }
 });
 if (weatherBtn2) weatherBtn2.addEventListener('click', () => {
   const wm = document.getElementById('weather-modal-overlay');
@@ -3861,11 +3900,6 @@ if (searchBtn) searchBtn.addEventListener('click', () => {
   const q = prompt('What do you want to search for?');
   if (!q || !q.trim()) return;
   input.value = 'Search: ' + q.trim(); autoResize(); form.requestSubmit();
-});
-const bookStudyBtn = document.getElementById('book-study-btn');
-if (bookStudyBtn) bookStudyBtn.addEventListener('click', () => {
-  _bookStudyPending = true;
-  fileInput.click();
 });
 
 // ─── FILE / PDF GENERATION MODAL JS ───────────────────────────────────────────
@@ -4282,6 +4316,135 @@ if (weatherLocBtn2) weatherLocBtn2.addEventListener('click', () => {
   );
 });
 renderRecentSearches();
+
+// ─── HOMEWORK & STUDY BOOK MODAL ─────────────────────────────────────────────
+(function() {
+  const modal       = document.getElementById('homework-modal-overlay');
+  const closeBtn     = document.getElementById('hw-close-btn');
+  const sendBtn      = document.getElementById('hw-send-btn');
+  const questionEl   = document.getElementById('homework-question');
+  const modeUploadBtn= document.getElementById('hw-mode-upload');
+  const modeUrlBtn   = document.getElementById('hw-mode-url');
+  const uploadArea   = document.getElementById('hw-upload-area');
+  const urlArea      = document.getElementById('hw-url-area');
+  const dropzone     = document.getElementById('hw-upload-dropzone');
+  const hwFileInput  = document.getElementById('hw-file-input');
+  const hwFileName   = document.getElementById('hw-file-name');
+  const urlInput     = document.getElementById('hw-url-input');
+  const loadingEl    = document.getElementById('hw-loading');
+  const errorEl      = document.getElementById('hw-error');
+  if (!modal) return;
+
+  let hwMode = 'upload';
+  let hwPendingFile = null; // { name, mimeType, dataBase64 }
+
+  function setHwMode(mode) {
+    hwMode = mode;
+    modeUploadBtn.style.borderColor = mode === 'upload' ? 'var(--accent)' : 'var(--border)';
+    modeUploadBtn.style.background  = mode === 'upload' ? 'var(--accent-dim)' : 'var(--panel)';
+    modeUploadBtn.style.color       = mode === 'upload' ? 'var(--accent)' : 'var(--muted)';
+    modeUrlBtn.style.borderColor    = mode === 'url' ? 'var(--accent)' : 'var(--border)';
+    modeUrlBtn.style.background     = mode === 'url' ? 'var(--accent-dim)' : 'var(--panel)';
+    modeUrlBtn.style.color          = mode === 'url' ? 'var(--accent)' : 'var(--muted)';
+    uploadArea.style.display = mode === 'upload' ? 'block' : 'none';
+    urlArea.style.display    = mode === 'url' ? 'block' : 'none';
+  }
+  modeUploadBtn.addEventListener('click', () => setHwMode('upload'));
+  modeUrlBtn.addEventListener('click', () => setHwMode('url'));
+
+  dropzone.addEventListener('click', () => hwFileInput.click());
+  hwFileInput.addEventListener('change', () => {
+    const file = hwFileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      hwPendingFile = { name: file.name, mimeType: file.type || 'application/octet-stream', dataBase64: e.target.result.split(',')[1] };
+      hwFileName.textContent = '📄 ' + file.name;
+      hwFileName.style.display = 'block';
+    };
+    reader.readAsDataURL(file);
+  });
+
+  if (homeworkBtn) homeworkBtn.addEventListener('click', () => {
+    errorEl.style.display = 'none';
+    loadingEl.style.display = 'none';
+  });
+  if (closeBtn) closeBtn.addEventListener('click', () => { modal.style.display = 'none'; });
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.style.display = 'none'; });
+
+  const STUDY_INSTRUCTIONS = "First list the chapters you can see in this document and tell me which chapter you're focusing on. Then prepare the hardest, most exam-relevant questions for that chapter first, before easier ones.";
+
+  sendBtn.addEventListener('click', async () => {
+    errorEl.style.display = 'none';
+    const question = questionEl.value.trim();
+
+    if (hwMode === 'upload') {
+      if (!hwPendingFile && !question) {
+        errorEl.textContent = 'Upload a file or type a question first.';
+        errorEl.style.display = 'block';
+        return;
+      }
+      const finalMessage = question || STUDY_INSTRUCTIONS;
+      modal.style.display = 'none';
+      addMessage('user', finalMessage, hwPendingFile);
+      const attachmentToSend = hwPendingFile;
+      hwPendingFile = null;
+      hwFileName.style.display = 'none';
+      hwFileInput.value = '';
+      questionEl.value = '';
+      streamReply({ message: getTonePrefix() + finalMessage, attachment: attachmentToSend });
+      return;
+    }
+
+    // URL mode — fetch + extract text server-side, then send as a normal
+    // text message with the extracted content inlined (same 12k-char cap
+    // the file-upload path already uses via extract_text_from_attachment).
+    const url = urlInput.value.trim();
+    if (!url && !question) {
+      errorEl.textContent = 'Paste a URL or type a question first.';
+      errorEl.style.display = 'block';
+      return;
+    }
+    if (!url) {
+      // No URL, just a plain question — send as normal chat.
+      modal.style.display = 'none';
+      addMessage('user', question);
+      questionEl.value = '';
+      streamReply({ message: getTonePrefix() + question });
+      return;
+    }
+
+    loadingEl.style.display = 'block';
+    sendBtn.disabled = true;
+    try {
+      const r = await fetch('/api/fetch-url-document', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+      const d = await r.json();
+      loadingEl.style.display = 'none';
+      if (!r.ok || d.error) {
+        errorEl.textContent = d.error || 'Could not fetch that URL.';
+        errorEl.style.display = 'block';
+        return;
+      }
+      const finalMessage = (question || STUDY_INSTRUCTIONS)
+        + `\n\n[Document fetched from ${d.filename || url}]\n${d.text}`
+        + (d.note ? `\n[Note: ${d.note}]` : '');
+      modal.style.display = 'none';
+      addMessage('user', question || `📚 Studying: ${d.filename || url}`);
+      urlInput.value = '';
+      questionEl.value = '';
+      streamReply({ message: getTonePrefix() + finalMessage });
+    } catch (e) {
+      loadingEl.style.display = 'none';
+      errorEl.textContent = 'Network error: ' + e.message;
+      errorEl.style.display = 'block';
+    } finally {
+      sendBtn.disabled = false;
+    }
+  });
+})();
 
 // ─── CODE WORKSPACE — HTML/CSS/JS editor with live preview ─────────────────
 (function() {
@@ -5765,6 +5928,41 @@ def _aqi_label(us_aqi):
     return f"{us_aqi} (Hazardous)"
 
 
+@app.route("/api/fetch-url-document", methods=["POST"])
+@login_required
+def api_fetch_url_document():
+    """Downloads a document from a URL (PDF/DOCX/TXT) and extracts its text,
+    for the Study Book feature's 'paste a URL instead of uploading' option.
+    Reuses extract_text_from_attachment so PDF/DOCX handling stays identical
+    to file uploads. Caps download size to DOCUMENT_UPLOAD_BYTES and aborts
+    early via streaming rather than reading an arbitrarily large body first."""
+    data = request.get_json(force=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url or not (url.startswith("http://") or url.startswith("https://")):
+        return jsonify({"error": "Please enter a valid http:// or https:// URL"}), 400
+    try:
+        resp = requests.get(url, timeout=20, stream=True, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "").split(";")[0].strip()
+        raw = bytearray()
+        for chunk in resp.iter_content(chunk_size=65536):
+            raw.extend(chunk)
+            if len(raw) > DOCUMENT_UPLOAD_BYTES:
+                limit_mb = DOCUMENT_UPLOAD_BYTES // (1024 * 1024)
+                return jsonify({"error": f"That file is larger than {limit_mb}MB — please download it and upload it directly instead."}), 400
+    except requests.RequestException as e:
+        return jsonify({"error": f"Could not fetch that URL: {e}"}), 502
+
+    filename = (url.split("/")[-1].split("?")[0] or "document").strip() or "document"
+    text, note = extract_text_from_attachment(filename, content_type, bytes(raw))
+    if text is None:
+        return jsonify({"error": "That URL doesn't look like a readable PDF, DOCX, or text document. "
+                                  "Try a direct download link (not a webpage that just links to one)."}), 400
+    if not text.strip():
+        return jsonify({"error": note or "No readable text was found in that document."}), 400
+    return jsonify({"text": text, "note": note, "filename": filename})
+
+
 @app.route("/api/weather", methods=["POST"])
 @login_required
 def api_weather():
@@ -5946,8 +6144,13 @@ def chat():
             raw = base64.b64decode(attachment.get("dataBase64", ""), validate=True)
         except Exception:
             return jsonify({"error": "invalid attachment data"}), 400
-        if len(raw) > MAX_UPLOAD_BYTES:
-            return jsonify({"error": "attachment too large (max 8MB)"}), 400
+        att_mime = (attachment.get("mimeType") or "")
+        att_name = (attachment.get("name") or "").lower()
+        is_document = (att_mime == "application/pdf" or att_name.endswith((".pdf", ".docx", ".txt", ".md")))
+        effective_limit = DOCUMENT_UPLOAD_BYTES if is_document else MAX_UPLOAD_BYTES
+        if len(raw) > effective_limit:
+            limit_mb = effective_limit // (1024 * 1024)
+            return jsonify({"error": f"attachment too large (max {limit_mb}MB for this file type)"}), 400
 
     username = current_username()
     conv = load_conversation(username, conv_id) if conv_id else None
