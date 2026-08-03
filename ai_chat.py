@@ -1762,6 +1762,7 @@ PAGE = r"""<!DOCTYPE html>
         <button id="archived-toggle-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">⭐ Starred</button>
         <button id="bookmarks-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">⭐ Bookmarks</button>
         <button id="stats-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">📊 Stats</button>
+        <button id="cleanup-btn" title="Remove stray internal-tooling chats" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">🧹 Clean Up</button>
       </div>
       Mythic AI &middot; by Aarav Singh
     </div>
@@ -4844,6 +4845,33 @@ async function showStatsModal() {
 }
 if (statsBtn) statsBtn.addEventListener('click', () => requirePassword(showStatsModal));
 
+// ─── Clean up junk chats (old follow-up-suggestion / instruction-prefix leaks)
+async function cleanupJunkChats() {
+  const cleanupBtn = document.getElementById('cleanup-btn');
+  const origText = cleanupBtn ? cleanupBtn.textContent : '';
+  if (cleanupBtn) { cleanupBtn.textContent = '⏳ Scanning...'; cleanupBtn.disabled = true; }
+  try {
+    const r = await fetch('/api/conversations/cleanup-junk', { method: 'POST' });
+    const d = await r.json();
+    if (cleanupBtn) { cleanupBtn.textContent = origText; cleanupBtn.disabled = false; }
+    if (!r.ok) { alert('Cleanup failed: ' + (d.error || 'unknown error')); return; }
+    if (d.removed_count === 0) {
+      alert('No junk chats found — your sidebar is already clean.');
+    } else {
+      alert(`Removed ${d.removed_count} stray chat(s):\n\n` + d.removed_titles.map(t => '• ' + t).join('\n'));
+      if (d.removed_titles.includes(document.querySelector('.conv-item.active .title')?.textContent)) {
+        startNewChat();
+      }
+    }
+    loadConversationList();
+  } catch (e) {
+    if (cleanupBtn) { cleanupBtn.textContent = origText; cleanupBtn.disabled = false; }
+    alert('Network error: ' + e.message);
+  }
+}
+const cleanupBtn = document.getElementById('cleanup-btn');
+if (cleanupBtn) cleanupBtn.addEventListener('click', () => requirePassword(cleanupJunkChats));
+
 // ─── Bookmark button on AI/user messages ───────────────────────────────────
 let _msgIndexCounter = 0;
 const _origBuildActions2 = buildMsgActions;
@@ -4885,6 +4913,7 @@ function showCommandPalette() {
     { label: '📊 Chat Statistics', action: showStatsModal },
     { label: '⭐ Bookmarked Messages', action: showBookmarksModal },
     { label: '⭐ Toggle Starred View', action: () => archivedToggleBtn && archivedToggleBtn.click() },
+    { label: '🧹 Clean Up Junk Chats', action: cleanupJunkChats },
     { label: '⬇ Export current chat', action: () => exportBtn.click() },
     { label: '☰ Toggle sidebar', action: () => sidebarToggle.click() },
   ];
@@ -5204,6 +5233,52 @@ def api_list_conversations():
     else:
         convs = [c for c in convs if not c.get("archived")]
     return jsonify({"conversations": convs})
+
+
+# Patterns that identify a conversation as internal-tooling leakage rather
+# than a real chat — e.g. old follow-up-suggestion or tone/length-prefix
+# requests saved before the ephemeral-request fix existed. Matched against
+# either the saved title or the first user message.
+_JUNK_CONV_PATTERNS = (
+    "based on this ai reply, suggest",
+    "[instructions:",
+)
+
+
+def _conv_is_junk(conv_summary, username):
+    title = (conv_summary.get("title") or "").strip().lower()
+    if any(title.startswith(p) for p in _JUNK_CONV_PATTERNS):
+        return True
+    # Title alone might be a truncated/renamed version — check the first
+    # real user message too, for conversations saved before titles were
+    # cleaned up server-side.
+    full = load_conversation(username, conv_summary["id"])
+    if not full:
+        return False
+    for m in full.get("messages", []):
+        if m.get("role") != "user":
+            continue
+        text = "".join(p.get("text", "") for p in m.get("parts", []) if "text" in p).strip().lower()
+        if text:
+            return any(text.startswith(p) for p in _JUNK_CONV_PATTERNS)
+    return False
+
+
+@app.route("/api/conversations/cleanup-junk", methods=["POST"])
+@login_required
+def api_cleanup_junk_conversations():
+    """Finds and deletes stray conversations created by internal tooling
+    (old follow-up-suggestion / tone-prefix requests) rather than real user
+    chats — see _JUNK_CONV_PATTERNS. Safe to call any time; only ever
+    deletes conversations matching those specific patterns."""
+    username = current_username()
+    convs = list_conversations(username)
+    removed = []
+    for c in convs:
+        if _conv_is_junk(c, username):
+            delete_conversation(username, c["id"])
+            removed.append(c.get("title", c["id"]))
+    return jsonify({"status": "done", "removed_count": len(removed), "removed_titles": removed})
 
 
 @app.route("/api/folders", methods=["GET"])
