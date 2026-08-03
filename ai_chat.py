@@ -5993,10 +5993,31 @@ def api_fetch_url_document():
     Reuses extract_text_from_attachment so PDF/DOCX handling stays identical
     to file uploads. Caps download size to DOCUMENT_UPLOAD_BYTES and aborts
     early via streaming rather than reading an arbitrarily large body first."""
+    NOT_A_BOOK_MSG = ("That doesn't look like a book/document link. Please paste a direct link "
+                       "to a PDF, DOCX, or TXT file (e.g. one that ends in .pdf, .docx, or .txt) "
+                       "— not a website or app URL.")
+
+    DOC_EXTENSIONS = (".pdf", ".docx", ".doc", ".txt")
+    DOC_CONTENT_TYPES = (
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "text/plain",
+    )
+
     data = request.get_json(force=True) or {}
     url = (data.get("url") or "").strip()
     if not url or not (url.startswith("http://") or url.startswith("https://")):
         return jsonify({"error": "Please enter a valid http:// or https:// URL"}), 400
+
+    # Quick upfront check: if the URL's path doesn't end in a known document
+    # extension, don't even bother hitting the network (this also avoids
+    # long/hanging requests to general websites or apps, e.g. Render homepages
+    # that can be slow to wake up and would otherwise time out).
+    path = urllib.parse.urlparse(url).path.lower()
+    if not path.endswith(DOC_EXTENSIONS):
+        return jsonify({"error": NOT_A_BOOK_MSG}), 400
+
     try:
         resp = requests.get(url, timeout=20, stream=True, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
@@ -6007,14 +6028,19 @@ def api_fetch_url_document():
             if len(raw) > DOCUMENT_UPLOAD_BYTES:
                 limit_mb = DOCUMENT_UPLOAD_BYTES // (1024 * 1024)
                 return jsonify({"error": f"That file is larger than {limit_mb}MB — please download it and upload it directly instead."}), 400
-    except requests.RequestException as e:
-        return jsonify({"error": f"Could not fetch that URL: {e}"}), 502
+    except requests.RequestException:
+        return jsonify({"error": "Could not reach that link — please double-check it's a direct, "
+                                  "publicly accessible link to a PDF, DOCX, or TXT file and try again."}), 502
+
+    # Even with a document-looking extension, the server might have actually
+    # served back an HTML error/landing page instead — catch that too.
+    if content_type and content_type not in DOC_CONTENT_TYPES:
+        return jsonify({"error": NOT_A_BOOK_MSG}), 400
 
     filename = (url.split("/")[-1].split("?")[0] or "document").strip() or "document"
     text, note = extract_text_from_attachment(filename, content_type, bytes(raw))
     if text is None:
-        return jsonify({"error": "That URL doesn't look like a readable PDF, DOCX, or text document. "
-                                  "Try a direct download link (not a webpage that just links to one)."}), 400
+        return jsonify({"error": NOT_A_BOOK_MSG}), 400
     if not text.strip():
         return jsonify({"error": note or "No readable text was found in that document."}), 400
     return jsonify({"text": text, "note": note, "filename": filename})
