@@ -1,6 +1,11 @@
 flask
 requests
+beautifulsoup4
+playwright
+pytesseract
 Pillow
 pywebpush
+py-vapid
+pypdf
 python-docx
-gunicorn
+cairosvg
