@@ -1760,9 +1760,9 @@ PAGE = r"""<!DOCTYPE html>
     <div id="sidebar-footer">
       <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
         <button id="archived-toggle-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">⭐ Starred</button>
-        <button id="bookmarks-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">⭐ Bookmarks</button>
+        <button id="bookmarks-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">🔖 Bookmarks</button>
         <button id="stats-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">📊 Stats</button>
-        <button id="cleanup-btn" title="Remove stray internal-tooling chats" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">🧹 Clean Up</button>
+        
       </div>
       Mythic AI &middot; by Aarav Singh
     </div>
@@ -3873,9 +3873,19 @@ form.addEventListener('submit', async () => {
 });
 
 (async () => {
-  const convs = await loadConversationList();
-  if (convs.length > 0) openConversation(convs[0].id);
-  else showEmptyState();
+  // Always start on a fresh New Chat screen rather than auto-reopening the
+  // last conversation — the sidebar list is still populated underneath.
+  await loadConversationList();
+  showEmptyState();
+  // Silently remove stray internal-tooling conversations (old follow-up-
+  // suggestion / instruction-prefix leaks) in the background, no button
+  // or confirmation needed — safe because it only ever matches those very
+  // specific known patterns server-side (see _JUNK_CONV_PATTERNS).
+  try {
+    const r = await fetch('/api/conversations/cleanup-junk', { method: 'POST' });
+    const d = await r.json();
+    if (d && d.removed_count > 0) loadConversationList();
+  } catch {}
 })();
 
 const imgGenBtn   = document.getElementById('img-gen-btn');
@@ -4792,7 +4802,7 @@ function showBookmarksModal() {
   });
   if (!count) rows = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:13px;">No bookmarked messages yet. Use the 🔖 icon on any message.</div>';
   overlay.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;width:90%;max-width:420px;max-height:70vh;overflow-y:auto;">
-    <h3 style="margin:0 0 12px;font-size:16px;">⭐ Bookmarked Messages</h3>
+    <h3 style="margin:0 0 12px;font-size:16px;">🔖 Bookmarked Messages</h3>
     <div>${rows}</div>
     <button id="bm-close" style="margin-top:14px;width:100%;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:9px;cursor:pointer;font-family:inherit;">Close</button>
   </div>`;
@@ -4845,33 +4855,6 @@ async function showStatsModal() {
 }
 if (statsBtn) statsBtn.addEventListener('click', () => requirePassword(showStatsModal));
 
-// ─── Clean up junk chats (old follow-up-suggestion / instruction-prefix leaks)
-async function cleanupJunkChats() {
-  const cleanupBtn = document.getElementById('cleanup-btn');
-  const origText = cleanupBtn ? cleanupBtn.textContent : '';
-  if (cleanupBtn) { cleanupBtn.textContent = '⏳ Scanning...'; cleanupBtn.disabled = true; }
-  try {
-    const r = await fetch('/api/conversations/cleanup-junk', { method: 'POST' });
-    const d = await r.json();
-    if (cleanupBtn) { cleanupBtn.textContent = origText; cleanupBtn.disabled = false; }
-    if (!r.ok) { alert('Cleanup failed: ' + (d.error || 'unknown error')); return; }
-    if (d.removed_count === 0) {
-      alert('No junk chats found — your sidebar is already clean.');
-    } else {
-      alert(`Removed ${d.removed_count} stray chat(s):\n\n` + d.removed_titles.map(t => '• ' + t).join('\n'));
-      if (d.removed_titles.includes(document.querySelector('.conv-item.active .title')?.textContent)) {
-        startNewChat();
-      }
-    }
-    loadConversationList();
-  } catch (e) {
-    if (cleanupBtn) { cleanupBtn.textContent = origText; cleanupBtn.disabled = false; }
-    alert('Network error: ' + e.message);
-  }
-}
-const cleanupBtn = document.getElementById('cleanup-btn');
-if (cleanupBtn) cleanupBtn.addEventListener('click', () => requirePassword(cleanupJunkChats));
-
 // ─── Bookmark button on AI/user messages ───────────────────────────────────
 let _msgIndexCounter = 0;
 const _origBuildActions2 = buildMsgActions;
@@ -4881,10 +4864,10 @@ buildMsgActions = function(row, textNode, role) {
   row.dataset.msgIndex = myIndex;
   const bmBtn = document.createElement('button');
   bmBtn.type = 'button'; bmBtn.title = 'Bookmark';
-  bmBtn.textContent = isBookmarked(activeConvId, myIndex) ? '⭐' : '☆';
+  bmBtn.textContent = isBookmarked(activeConvId, myIndex) ? '🔖' : '📑';
   bmBtn.addEventListener('click', () => {
     const on = toggleBookmark(activeConvId, myIndex, textNode.textContent || textNode.innerText || '');
-    bmBtn.textContent = on ? '⭐' : '☆';
+    bmBtn.textContent = on ? '🔖' : '📑';
   });
   actions.appendChild(bmBtn);
   return actions;
@@ -4911,9 +4894,8 @@ function showCommandPalette() {
     { label: '+ New chat', action: () => { startNewChat(); } },
     { label: '⚙ Open Settings', action: () => { settingsModalOverlay.style.display = 'flex'; } },
     { label: '📊 Chat Statistics', action: showStatsModal },
-    { label: '⭐ Bookmarked Messages', action: showBookmarksModal },
+    { label: '🔖 Bookmarked Messages', action: showBookmarksModal },
     { label: '⭐ Toggle Starred View', action: () => archivedToggleBtn && archivedToggleBtn.click() },
-    { label: '🧹 Clean Up Junk Chats', action: cleanupJunkChats },
     { label: '⬇ Export current chat', action: () => exportBtn.click() },
     { label: '☰ Toggle sidebar', action: () => sidebarToggle.click() },
   ];
