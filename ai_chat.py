@@ -786,7 +786,7 @@ def get_or_create_owner_id(preferred_id=None):
         return oid
 
 # --- Public API keys ("aarav-...") --------------------------------------------
-# Lets other apps/people call YOUR Mythic AI like a hosted API (OpenAI-style),
+# Lets other apps/people call YOUR Mythic AI like a hosted API,
 # authenticated with a personal key instead of the free chat UI. Keys are
 # generated as "aarav-<random>", and only a SHA-256 hash is ever stored —
 # the plaintext key is shown once at creation time and never again, same as
@@ -6331,8 +6331,14 @@ def invite_landing(code):
 # --- API key management (owner only) ------------------------------------------
 def _require_owner():
     """Only the owner account (you, or someone using your invite link) may
-    create/list/revoke API keys — not every anonymous visitor."""
-    return current_username() == get_or_create_owner_id()
+    create/list/revoke API keys — not every anonymous visitor.
+
+    IMPORTANT: if no owner has been claimed yet, the FIRST caller to check
+    this becomes the owner (using their own existing session id, same as
+    /api/invite-link does) — never a disconnected random id. Otherwise
+    whoever happened to load Settings first would get silently locked out
+    of their own account."""
+    return current_username() == get_or_create_owner_id(preferred_id=current_username())
 
 @app.route("/api/keys", methods=["GET"])
 @login_required
