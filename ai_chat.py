@@ -2219,6 +2219,7 @@ PAGE = r"""<!DOCTYPE html>
   <div id="sidebar">
     <button id="new-chat-btn">+ New chat</button>
     <button id="api-keys-shortcut-btn" title="Manage API keys">🔑 API Keys</button>
+    <div id="api-usage-summary" style="display:none;margin:0 12px 6px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:11.5px;color:var(--muted);cursor:pointer;" title="Click to manage API keys"></div>
     <div style="display:flex;gap:6px;margin:6px 0;">
       <button id="search-chats-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:7px 4px;font-size:12px;cursor:pointer;font-family:inherit;">🔎 Search</button>
       <button id="reminders-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:7px 4px;font-size:12px;cursor:pointer;font-family:inherit;">⏰ Reminders</button>
@@ -3845,6 +3846,7 @@ async function loadApiKeys() {
           if (!confirm('Revoke this key? Apps using it will stop working immediately.')) return;
           await fetch('/api/keys/' + k.id, { method: 'DELETE' });
           loadApiKeys();
+          loadApiUsageSummary();
         };
         row.appendChild(revokeBtn);
       }
@@ -3853,6 +3855,48 @@ async function loadApiKeys() {
   } catch (e) {
     console.warn('Could not load API keys:', e);
   }
+}
+
+// ─── API usage summary (shown right in the sidebar, under New Chat) ─────────
+const apiUsageSummaryEl = document.getElementById('api-usage-summary');
+
+async function loadApiUsageSummary() {
+  if (!apiUsageSummaryEl) return;
+  try {
+    const res = await fetch('/api/keys');
+    if (res.status === 403) { apiUsageSummaryEl.style.display = 'none'; return; } // not the owner
+    const data = await res.json();
+    const keys = data.keys || [];
+    if (!keys.length) { apiUsageSummaryEl.style.display = 'none'; return; }
+
+    const activeKeys = keys.filter(k => k.active);
+    const totalCalls = keys.reduce((sum, k) => sum + (k.request_count || 0), 0);
+    const lastUsedTimes = keys.map(k => k.last_used_at).filter(Boolean).sort();
+    const lastUsed = lastUsedTimes.length ? lastUsedTimes[lastUsedTimes.length - 1] : null;
+    const lastUsedStr = lastUsed
+      ? new Date(lastUsed).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+      : 'never';
+
+    apiUsageSummaryEl.style.display = 'block';
+    apiUsageSummaryEl.innerHTML =
+      `<div style="display:flex;justify-content:space-between;"><span>🔑 ${activeKeys.length} active key${activeKeys.length === 1 ? '' : 's'}</span>` +
+      `<span>${totalCalls} call${totalCalls === 1 ? '' : 's'}</span></div>` +
+      `<div style="opacity:.75;margin-top:2px;">Last used: ${lastUsedStr}</div>`;
+  } catch (e) {
+    console.warn('Could not load API usage summary:', e);
+  }
+}
+
+if (apiUsageSummaryEl) {
+  apiUsageSummaryEl.addEventListener('click', () => {
+    settingsModalOverlay.style.display = 'flex';
+    loadApiKeys();
+    requestAnimationFrame(() => {
+      const target = document.getElementById('api-key-label-input');
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  });
+  loadApiUsageSummary();
 }
 
 if (apiKeyCreateBtn) {
@@ -3871,6 +3915,7 @@ if (apiKeyCreateBtn) {
         apiKeyNewBox.style.display = 'block';
         if (apiKeyLabelInput) apiKeyLabelInput.value = '';
         loadApiKeys();
+        loadApiUsageSummary();
       } else if (data.error) {
         alert(data.error);
       }
