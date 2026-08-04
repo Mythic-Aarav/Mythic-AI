@@ -3889,12 +3889,7 @@ async function loadApiUsageSummary() {
 
 if (apiUsageSummaryEl) {
   apiUsageSummaryEl.addEventListener('click', () => {
-    settingsModalOverlay.style.display = 'flex';
-    loadApiKeys();
-    requestAnimationFrame(() => {
-      const target = document.getElementById('api-key-label-input');
-      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    });
+    window.open('/api-usage', '_blank');
   });
   loadApiUsageSummary();
 }
@@ -6436,6 +6431,101 @@ def api_keys_list():
     if not _require_owner():
         return jsonify({"error": "Only the account owner can manage API keys."}), 403
     return jsonify({"keys": list_api_keys()})
+
+def _fmt_dt(iso_str):
+    if not iso_str:
+        return "Never"
+    try:
+        dt = datetime.datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return dt.strftime("%b %-d, %Y, %-I:%M %p")
+    except Exception:
+        return iso_str
+
+@app.route("/api-usage")
+@login_required
+def api_usage_page():
+    if not _require_owner():
+        return Response("<h1 style='font-family:sans-serif'>Only the account owner can view API usage.</h1>",
+                         mimetype="text/html; charset=utf-8"), 403
+
+    keys = list_api_keys()
+    total_calls = sum(k.get("request_count") or 0 for k in keys)
+    active_count = sum(1 for k in keys if k.get("active"))
+
+    rows = ""
+    for k in keys:
+        state = "ACTIVE" if k.get("active") else "REVOKED"
+        state_color = "#1a9e5c" if k.get("active") else "#c0392b"
+        rows += f"""
+        <div class="key-card">
+          <div class="key-top">
+            <div class="key-name">{k.get('label') or '(unnamed key)'}</div>
+            <div class="key-state" style="color:{state_color};border-color:{state_color};">{state}</div>
+          </div>
+          <div class="key-id">{k.get('key_prefix','')}</div>
+          <div class="key-stats">
+            <div class="stat">
+              <div class="stat-num">{k.get('request_count') or 0}</div>
+              <div class="stat-label">API calls</div>
+            </div>
+            <div class="stat">
+              <div class="stat-num small">{_fmt_dt(k.get('created_at'))}</div>
+              <div class="stat-label">Created</div>
+            </div>
+            <div class="stat">
+              <div class="stat-num small">{_fmt_dt(k.get('last_used_at'))}</div>
+              <div class="stat-label">Last used</div>
+            </div>
+          </div>
+        </div>"""
+
+    if not keys:
+        rows = "<div class='empty'>No API keys yet. Generate one from Settings → API Keys.</div>"
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Usage · Mythic AI</title>
+<style>
+  * {{ box-sizing:border-box; }}
+  body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+          background:#0f1115; color:#f2f2f2; margin:0; padding:32px 20px 60px; }}
+  .wrap {{ max-width:820px; margin:0 auto; }}
+  h1 {{ font-size:34px; margin:0 0 6px; }}
+  .sub {{ color:#9a9ea6; font-size:15px; margin-bottom:32px; }}
+  .totals {{ display:flex; gap:16px; margin-bottom:36px; flex-wrap:wrap; }}
+  .totals .box {{ flex:1; min-width:160px; background:#1a1d24; border:1px solid #2a2e37;
+                   border-radius:14px; padding:20px; text-align:center; }}
+  .totals .num {{ font-size:44px; font-weight:800; line-height:1.1; }}
+  .totals .label {{ font-size:13px; color:#9a9ea6; margin-top:6px; letter-spacing:.3px; text-transform:uppercase; }}
+  .key-card {{ background:#1a1d24; border:1px solid #2a2e37; border-radius:14px;
+               padding:20px 22px; margin-bottom:16px; }}
+  .key-top {{ display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }}
+  .key-name {{ font-size:22px; font-weight:700; }}
+  .key-state {{ font-size:11px; font-weight:700; letter-spacing:.5px; border:1px solid; border-radius:20px;
+                padding:3px 10px; }}
+  .key-id {{ font-family:monospace; color:#9a9ea6; font-size:13px; margin:6px 0 18px; }}
+  .key-stats {{ display:flex; gap:24px; flex-wrap:wrap; }}
+  .stat-num {{ font-size:38px; font-weight:800; }}
+  .stat-num.small {{ font-size:16px; font-weight:600; }}
+  .stat-label {{ font-size:12px; color:#9a9ea6; margin-top:4px; text-transform:uppercase; letter-spacing:.3px; }}
+  .empty {{ color:#9a9ea6; font-size:16px; padding:40px 0; text-align:center; }}
+  a.back {{ color:#9a9ea6; text-decoration:none; font-size:14px; display:inline-block; margin-bottom:20px; }}
+  a.back:hover {{ color:#fff; }}
+</style></head>
+<body>
+  <div class="wrap">
+    <a class="back" href="/">← Back to chat</a>
+    <h1>API Usage</h1>
+    <div class="sub">Mythic AI · API keys and call activity</div>
+    <div class="totals">
+      <div class="box"><div class="num">{active_count}</div><div class="label">Active Keys</div></div>
+      <div class="box"><div class="num">{total_calls}</div><div class="label">Total Calls</div></div>
+      <div class="box"><div class="num">{len(keys)}</div><div class="label">Total Keys</div></div>
+    </div>
+    {rows}
+  </div>
+</body></html>"""
+    return Response(html, mimetype="text/html; charset=utf-8")
 
 @app.route("/api/keys", methods=["POST"])
 @login_required
