@@ -2402,6 +2402,44 @@ PAGE = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<div id="api-usage-overlay" style="display:none;position:fixed;inset:0;background:#0f1115;color:#f2f2f2;z-index:200;overflow-y:auto;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <div style="max-width:1000px;margin:0 auto;padding:32px 24px 60px;">
+    <button id="api-usage-close-btn" style="background:none;border:none;color:#9a9ea6;font-size:14px;cursor:pointer;padding:0;margin-bottom:20px;font-family:inherit;">← Back to chat</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px;margin-bottom:8px;">
+      <div>
+        <h1 style="font-size:30px;margin:0 0 6px;">API keys</h1>
+        <div style="color:#9a9ea6;font-size:14px;margin-bottom:30px;max-width:560px;line-height:1.5;">Create and manage API keys for authenticating requests to Mythic AI. These keys allow programmatic access to your app.</div>
+      </div>
+      <button id="api-usage-gen-btn" style="background:#e8532a;color:#fff;border:none;border-radius:8px;padding:11px 18px;font-size:13px;font-weight:700;letter-spacing:.3px;cursor:pointer;white-space:nowrap;">GENERATE API KEY</button>
+    </div>
+    <div id="api-usage-totals" style="display:flex;gap:16px;margin-bottom:30px;flex-wrap:wrap;"></div>
+    <table style="width:100%;border-collapse:collapse;background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;overflow:hidden;">
+      <thead><tr>
+        <th style="text-align:left;font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:#9a9ea6;padding:14px 16px;border-bottom:1px solid #2a2e37;">Name</th>
+        <th style="text-align:left;font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:#9a9ea6;padding:14px 16px;border-bottom:1px solid #2a2e37;">API Key</th>
+        <th style="text-align:left;font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:#9a9ea6;padding:14px 16px;border-bottom:1px solid #2a2e37;">Created At</th>
+        <th style="text-align:left;font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:#9a9ea6;padding:14px 16px;border-bottom:1px solid #2a2e37;">Calls</th>
+        <th style="text-align:left;font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:#9a9ea6;padding:14px 16px;border-bottom:1px solid #2a2e37;">State</th>
+        <th style="text-align:left;font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:#9a9ea6;padding:14px 16px;border-bottom:1px solid #2a2e37;">Options</th>
+      </tr></thead>
+      <tbody id="api-usage-tbody"></tbody>
+    </table>
+    <div id="api-usage-empty" style="display:none;color:#9a9ea6;font-size:15px;padding:50px 0;text-align:center;">No API keys yet. Click "Generate API Key" to create one.</div>
+  </div>
+
+  <div id="api-usage-create-overlay" style="display:none;position:fixed;inset:0;background:#000a;align-items:center;justify-content:center;z-index:210;">
+    <div style="background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:26px;width:min(90vw,420px);">
+      <h3 style="margin:0 0 14px;font-size:18px;">Generate API key</h3>
+      <input type="text" id="api-usage-create-label" placeholder="Key name (optional)" maxlength="100" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid #3a3e47;background:#0f1115;color:#fff;font-size:14px;margin-bottom:14px;">
+      <div id="api-usage-new-key-result"></div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;">
+        <button id="api-usage-create-close-btn" style="border-radius:8px;padding:9px 16px;font-size:13px;cursor:pointer;border:none;background:#2a2e37;color:#f2f2f2;">Close</button>
+        <button id="api-usage-create-confirm-btn" style="border-radius:8px;padding:9px 16px;font-size:13px;cursor:pointer;border:none;background:#e8532a;color:#fff;font-weight:700;">Generate</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="settings-modal-overlay">
   <div id="settings-modal">
     <h3>Settings</h3>
@@ -3889,10 +3927,141 @@ async function loadApiUsageSummary() {
 
 if (apiUsageSummaryEl) {
   apiUsageSummaryEl.addEventListener('click', () => {
-    window.open('/api-usage', '_blank');
+    openApiUsageOverlay();
   });
   loadApiUsageSummary();
 }
+
+// ─── API usage full dashboard (in-page overlay, no page navigation) ─────────
+const apiUsageOverlayEl = document.getElementById('api-usage-overlay');
+const apiUsageTotalsEl  = document.getElementById('api-usage-totals');
+const apiUsageTbodyEl   = document.getElementById('api-usage-tbody');
+const apiUsageEmptyEl   = document.getElementById('api-usage-empty');
+const apiUsageCloseBtn  = document.getElementById('api-usage-close-btn');
+const apiUsageGenBtn    = document.getElementById('api-usage-gen-btn');
+const apiUsageCreateOverlayEl = document.getElementById('api-usage-create-overlay');
+const apiUsageCreateLabelEl   = document.getElementById('api-usage-create-label');
+const apiUsageNewKeyResultEl  = document.getElementById('api-usage-new-key-result');
+const apiUsageCreateCloseBtn   = document.getElementById('api-usage-create-close-btn');
+const apiUsageCreateConfirmBtn = document.getElementById('api-usage-create-confirm-btn');
+
+function fmtApiUsageDate(iso) {
+  if (!iso) return 'Never';
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+async function refreshApiUsageOverlay() {
+  if (!apiUsageOverlayEl) return;
+  try {
+    const res = await fetch('/api/keys');
+    if (res.status === 403) {
+      apiUsageTotalsEl.innerHTML = '';
+      apiUsageTbodyEl.innerHTML = '';
+      apiUsageEmptyEl.style.display = 'block';
+      apiUsageEmptyEl.textContent = 'Only the account owner can view API keys.';
+      return;
+    }
+    const data = await res.json();
+    const keys = data.keys || [];
+    const activeCount = keys.filter(k => k.active).length;
+    const totalCalls = keys.reduce((s, k) => s + (k.request_count || 0), 0);
+
+    apiUsageTotalsEl.innerHTML = `
+      <div style="flex:1;min-width:150px;background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:18px;text-align:center;">
+        <div style="font-size:40px;font-weight:800;line-height:1.1;">${activeCount}</div>
+        <div style="font-size:12px;color:#9a9ea6;margin-top:6px;letter-spacing:.3px;text-transform:uppercase;">Active Keys</div>
+      </div>
+      <div style="flex:1;min-width:150px;background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:18px;text-align:center;">
+        <div style="font-size:40px;font-weight:800;line-height:1.1;">${totalCalls}</div>
+        <div style="font-size:12px;color:#9a9ea6;margin-top:6px;letter-spacing:.3px;text-transform:uppercase;">Total Calls</div>
+      </div>
+      <div style="flex:1;min-width:150px;background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:18px;text-align:center;">
+        <div style="font-size:40px;font-weight:800;line-height:1.1;">${keys.length}</div>
+        <div style="font-size:12px;color:#9a9ea6;margin-top:6px;letter-spacing:.3px;text-transform:uppercase;">Total Keys</div>
+      </div>`;
+
+    if (!keys.length) {
+      apiUsageTbodyEl.innerHTML = '';
+      apiUsageEmptyEl.style.display = 'block';
+      apiUsageEmptyEl.textContent = 'No API keys yet. Click "Generate API Key" to create one.';
+      return;
+    }
+    apiUsageEmptyEl.style.display = 'none';
+
+    apiUsageTbodyEl.innerHTML = keys.map(k => `
+      <tr>
+        <td style="padding:16px;border-bottom:1px solid #22252c;font-size:14px;font-weight:700;">${(k.label || '(unnamed key)').replace(/</g,'&lt;')}</td>
+        <td style="padding:16px;border-bottom:1px solid #22252c;font-size:14px;font-family:monospace;color:#c7cad1;">${k.key_prefix || ''}</td>
+        <td style="padding:16px;border-bottom:1px solid #22252c;font-size:14px;">${fmtApiUsageDate(k.created_at)}</td>
+        <td style="padding:16px;border-bottom:1px solid #22252c;font-size:18px;font-weight:700;">${k.request_count || 0}</td>
+        <td style="padding:16px;border-bottom:1px solid #22252c;font-size:14px;">
+          <span style="font-size:11px;font-weight:700;letter-spacing:.4px;border:1px solid;border-radius:20px;padding:3px 10px;color:${k.active ? '#1a9e5c' : '#c0392b'};border-color:${k.active ? '#1a9e5c' : '#c0392b'};">${k.active ? 'ACTIVE' : 'REVOKED'}</span>
+        </td>
+        <td style="padding:16px;border-bottom:1px solid #22252c;font-size:14px;">
+          ${k.active ? `<button class="api-usage-revoke-btn" data-id="${k.id}" style="background:none;border:1px solid #3a3e47;color:#c0392b;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;">Revoke</button>` : '—'}
+        </td>
+      </tr>`).join('');
+
+    apiUsageTbodyEl.querySelectorAll('.api-usage-revoke-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('Revoke this key? Apps using it will stop working immediately.')) return;
+        await fetch('/api/keys/' + btn.dataset.id, { method: 'DELETE' });
+        refreshApiUsageOverlay();
+        loadApiUsageSummary();
+      });
+    });
+  } catch (e) {
+    console.warn('Could not load API usage:', e);
+  }
+}
+
+function openApiUsageOverlay() {
+  if (!apiUsageOverlayEl) return;
+  apiUsageOverlayEl.style.display = 'block';
+  refreshApiUsageOverlay();
+}
+function closeApiUsageOverlay() {
+  if (apiUsageOverlayEl) apiUsageOverlayEl.style.display = 'none';
+}
+if (apiUsageCloseBtn) apiUsageCloseBtn.addEventListener('click', closeApiUsageOverlay);
+
+if (apiUsageGenBtn) apiUsageGenBtn.addEventListener('click', () => {
+  apiUsageCreateLabelEl.value = '';
+  apiUsageNewKeyResultEl.innerHTML = '';
+  apiUsageCreateOverlayEl.style.display = 'flex';
+});
+if (apiUsageCreateCloseBtn) apiUsageCreateCloseBtn.addEventListener('click', () => {
+  apiUsageCreateOverlayEl.style.display = 'none';
+  refreshApiUsageOverlay();
+  loadApiUsageSummary();
+});
+if (apiUsageCreateConfirmBtn) apiUsageCreateConfirmBtn.addEventListener('click', async () => {
+  const label = apiUsageCreateLabelEl.value.trim();
+  apiUsageCreateConfirmBtn.disabled = true;
+  try {
+    const res = await fetch('/api/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+    });
+    const data = await res.json();
+    if (data.api_key) {
+      apiUsageNewKeyResultEl.innerHTML =
+        '<div style="background:#0f1115;border:1px solid #1a9e5c;border-radius:8px;padding:12px;margin-bottom:14px;font-family:monospace;font-size:13px;word-break:break-all;color:#7be3ab;">' + data.api_key + '</div>' +
+        '<div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again.</div>';
+      refreshApiUsageOverlay();
+      loadApiUsageSummary();
+    } else if (data.error) {
+      alert(data.error);
+    }
+  } catch (e) {
+    alert('Could not create key.');
+  } finally {
+    apiUsageCreateConfirmBtn.disabled = false;
+  }
+});
 
 if (apiKeyCreateBtn) {
   apiKeyCreateBtn.addEventListener('click', async () => {
@@ -3935,7 +4104,7 @@ settingsBtn.addEventListener('click', () => { settingsModalOverlay.style.display
 
 const apiKeysShortcutBtn = document.getElementById('api-keys-shortcut-btn');
 if (apiKeysShortcutBtn) apiKeysShortcutBtn.addEventListener('click', () => {
-  window.open('/api-usage', '_blank');
+  openApiUsageOverlay();
 });
 settingsCloseBtn.addEventListener('click', () => { saveSettings(); settingsModalOverlay.style.display = 'none'; });
 settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsModalOverlay) { saveSettings(); settingsModalOverlay.style.display = 'none'; } });
