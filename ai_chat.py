@@ -3056,8 +3056,16 @@ async function loadConversationList() {
   } catch { return []; }
 }
 
-async function openConversation(convId) {
+async function openConversation(convId, opts) {
   activeConvId = convId;
+  // Reflect the open chat in the address bar (?c=<id>) so the URL at the
+  // top actually changes per-chat, refreshing the page reopens the same
+  // chat, and the browser Back/Forward buttons move between chats.
+  // opts.updateUrl=false is used when we're reacting to a popstate event
+  // (the URL already matches — pushing again would break Back/Forward).
+  if (!opts || opts.updateUrl !== false) {
+    try { history.pushState({ conv: convId }, '', '?c=' + encodeURIComponent(convId)); } catch {}
+  }
   try {
     const r = await fetch('/api/conversations/' + convId);
     if (!r.ok) return;
@@ -3070,13 +3078,23 @@ async function openConversation(convId) {
   if (isMobile()) closeSidebar();
 }
 
-function startNewChat() {
+function startNewChat(opts) {
   activeConvId = null;
   messagesEl.innerHTML = '';
   showEmptyState();
   loadConversationList();
   refreshShareBtnState();
+  if (!opts || opts.updateUrl !== false) {
+    try { history.pushState({}, '', location.pathname); } catch {}
+  }
 }
+
+// Keep the address bar in sync with Back/Forward navigation between chats.
+window.addEventListener('popstate', () => {
+  const id = new URLSearchParams(location.search).get('c');
+  if (id) openConversation(id, { updateUrl: false });
+  else startNewChat({ updateUrl: false });
+});
 
 async function refreshShareBtnState() {
   const btn = document.getElementById('share-btn');
@@ -4211,12 +4229,18 @@ form.addEventListener('submit', async () => {
 
   // If we were redirected here from a "Continue this conversation" share
   // link (see SHARE_PAGE), open that freshly-forked conversation instead
-  // of the usual blank New Chat screen.
+  // of the usual blank New Chat screen. Also support a plain "?c=<id>"
+  // link/refresh/bookmark — this is the id openConversation() itself now
+  // puts in the address bar, so refreshing or sharing that URL reopens
+  // the same chat instead of always landing on a blank screen.
   const params = new URLSearchParams(location.search);
-  const openId = params.get('open');
+  const openId = params.get('open') || params.get('c');
   if (openId) {
-    history.replaceState(null, '', location.pathname);  // scrub ?open= from the URL bar
-    await openConversation(openId);
+    // Normalize the URL to ?c=<id> and open without pushing a duplicate
+    // history entry (replaceState keeps Back from bouncing between the
+    // raw ?open= link and the normalized ?c= one).
+    history.replaceState({ conv: openId }, '', '?c=' + encodeURIComponent(openId));
+    await openConversation(openId, { updateUrl: false });
   } else {
     // Always start on a fresh New Chat screen otherwise, rather than
     // auto-reopening the last conversation — the sidebar list is still
