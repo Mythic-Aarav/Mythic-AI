@@ -1706,7 +1706,11 @@ PAGE = r"""<!DOCTYPE html>
   #share-link-row { display:flex; gap:8px; margin-bottom:14px; }
   #share-link-input { flex:1; min-width:0; padding:9px 12px; border-radius:8px;
     border:1.5px solid var(--border); background:var(--panel); color:var(--text);
-    font-size:12.5px; outline:none; }
+    font-size:12.5px; outline:none; text-overflow:ellipsis; }
+  #share-link-input:focus { border-color:var(--accent); }
+  #share-open-btn { background:var(--panel); border:1px solid var(--border); color:var(--muted);
+    border-radius:8px; padding:0 12px; font-size:14px; cursor:pointer; flex-shrink:0; }
+  #share-open-btn:hover { border-color:var(--accent); color:var(--accent); }
   #share-copy-btn { background:var(--accent); color:#fff; border:none; border-radius:8px;
     padding:0 14px; font-size:12.5px; font-weight:700; cursor:pointer; flex-shrink:0; }
   #share-copy-btn:hover { opacity:.9; }
@@ -2127,9 +2131,10 @@ PAGE = r"""<!DOCTYPE html>
 <div id="share-modal-overlay">
   <div id="share-modal">
     <h3>🔗 Share this chat</h3>
-    <p class="sub">Anyone with this link can view a read-only copy of this conversation — they won't see any of your other chats.</p>
+    <p class="sub">Anyone with this link can view a read-only copy of this conversation and continue it as their own — they won't see any of your other chats.</p>
     <div id="share-link-row">
       <input type="text" id="share-link-input" readonly>
+      <button id="share-open-btn" type="button" title="Open in a new tab">↗</button>
       <button id="share-copy-btn" type="button">Copy</button>
     </div>
     <button id="share-native-btn" type="button">📤 Share via…</button>
@@ -3353,6 +3358,7 @@ exportBtn.addEventListener('click', async () => {
 const shareBtn          = document.getElementById('share-btn');
 const shareModalOverlay = document.getElementById('share-modal-overlay');
 const shareLinkInput    = document.getElementById('share-link-input');
+const shareOpenBtn      = document.getElementById('share-open-btn');
 const shareCopyBtn      = document.getElementById('share-copy-btn');
 const shareNativeBtn    = document.getElementById('share-native-btn');
 const shareRevokeBtn    = document.getElementById('share-revoke-btn');
@@ -3365,6 +3371,7 @@ async function openShareModalFor(convId) {
   if (!convId) { alert('Start or open a chat first.'); return; }
   shareStatusEl.textContent = 'Creating link…';
   shareLinkInput.value = '';
+  shareLinkInput.title = '';
   shareModalOverlay.classList.add('show');
   try {
     const r = await fetch('/api/conversations/' + convId + '/share', { method: 'POST' });
@@ -3374,9 +3381,14 @@ async function openShareModalFor(convId) {
       return;
     }
     shareLinkInput.value = d.share_url;
+    shareLinkInput.title = d.share_url;   // hover to see the full link if it's truncated
     shareLinkInput.dataset.convId = convId;
-    shareStatusEl.textContent = 'Anyone with this link can view this chat.';
+    shareStatusEl.textContent = 'Anyone with this link can view this chat. Note: this link only ' +
+      'works once the app is deployed at a real public URL — not on localhost.';
     shareBtn.classList.add('active');
+    // Auto-select so the full link is easy to see/copy, and so pressing
+    // Ctrl/Cmd+C right away just works without clicking Copy first.
+    requestAnimationFrame(() => { shareLinkInput.focus(); shareLinkInput.select(); });
   } catch (err) {
     shareStatusEl.textContent = 'Network error: ' + err.message;
   }
@@ -3385,6 +3397,10 @@ async function openShareModalFor(convId) {
 if (shareBtn) shareBtn.addEventListener('click', () => openShareModalFor(activeConvId));
 if (shareCloseBtn) shareCloseBtn.addEventListener('click', closeShareModal);
 if (shareModalOverlay) shareModalOverlay.addEventListener('click', e => { if (e.target === shareModalOverlay) closeShareModal(); });
+if (shareLinkInput) shareLinkInput.addEventListener('click', () => shareLinkInput.select());
+if (shareOpenBtn) shareOpenBtn.addEventListener('click', () => {
+  if (shareLinkInput.value) window.open(shareLinkInput.value, '_blank', 'noopener');
+});
 
 if (shareCopyBtn) shareCopyBtn.addEventListener('click', async () => {
   if (!shareLinkInput.value) return;
@@ -4191,10 +4207,23 @@ form.addEventListener('submit', async () => {
 });
 
 (async () => {
-  // Always start on a fresh New Chat screen rather than auto-reopening the
-  // last conversation — the sidebar list is still populated underneath.
   await loadConversationList();
-  showEmptyState();
+
+  // If we were redirected here from a "Continue this conversation" share
+  // link (see SHARE_PAGE), open that freshly-forked conversation instead
+  // of the usual blank New Chat screen.
+  const params = new URLSearchParams(location.search);
+  const openId = params.get('open');
+  if (openId) {
+    history.replaceState(null, '', location.pathname);  // scrub ?open= from the URL bar
+    await openConversation(openId);
+  } else {
+    // Always start on a fresh New Chat screen otherwise, rather than
+    // auto-reopening the last conversation — the sidebar list is still
+    // populated underneath.
+    showEmptyState();
+  }
+
   // Silently remove stray internal-tooling conversations (old follow-up-
   // suggestion / instruction-prefix leaks) in the background, no button
   // or confirmation needed — safe because it only ever matches those very
@@ -5323,11 +5352,18 @@ SHARE_PAGE = r"""<!DOCTYPE html>
   .msg-row.user .msg { background:var(--user-bubble); border-bottom-right-radius:4px; }
   .msg-row.ai .msg { background:var(--ai-bubble); border-bottom-left-radius:4px; }
   #state { text-align:center; color:var(--muted); padding:60px 20px; font-size:14px; }
-  #footer-cta { text-align:center; padding:28px 20px 40px; color:var(--muted); font-size:13px; }
+  #footer-cta { text-align:center; padding:14px 20px 40px; color:var(--muted); font-size:13px; }
   #footer-cta a { color:var(--accent); text-decoration:none; font-weight:600; }
   code { background:var(--panel); padding:1px 5px; border-radius:4px; font-size:.92em; }
   pre { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:10px 12px;
     overflow-x:auto; margin:8px 0; }
+  #continue-bar { max-width:760px; margin:0 auto; padding:0 20px 20px; }
+  #continue-btn { display:flex; align-items:center; justify-content:center; gap:8px; width:100%;
+    background:var(--accent); color:#fff; border:none; border-radius:12px; padding:13px;
+    font-size:14px; font-weight:700; cursor:pointer; font-family:inherit; }
+  #continue-btn:hover { opacity:.92; }
+  #continue-btn:disabled { opacity:.6; cursor:default; }
+  #continue-error { max-width:760px; margin:0 auto; padding:0 20px 12px; color:#ef4444; font-size:12.5px; display:none; }
 </style>
 </head>
 <body>
@@ -5347,6 +5383,15 @@ SHARE_PAGE = r"""<!DOCTYPE html>
   <div id="messages"></div>
   <div id="state" style="display:none;"></div>
 </div>
+<div id="continue-error"></div>
+<div id="continue-bar" style="display:none;">
+  <button id="continue-btn" type="button">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </svg>
+    Continue this conversation
+  </button>
+</div>
 <div id="footer-cta">Want a conversation like this? <a href="/">Try Mythic AI</a></div>
 <script>
 function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -5359,8 +5404,8 @@ function renderInline(text) {
   html = html.replace(/\n/g, '<br>');
   return html;
 }
+const shareId = location.pathname.split('/').filter(Boolean).pop();
 (async () => {
-  const shareId = location.pathname.split('/').filter(Boolean).pop();
   const stateEl = document.getElementById('state');
   try {
     const r = await fetch('/api/share/' + encodeURIComponent(shareId));
@@ -5385,12 +5430,42 @@ function renderInline(text) {
     if (!(d.messages || []).length) {
       stateEl.textContent = 'This chat has no messages yet.';
       stateEl.style.display = 'block';
+    } else {
+      document.getElementById('continue-bar').style.display = 'block';
     }
   } catch (e) {
     stateEl.textContent = 'Network error loading this shared chat.';
     stateEl.style.display = 'block';
   }
 })();
+
+const continueBtn = document.getElementById('continue-btn');
+const continueErr = document.getElementById('continue-error');
+continueBtn.addEventListener('click', async () => {
+  continueErr.style.display = 'none';
+  continueBtn.disabled = true;
+  const origHTML = continueBtn.innerHTML;
+  continueBtn.textContent = 'Setting up your copy…';
+  try {
+    const r = await fetch('/api/share/' + encodeURIComponent(shareId) + '/continue', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok || d.error || !d.conversation_id) {
+      continueErr.textContent = d.error || 'Could not continue this chat right now.';
+      continueErr.style.display = 'block';
+      continueBtn.disabled = false;
+      continueBtn.innerHTML = origHTML;
+      return;
+    }
+    // This becomes the visitor's OWN private, editable copy — the
+    // original owner's conversation is never touched.
+    location.href = '/?open=' + encodeURIComponent(d.conversation_id);
+  } catch (e) {
+    continueErr.textContent = 'Network error: ' + e.message;
+    continueErr.style.display = 'block';
+    continueBtn.disabled = false;
+    continueBtn.innerHTML = origHTML;
+  }
+});
 </script>
 </body>
 </html>
@@ -5846,11 +5921,42 @@ def api_public_share(share_id):
     return jsonify({"title": conv.get("title", "Shared chat"), "messages": simplified})
 
 
+@app.route("/api/share/<share_id>/continue", methods=["POST"])
+@login_required
+def api_continue_shared_chat(share_id):
+    """Lets a visitor fork their own private, editable copy of a shared
+    conversation so they can keep chatting. This NEVER touches the original
+    owner's conversation — it copies the messages into a brand-new
+    conversation under the visitor's own (anonymous, cookie-based) session,
+    same as the existing "Duplicate" feature."""
+    ref = resolve_share_link(share_id)
+    if not ref:
+        return jsonify({"error": "This share link is invalid or has been revoked."}), 404
+    source_conv = load_conversation(ref["username"], ref["conv_id"])
+    if source_conv is None:
+        return jsonify({"error": "This shared chat is no longer available."}), 404
+
+    visitor_username = current_username()
+    new_id = str(uuid.uuid4())
+    new_conv = {
+        "title": (source_conv.get("title") or "Shared chat").strip(),
+        "title_is_custom": True,
+        "messages": json.loads(json.dumps(source_conv.get("messages", []))),  # deep copy
+        "folder": None,
+        "pinned": False,
+        "archived": False,
+    }
+    save_conversation(visitor_username, new_id, new_conv)
+    return jsonify({"status": "forked", "conversation_id": new_id})
+
+
 @app.route("/share/<share_id>")
 def public_share_page(share_id):
     """Public, unauthenticated read-only page rendering a shared chat —
-    intentionally a separate, minimal template with no composer, no
-    sidebar, and no access to the viewer's own conversations."""
+    intentionally a separate, minimal template with no sidebar and no
+    access to the viewer's own conversations. It does offer a "Continue
+    this conversation" action, which forks a private copy for the visitor
+    (see api_continue_shared_chat) rather than editing the original."""
     return Response(SHARE_PAGE, mimetype="text/html; charset=utf-8")
 
 
