@@ -317,6 +317,21 @@ SYSTEM_PROMPT = (
 
 app = Flask(__name__)
 
+# --- Explicit session cookie config -------------------------------------------
+# Without these, Flask falls back to defaults that can behave inconsistently
+# across browsers/proxies (Render sits behind a proxy that terminates HTTPS,
+# so we need SESSION_COOKIE_SECURE=True but the app itself sees plain HTTP —
+# that's fine, the browser still only sends it over https). Setting these
+# explicitly avoids the "works in one browser, silently empty in another"
+# class of bug caused by a cookie getting dropped or expiring sooner than
+# expected.
+app.config.update(
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=True,       # only sent over https (Render is https)
+    SESSION_COOKIE_HTTPONLY=True,
+    PERMANENT_SESSION_LIFETIME=datetime.timedelta(days=365),
+)
+
 
 # ── Reasoning/task modes — pure prompt-engineering, no extra APIs needed ────
 # Selected client-side and sent as `mode` with each /api/chat call; appended
@@ -520,10 +535,29 @@ def sb(path):
 # --- User accounts (Supabase: users table) -----------------------------------
 
 def current_username():
-    """Each visitor gets a unique anonymous ID stored in their browser cookie.
-    No login required — conversations are private per browser session."""
+    """Each visitor gets a unique anonymous ID, normally stored in their
+    browser session cookie. No login required — conversations are private
+    per browser/device.
+
+    Resilience: the frontend also keeps a copy of this id in localStorage
+    and sends it as the X-Client-Id header on every /api/ request. If the
+    session cookie ever gets dropped (cookie banner blocking, a browser
+    setting, an intermediate proxy stripping it, etc.) but localStorage
+    still has the id, we reseed the session from that header instead of
+    silently generating a brand new random user and "losing" the chat
+    history. A client-supplied id is only accepted if it looks like a
+    valid UUID, so this can't be abused to guess/hijack another user's id.
+    """
     if "user_id" not in session:
-        session["user_id"] = str(uuid.uuid4())
+        client_id = request.headers.get("X-Client-Id", "").strip()
+        if client_id:
+            try:
+                uuid.UUID(client_id)
+                session["user_id"] = client_id
+            except (ValueError, AttributeError):
+                session["user_id"] = str(uuid.uuid4())
+        else:
+            session["user_id"] = str(uuid.uuid4())
         session.permanent = True
     return session["user_id"]
 
@@ -706,6 +740,49 @@ def get_or_create_invite_code():
         except Exception as e:
             print(f"[invite] could not persist invite code to disk: {e}")
         return code
+
+# --- Owner account id ---------------------------------------------------------
+# The invite link is meant to share YOUR chat history with whoever opens it
+# (not give them their own empty account). So we need one fixed "owner"
+# user_id that anyone opening /invite/<code> gets logged into directly.
+# Persisted the same way as the invite code so it survives restarts/redeploys.
+_OWNER_ID_FILE = _os.path.join(_DATA_DIR, "owner_user_id.txt")
+_owner_id_lock = threading.Lock()
+
+def get_or_create_owner_id(preferred_id=None):
+    with _owner_id_lock:
+        if SUPABASE_URL:
+            try:
+                r = requests.get(sb("app_settings?key=eq.owner_user_id&select=value"),
+                                  headers=sb_headers(), timeout=10)
+                if r.status_code == 200 and r.json():
+                    return r.json()[0]["value"]
+            except Exception as e:
+                print(f"[owner] Supabase read failed: {e} — falling back to local file.")
+        if _os.path.exists(_OWNER_ID_FILE):
+            try:
+                with open(_OWNER_ID_FILE, encoding="utf-8") as f:
+                    oid = f.read().strip()
+                    if oid:
+                        return oid
+            except Exception:
+                pass
+        # First time this is ever called: prefer adopting the caller's
+        # existing session id (so their real chat history becomes the
+        # shared "owner" history) rather than minting a brand new empty one.
+        oid = preferred_id if preferred_id else str(uuid.uuid4())
+        if SUPABASE_URL:
+            try:
+                requests.post(sb("app_settings"), headers=sb_headers(),
+                              json={"key": "owner_user_id", "value": oid}, timeout=10)
+            except Exception as e:
+                print(f"[owner] Supabase write failed: {e} — falling back to local file.")
+        try:
+            with open(_OWNER_ID_FILE, "w", encoding="utf-8") as f:
+                f.write(oid)
+        except Exception as e:
+            print(f"[owner] could not persist owner id to disk: {e}")
+        return oid
 
 def _conv_file(username, conv_id):
     return _os.path.join(_user_conv_dir(username), f"{conv_id}.json")
@@ -2560,6 +2637,38 @@ button {
 </div>
 
 <script>
+// ─── Resilient identity: keep a copy of our anonymous id outside the cookie ──
+// If the session cookie ever fails to persist in a given browser (blocked,
+// stripped by a proxy, cleared, etc.), this localStorage id lets the server
+// reseed the same account instead of silently starting a fresh empty one.
+(function () {
+  try {
+    let cid = localStorage.getItem('mythic_client_id');
+    if (!cid) {
+      cid = (crypto.randomUUID ? crypto.randomUUID() :
+        'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+          const r = Math.random() * 16 | 0;
+          return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+        }));
+      localStorage.setItem('mythic_client_id', cid);
+    }
+    const _origFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (url.startsWith('/api/')) {
+        init = init || {};
+        init.headers = new Headers(init.headers || {});
+        init.headers.set('X-Client-Id', cid);
+      }
+      return _origFetch(input, init);
+    };
+  } catch (e) {
+    // localStorage unavailable (rare, e.g. some locked-down browser modes) —
+    // app still works, just without the cookie-loss fallback.
+    console.warn('Client-id resilience layer unavailable:', e);
+  }
+})();
+
 function _setAppHeight() {
   const h = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
   document.documentElement.style.setProperty('--app-height', h + 'px');
@@ -6028,16 +6137,24 @@ def index():
 @login_required
 def api_invite_link():
     code = get_or_create_invite_code()
+    # Adopt the caller's own existing user_id as the "owner" account the
+    # first time this is ever called, so it's YOUR real chat history that
+    # gets shared via the link — not a fresh empty account.
+    get_or_create_owner_id(preferred_id=current_username())
     return jsonify({"invite_url": request.host_url.rstrip("/") + "/invite/" + code})
 
 
 @app.route("/invite/<code>")
 def invite_landing(code):
-    # The code isn't checked against the stored one on purpose: this app has
-    # no login/accounts, so there's no "wrong" invite code to reject — every
-    # visitor already gets their own private, anonymous conversation via
-    # current_username(). This route exists purely so the link looks and
-    # behaves like a real generated share link instead of the bare domain.
+    # Anyone opening this link gets logged into the OWNER's account, so they
+    # see and can add to the same chat history — this is an intentional
+    # shared-account link, not a per-visitor anonymous session like the bare
+    # domain gives. The code itself isn't checked against anything (there's
+    # no per-invite access control here) — treat this link as equivalent to
+    # sharing your password, and only send it to people you trust with full
+    # access to your chats.
+    session["user_id"] = get_or_create_owner_id()
+    session.permanent = True
     return Response(PAGE, mimetype="text/html; charset=utf-8")
 
 
