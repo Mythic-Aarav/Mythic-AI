@@ -716,6 +716,133 @@ def _delete_conversation_file(username, conv_id):
         _os.remove(path)
 
 
+# ── Public share links ────────────────────────────────────────────────────
+# A "share" maps a short public id -> (username, conv_id) so anyone with the
+# link can view a read-only copy of that one conversation at /share/<id>,
+# with no login and no access to the rest of that person's chats. Uses
+# Supabase (a `shares` table) when configured, else a local JSON index file
+# alongside the conversation JSON fallback.
+_SHARES_INDEX_FILE = _os.path.join(_DATA_DIR, "shares_index.json")
+_shares_lock = threading.Lock()
+
+
+def _load_shares_index():
+    try:
+        if _os.path.exists(_SHARES_INDEX_FILE):
+            with open(_SHARES_INDEX_FILE, encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_shares_index(data):
+    try:
+        with open(_SHARES_INDEX_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"[shares] failed to save shares index: {e}")
+
+
+def get_active_share_id(username, conv_id):
+    """Returns the existing active (non-revoked) share id for this
+    conversation, or None if it has never been shared / was revoked."""
+    if SUPABASE_URL:
+        try:
+            r = requests.get(
+                sb(f"shares?username=eq.{username}&conv_id=eq.{conv_id}&revoked=eq.false&select=id"),
+                headers=sb_headers(), timeout=10,
+            )
+            if r.status_code == 200 and r.json():
+                return r.json()[0]["id"]
+        except Exception as e:
+            print(f"[Supabase] get_active_share_id exception: {e}")
+        return None
+    with _shares_lock:
+        idx = _load_shares_index()
+    for sid, rec in idx.items():
+        if rec.get("username") == username and rec.get("conv_id") == conv_id and not rec.get("revoked"):
+            return sid
+    return None
+
+
+def create_share_link(username, conv_id):
+    """Creates (or reuses, if one is already active) a public share id for
+    conv_id owned by username. Returns the share_id string."""
+    existing = get_active_share_id(username, conv_id)
+    if existing:
+        return existing
+
+    share_id = uuid.uuid4().hex[:12]
+    if SUPABASE_URL:
+        try:
+            r = requests.post(
+                sb("shares"),
+                headers={**sb_headers(), "Prefer": "return=minimal"},
+                json={"id": share_id, "username": username, "conv_id": conv_id,
+                      "revoked": False, "created_at": time.time()},
+                timeout=10,
+            )
+            if r.status_code not in (200, 201, 204):
+                print(f"[Supabase] create_share_link failed: HTTP {r.status_code} — {r.text[:300]}")
+        except Exception as e:
+            print(f"[Supabase] create_share_link exception: {e}")
+        return share_id
+
+    with _shares_lock:
+        idx = _load_shares_index()
+        idx[share_id] = {"username": username, "conv_id": conv_id,
+                          "revoked": False, "created_at": time.time()}
+        _save_shares_index(idx)
+    return share_id
+
+
+def resolve_share_link(share_id):
+    """Returns {"username":..., "conv_id":...} for an active (non-revoked)
+    share id, or None if it doesn't exist / has been revoked."""
+    if SUPABASE_URL:
+        try:
+            r = requests.get(
+                sb(f"shares?id=eq.{share_id}&select=username,conv_id,revoked"),
+                headers=sb_headers(), timeout=10,
+            )
+            if r.status_code == 200:
+                rows = r.json()
+                if rows and not rows[0].get("revoked"):
+                    return {"username": rows[0]["username"], "conv_id": rows[0]["conv_id"]}
+        except Exception as e:
+            print(f"[Supabase] resolve_share_link exception: {e}")
+        return None
+
+    idx = _load_shares_index()
+    rec = idx.get(share_id)
+    if rec and not rec.get("revoked"):
+        return {"username": rec["username"], "conv_id": rec["conv_id"]}
+    return None
+
+
+def revoke_share_link(username, conv_id):
+    """Revokes any active share link(s) for this conversation."""
+    if SUPABASE_URL:
+        try:
+            requests.patch(
+                sb(f"shares?username=eq.{username}&conv_id=eq.{conv_id}"),
+                headers=sb_headers(), json={"revoked": True}, timeout=10,
+            )
+        except Exception as e:
+            print(f"[Supabase] revoke_share_link exception: {e}")
+        return
+    with _shares_lock:
+        idx = _load_shares_index()
+        changed = False
+        for sid, rec in idx.items():
+            if rec.get("username") == username and rec.get("conv_id") == conv_id and not rec.get("revoked"):
+                rec["revoked"] = True
+                changed = True
+        if changed:
+            _save_shares_index(idx)
+
+
 def list_folders(username):
     """Distinct, non-empty folder names currently in use by this user's
     conversations, alphabetically sorted — used to populate the folder
@@ -1544,6 +1671,38 @@ PAGE = r"""<!DOCTYPE html>
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
   #export-btn:hover { background:var(--panel); }
+  #share-btn { background:none; border:1px solid var(--border); color:var(--muted);
+    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
+  #share-btn:hover { background:var(--panel); }
+  #share-btn.active { color:var(--accent); border-color:var(--accent); }
+
+  #share-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6);
+    z-index:250; align-items:center; justify-content:center; padding:16px; }
+  #share-modal-overlay.show { display:flex; }
+  #share-modal { background:var(--bg); border:1px solid var(--border); border-radius:14px;
+    padding:22px; width:100%; max-width:400px; box-shadow:0 10px 40px rgba(0,0,0,.3); }
+  #share-modal h3 { margin:0 0 4px; font-size:16px; }
+  #share-modal p.sub { margin:0 0 16px; font-size:12.5px; color:var(--muted); }
+  #share-link-row { display:flex; gap:8px; margin-bottom:14px; }
+  #share-link-input { flex:1; min-width:0; padding:9px 12px; border-radius:8px;
+    border:1.5px solid var(--border); background:var(--panel); color:var(--text);
+    font-size:12.5px; outline:none; }
+  #share-copy-btn { background:var(--accent); color:#fff; border:none; border-radius:8px;
+    padding:0 14px; font-size:12.5px; font-weight:700; cursor:pointer; flex-shrink:0; }
+  #share-copy-btn:hover { opacity:.9; }
+  #share-native-btn { width:100%; background:var(--panel); border:1px solid var(--border);
+    color:var(--text); border-radius:8px; padding:10px; font-size:13px; cursor:pointer;
+    font-family:inherit; margin-bottom:8px; }
+  #share-native-btn:hover { border-color:var(--accent); color:var(--accent); }
+  #share-revoke-btn { width:100%; background:none; border:1px solid var(--border);
+    color:#ef4444; border-radius:8px; padding:10px; font-size:12.5px; cursor:pointer;
+    font-family:inherit; margin-bottom:8px; }
+  #share-revoke-btn:hover { background:rgba(239,68,68,.08); }
+  #share-close-btn { width:100%; background:none; border:1px solid var(--border);
+    color:var(--muted); border-radius:8px; padding:10px; font-size:13px; cursor:pointer;
+    font-family:inherit; }
+  #share-status { font-size:11.5px; color:var(--muted); text-align:center; margin-top:2px; min-height:14px; }
   #vip-btn { background:none; border:1px solid var(--border); color:var(--muted);
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
@@ -1751,6 +1910,7 @@ PAGE = r"""<!DOCTYPE html>
     #name-btn { width:36px; height:36px; font-size:13px; }
     #settings-btn { width:36px; height:36px; font-size:13px; }
     #export-btn { width:36px; height:36px; font-size:13px; }
+    #share-btn { width:36px; height:36px; font-size:13px; }
     #vip-btn { width:36px; height:36px; font-size:13px; }
     #clear-btn { font-size:11px; padding:8px 10px; min-height:36px; }
     #speak-toggle { font-size:11px; padding:5px 8px; }
@@ -1820,6 +1980,7 @@ PAGE = r"""<!DOCTYPE html>
         </button>
         <button id="name-btn" title="What should Mythic AI call you?">🙂</button>
         <button id="settings-btn" title="Settings">⚙</button>
+        <button id="share-btn" title="Share this chat">🔗</button>
         <button id="export-btn" title="Export this chat">⬇</button>
         <button id="clear-btn">Delete chat</button>
       </div>
@@ -1941,6 +2102,21 @@ PAGE = r"""<!DOCTYPE html>
       <button id="name-cancel-btn" type="button">Cancel</button>
       <button id="name-save-btn" type="button">Save</button>
     </div>
+  </div>
+</div>
+
+<div id="share-modal-overlay">
+  <div id="share-modal">
+    <h3>🔗 Share this chat</h3>
+    <p class="sub">Anyone with this link can view a read-only copy of this conversation — they won't see any of your other chats.</p>
+    <div id="share-link-row">
+      <input type="text" id="share-link-input" readonly>
+      <button id="share-copy-btn" type="button">Copy</button>
+    </div>
+    <button id="share-native-btn" type="button">📤 Share via…</button>
+    <button id="share-revoke-btn" type="button">Stop sharing</button>
+    <button id="share-close-btn" type="button">Close</button>
+    <div id="share-status"></div>
   </div>
 </div>
 
@@ -2788,6 +2964,7 @@ function buildConvItem(c) {
           await fetch('/api/conversations/' + c.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: newTitle.trim() }) });
           loadConversationList();
         } },
+      { label: '🔗 Share link', action: () => openShareModalFor(c.id) },
       { label: (c.archived ? '📤 Unarchive' : '🗄 Archive'), action: async () => {
           await fetch('/api/conversations/' + c.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ archived: !c.archived }) });
           if (c.id === activeConvId) startNewChat(); else loadConversationList();
@@ -2865,6 +3042,7 @@ async function openConversation(convId) {
     (d.messages || []).forEach(m => addMessage(m.role, m.text, m.attachment));
     loadConversationList();
   } catch {}
+  refreshShareBtnState();
   if (isMobile()) closeSidebar();
 }
 
@@ -2873,6 +3051,18 @@ function startNewChat() {
   messagesEl.innerHTML = '';
   showEmptyState();
   loadConversationList();
+  refreshShareBtnState();
+}
+
+async function refreshShareBtnState() {
+  const btn = document.getElementById('share-btn');
+  if (!btn) return;
+  if (!activeConvId) { btn.classList.remove('active'); return; }
+  try {
+    const r = await fetch('/api/conversations/' + activeConvId + '/share');
+    const d = await r.json();
+    btn.classList.toggle('active', !!d.shared);
+  } catch { btn.classList.remove('active'); }
 }
 
 let isGenerating = false;
@@ -3137,6 +3327,78 @@ exportBtn.addEventListener('click', async () => {
     URL.revokeObjectURL(url);
   } catch (err) {
     alert('Export failed: ' + err.message);
+  }
+});
+
+// ─── Share link (per-chat, e.g. mythic-ai.app/share/abc123) ────────────────
+const shareBtn          = document.getElementById('share-btn');
+const shareModalOverlay = document.getElementById('share-modal-overlay');
+const shareLinkInput    = document.getElementById('share-link-input');
+const shareCopyBtn      = document.getElementById('share-copy-btn');
+const shareNativeBtn    = document.getElementById('share-native-btn');
+const shareRevokeBtn    = document.getElementById('share-revoke-btn');
+const shareCloseBtn     = document.getElementById('share-close-btn');
+const shareStatusEl     = document.getElementById('share-status');
+
+function closeShareModal() { shareModalOverlay.classList.remove('show'); }
+
+async function openShareModalFor(convId) {
+  if (!convId) { alert('Start or open a chat first.'); return; }
+  shareStatusEl.textContent = 'Creating link…';
+  shareLinkInput.value = '';
+  shareModalOverlay.classList.add('show');
+  try {
+    const r = await fetch('/api/conversations/' + convId + '/share', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok || !d.share_url) {
+      shareStatusEl.textContent = d.error || 'Could not create a share link.';
+      return;
+    }
+    shareLinkInput.value = d.share_url;
+    shareLinkInput.dataset.convId = convId;
+    shareStatusEl.textContent = 'Anyone with this link can view this chat.';
+    shareBtn.classList.add('active');
+  } catch (err) {
+    shareStatusEl.textContent = 'Network error: ' + err.message;
+  }
+}
+
+if (shareBtn) shareBtn.addEventListener('click', () => openShareModalFor(activeConvId));
+if (shareCloseBtn) shareCloseBtn.addEventListener('click', closeShareModal);
+if (shareModalOverlay) shareModalOverlay.addEventListener('click', e => { if (e.target === shareModalOverlay) closeShareModal(); });
+
+if (shareCopyBtn) shareCopyBtn.addEventListener('click', async () => {
+  if (!shareLinkInput.value) return;
+  try {
+    await navigator.clipboard.writeText(shareLinkInput.value);
+  } catch {
+    shareLinkInput.select();
+    try { document.execCommand('copy'); } catch {}
+  }
+  const orig = shareCopyBtn.textContent;
+  shareCopyBtn.textContent = '✓ Copied';
+  setTimeout(() => { shareCopyBtn.textContent = orig; }, 1400);
+});
+
+if (shareNativeBtn) shareNativeBtn.addEventListener('click', async () => {
+  if (!shareLinkInput.value) return;
+  if (navigator.share) {
+    try { await navigator.share({ title: 'Mythic AI chat', url: shareLinkInput.value }); return; }
+    catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  shareCopyBtn.click();
+});
+
+if (shareRevokeBtn) shareRevokeBtn.addEventListener('click', async () => {
+  const convId = shareLinkInput.dataset.convId;
+  if (!convId) { closeShareModal(); return; }
+  try {
+    await fetch('/api/conversations/' + convId + '/share', { method: 'DELETE' });
+    shareStatusEl.textContent = 'Sharing stopped — the old link no longer works.';
+    shareLinkInput.value = '';
+    shareBtn.classList.remove('active');
+  } catch (err) {
+    shareStatusEl.textContent = 'Network error: ' + err.message;
   }
 });
 
@@ -5002,6 +5264,110 @@ streamReply = async function(opts) {
 </html>
 """
 
+# ── Public, read-only "shared chat" page ──────────────────────────────────
+# Deliberately a separate, minimal template: no login, no sidebar, no
+# composer, no access to the viewer's own conversations — it only ever
+# fetches /api/share/<id>, which itself only ever returns the one shared
+# conversation's messages.
+SHARE_PAGE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
+<link rel="icon" type="image/png" href="/icon.png">
+<title>Shared chat · Mythic AI</title>
+<style>
+  :root { --bg:#1a1a1a; --panel:#2a2a2a; --border:#3a3a3a; --text:#ececec;
+    --muted:#8e8ea0; --accent:#10a37f; --user-bubble:#2a2a2a; --ai-bubble:#1a1a1a; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,
+    "Segoe UI",Inter,sans-serif; min-height:100vh; }
+  header { position:sticky; top:0; background:var(--bg); border-bottom:1px solid var(--border);
+    padding:14px 20px; display:flex; align-items:center; justify-content:space-between; gap:10px;
+    z-index:10; }
+  header .brand { font-weight:700; color:var(--accent); font-variant:small-caps; letter-spacing:.5px; }
+  header .badge { font-size:11px; color:var(--muted); border:1px solid var(--border); border-radius:20px;
+    padding:4px 10px; }
+  header a.cta { background:var(--accent); color:#fff; text-decoration:none; font-size:12.5px;
+    font-weight:700; padding:8px 14px; border-radius:8px; }
+  #wrap { max-width:760px; margin:0 auto; padding:20px; }
+  #title { font-size:19px; font-weight:700; margin-bottom:18px; }
+  .msg-row { display:flex; flex-direction:column; margin-bottom:14px; max-width:82%; }
+  .msg-row.user { margin-left:auto; align-items:flex-end; }
+  .msg-row.ai { margin-right:auto; align-items:flex-start; }
+  .msg { padding:11px 15px; border-radius:18px; line-height:1.6; font-size:14.5px;
+    white-space:pre-wrap; word-wrap:break-word; }
+  .msg-row.user .msg { background:var(--user-bubble); border-bottom-right-radius:4px; }
+  .msg-row.ai .msg { background:var(--ai-bubble); border-bottom-left-radius:4px; }
+  #state { text-align:center; color:var(--muted); padding:60px 20px; font-size:14px; }
+  #footer-cta { text-align:center; padding:28px 20px 40px; color:var(--muted); font-size:13px; }
+  #footer-cta a { color:var(--accent); text-decoration:none; font-weight:600; }
+  code { background:var(--panel); padding:1px 5px; border-radius:4px; font-size:.92em; }
+  pre { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:10px 12px;
+    overflow-x:auto; margin:8px 0; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">Mythic AI</span>
+  <span class="badge">🔗 Shared chat · read-only</span>
+  <a class="cta" href="/">Open Mythic AI</a>
+</header>
+<div id="wrap">
+  <div id="title"></div>
+  <div id="messages"></div>
+  <div id="state" style="display:none;"></div>
+</div>
+<div id="footer-cta">Want a conversation like this? <a href="/">Try Mythic AI</a></div>
+<script>
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function renderInline(text) {
+  let html = esc(text);
+  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre><code>${code.trim()}</code></pre>`);
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\n/g, '<br>');
+  return html;
+}
+(async () => {
+  const shareId = location.pathname.split('/').filter(Boolean).pop();
+  const stateEl = document.getElementById('state');
+  try {
+    const r = await fetch('/api/share/' + encodeURIComponent(shareId));
+    const d = await r.json();
+    if (!r.ok || d.error) {
+      stateEl.textContent = d.error || 'This shared chat could not be found.';
+      stateEl.style.display = 'block';
+      return;
+    }
+    document.title = (d.title || 'Shared chat') + ' · Mythic AI';
+    document.getElementById('title').textContent = d.title || 'Shared chat';
+    const wrap = document.getElementById('messages');
+    (d.messages || []).forEach(m => {
+      const row = document.createElement('div');
+      row.className = 'msg-row ' + (m.role === 'user' ? 'user' : 'ai');
+      const bubble = document.createElement('div');
+      bubble.className = 'msg';
+      bubble.innerHTML = renderInline(m.text || '');
+      row.appendChild(bubble);
+      wrap.appendChild(row);
+    });
+    if (!(d.messages || []).length) {
+      stateEl.textContent = 'This chat has no messages yet.';
+      stateEl.style.display = 'block';
+    }
+  } catch (e) {
+    stateEl.textContent = 'Network error loading this shared chat.';
+    stateEl.style.display = 'block';
+  }
+})();
+</script>
+</body>
+</html>
+"""
+
 @app.route("/sw.js")
 def service_worker_js():
     """Real service worker served from a proper URL so push events work.
@@ -5385,6 +5751,79 @@ def api_duplicate_conversation(conv_id):
     }
     save_conversation(username, new_id, new_conv)
     return jsonify({"status": "duplicated", "id": new_id, "title": new_conv["title"]})
+
+
+def _share_url_for(share_id):
+    return request.host_url.rstrip("/") + "/share/" + share_id
+
+
+@app.route("/api/conversations/<conv_id>/share", methods=["GET"])
+@login_required
+def api_get_share_status(conv_id):
+    """Returns whether this conversation currently has an active public
+    share link, and its URL if so."""
+    username = current_username()
+    if load_conversation(username, conv_id) is None:
+        return jsonify({"error": "not found"}), 404
+    share_id = get_active_share_id(username, conv_id)
+    if not share_id:
+        return jsonify({"shared": False})
+    return jsonify({"shared": True, "share_id": share_id, "share_url": _share_url_for(share_id)})
+
+
+@app.route("/api/conversations/<conv_id>/share", methods=["POST"])
+@login_required
+def api_create_share(conv_id):
+    """Creates (or reuses an existing) public share link for this
+    conversation — anyone with the link can view a read-only copy, no
+    login required."""
+    username = current_username()
+    conv = load_conversation(username, conv_id)
+    if conv is None:
+        return jsonify({"error": "not found"}), 404
+    if not conv.get("messages"):
+        return jsonify({"error": "This chat has no messages yet — nothing to share."}), 400
+    share_id = create_share_link(username, conv_id)
+    return jsonify({"status": "shared", "share_id": share_id, "share_url": _share_url_for(share_id)})
+
+
+@app.route("/api/conversations/<conv_id>/share", methods=["DELETE"])
+@login_required
+def api_revoke_share(conv_id):
+    """Revokes any active public share link for this conversation — the old
+    link stops working immediately."""
+    username = current_username()
+    revoke_share_link(username, conv_id)
+    return jsonify({"status": "revoked"})
+
+
+@app.route("/api/share/<share_id>", methods=["GET"])
+def api_public_share(share_id):
+    """Public, unauthenticated endpoint — returns a read-only view of a
+    shared conversation. No user identity is exposed, only the messages."""
+    ref = resolve_share_link(share_id)
+    if not ref:
+        return jsonify({"error": "This share link is invalid or has been revoked."}), 404
+    conv = load_conversation(ref["username"], ref["conv_id"])
+    if conv is None:
+        return jsonify({"error": "This shared chat is no longer available."}), 404
+    simplified = []
+    for m in conv.get("messages", []):
+        role = "user" if m["role"] == "user" else "ai"
+        text_parts = [p.get("text", "") for p in m.get("parts", []) if "text" in p]
+        entry = {"role": role, "text": "".join(text_parts)}
+        if m.get("attachment_meta"):
+            entry["attachment"] = m["attachment_meta"]
+        simplified.append(entry)
+    return jsonify({"title": conv.get("title", "Shared chat"), "messages": simplified})
+
+
+@app.route("/share/<share_id>")
+def public_share_page(share_id):
+    """Public, unauthenticated read-only page rendering a shared chat —
+    intentionally a separate, minimal template with no composer, no
+    sidebar, and no access to the viewer's own conversations."""
+    return Response(SHARE_PAGE, mimetype="text/html; charset=utf-8")
 
 
 def _collect_full_reply(chunks):
