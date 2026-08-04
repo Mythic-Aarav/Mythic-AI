@@ -773,7 +773,17 @@ def get_or_create_invite_code():
 _OWNER_ID_FILE = _os.path.join(_DATA_DIR, "owner_user_id.txt")
 _owner_id_lock = threading.Lock()
 
+# Hard override for serverless hosts (Vercel, etc.) where neither the local
+# filesystem (/tmp is wiped on cold start) nor the session cookie can be
+# trusted to persist the owner id reliably without Supabase configured.
+# Set OWNER_USER_ID to any fixed string (e.g. a UUID you generate once) as
+# an environment variable, and that value is used directly, every time, on
+# every instance — no file, no database, no race to "claim" ownership.
+_OWNER_USER_ID_ENV = _os.environ.get("OWNER_USER_ID", "").strip()
+
 def get_or_create_owner_id(preferred_id=None):
+    if _OWNER_USER_ID_ENV:
+        return _OWNER_USER_ID_ENV
     with _owner_id_lock:
         if SUPABASE_URL:
             try:
@@ -6601,6 +6611,48 @@ def invite_landing(code):
     session["user_id"] = get_or_create_owner_id()
     session.permanent = True
     return Response(PAGE, mimetype="text/html; charset=utf-8")
+
+
+# --- Claim owner status (needed on serverless hosts like Vercel) -------------
+# On Vercel, each request can land on a different instance with its own
+# ephemeral /tmp, so a locally-written owner_user_id.txt does NOT reliably
+# make you "the owner" on every subsequent request — see get_or_create_owner_id
+# above. If OWNER_USER_ID is set (a fixed id you choose, e.g. a UUID), that
+# value is always returned as the owner id, no file/DB needed. This route
+# lets YOUR browser's session get pinned to that exact id, once, so every
+# future request from you compares equal to it. Protect it with OWNER_SECRET
+# (also an env var) so nobody else can claim it.
+#
+# Setup on Vercel:
+#   1. Generate two random values locally:
+#        python -c "import secrets,uuid; print('OWNER_USER_ID=', uuid.uuid4()); print('OWNER_SECRET=', secrets.token_hex(16))"
+#   2. Set OWNER_USER_ID, OWNER_SECRET, and FLASK_SECRET_KEY as environment
+#      variables in your Vercel project settings, then redeploy.
+#   3. Visit https://<your-app>.vercel.app/claim-owner/<OWNER_SECRET> once,
+#      in the browser you want to use as the owner. You only need to do
+#      this again if you ever clear cookies or switch browsers/devices.
+@app.route("/claim-owner/<secret>")
+def claim_owner(secret):
+    owner_secret = _os.environ.get("OWNER_SECRET", "").strip()
+    if not owner_secret:
+        return Response(
+            "OWNER_SECRET is not set on the server, so no one can claim "
+            "ownership this way. Set OWNER_USER_ID, OWNER_SECRET, and "
+            "FLASK_SECRET_KEY as environment variables first, then reload "
+            "this page.", mimetype="text/plain"), 400
+    if not secrets.compare_digest(secret, owner_secret):
+        return Response("Incorrect secret.", mimetype="text/plain"), 403
+    if not _OWNER_USER_ID_ENV:
+        return Response(
+            "OWNER_SECRET is set but OWNER_USER_ID is not. Set OWNER_USER_ID "
+            "too (any fixed string, e.g. a UUID), then reload this page.",
+            mimetype="text/plain"), 400
+    session["user_id"] = _OWNER_USER_ID_ENV
+    session.permanent = True
+    return Response(
+        "You're now recognized as the account owner on this browser. "
+        "<a href='/api-usage'>Go to API keys →</a>",
+        mimetype="text/html; charset=utf-8")
 
 
 # --- API key management (owner only) ------------------------------------------
