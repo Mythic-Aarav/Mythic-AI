@@ -2017,6 +2017,10 @@ PAGE = r"""<!DOCTYPE html>
   <div id="sidebar-overlay" style="display:none;position:fixed;inset:0;background:#0007;z-index:99"></div>
   <div id="sidebar">
     <button id="new-chat-btn">+ New chat</button>
+    <div style="display:flex;gap:6px;margin:6px 0;">
+      <button id="search-chats-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:7px 4px;font-size:12px;cursor:pointer;font-family:inherit;">🔎 Search</button>
+      <button id="reminders-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:7px 4px;font-size:12px;cursor:pointer;font-family:inherit;">⏰ Reminders</button>
+    </div>
     <div id="conv-list"></div>
     <div id="sidebar-footer">
       <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
@@ -2280,6 +2284,17 @@ PAGE = r"""<!DOCTYPE html>
         </button>
       </label>
       <div id="notif-status" style="font-size:11.5px;color:var(--muted);margin-top:6px;"></div>
+    </div>
+
+    <div class="settings-section" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
+      <label>💾 Backup all chats</label>
+      <p style="font-size:11.5px;color:var(--muted);margin:2px 0 8px;">Download every conversation as one file, or restore from a previous backup — also the only way to carry your chats over to a different browser/device, since accounts here are anonymous per-browser.</p>
+      <div style="display:flex;gap:8px;">
+        <button id="backup-export-btn" type="button" style="flex:1;background:none;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px;cursor:pointer;font-family:inherit;font-size:12.5px;">⬇ Export all</button>
+        <button id="backup-import-btn" type="button" style="flex:1;background:none;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px;cursor:pointer;font-family:inherit;font-size:12.5px;">⬆ Import backup</button>
+      </div>
+      <input id="backup-import-file" type="file" accept=".zip" style="display:none;">
+      <div id="backup-status" style="font-size:11.5px;color:var(--muted);margin-top:6px;"></div>
     </div>
 
     <button id="settings-close-btn" type="button">Done</button>
@@ -3265,9 +3280,16 @@ form.addEventListener('submit', (e) => {
   pendingFile = null;
   fileInput.value = ''; cameraInput.value = '';
   pendingAttach.classList.remove('show');
-  addMessage('user', text, attachment);
   input.value = '';
   input.style.height = 'auto';
+  // Cowork mode runs a real multi-step task (plan → work each step →
+  // synthesize) via /api/cowork/run instead of a single streamed reply —
+  // see runCoworkTask(). Everything else keeps the normal streaming flow.
+  if (typeof currentMode !== 'undefined' && currentMode === 'cowork' && text) {
+    runCoworkTask(text);
+    return;
+  }
+  addMessage('user', text, attachment);
   const tonePrefix = getTonePrefix();
   streamReply({ message: tonePrefix + text, attachment });
 });
@@ -5110,12 +5132,14 @@ function showArtifactsModal() {
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px;';
   const rows = _artifacts.length ? _artifacts.slice().reverse().map(a => {
     const canPreview = a.lang === 'html' && _artifacts.some(x => x.groupId === a.groupId && x.lang === 'html');
+    const canRunCode = !canPreview && RUNNABLE_LANGS.includes((a.lang || '').toLowerCase());
     return `
     <div class="art-row" data-id="${a.id}" style="border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden;">
       <div style="display:flex;justify-content:space-between;align-items:center;background:var(--panel);padding:8px 12px;font-size:11.5px;color:var(--muted);">
         <span>📦 ${a.lang} &middot; ${a.preview || 'snippet'}</span>
         <div style="display:flex;gap:6px;">
           ${canPreview ? `<button class="art-run" data-group="${a.groupId}" style="background:var(--accent);border:none;color:#fff;border-radius:6px;cursor:pointer;font-size:11px;padding:3px 8px;">▶ Run</button>` : ''}
+          ${canRunCode ? `<button class="art-run-code" data-id="${a.id}" style="background:var(--accent);border:none;color:#fff;border-radius:6px;cursor:pointer;font-size:11px;padding:3px 8px;">▶ Run</button>` : ''}
           <button class="art-copy" data-id="${a.id}" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;">📋</button>
           <button class="art-download" data-id="${a.id}" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;">⬇</button>
         </div>
@@ -5152,6 +5176,244 @@ const artifactsTabBtn = document.getElementById('artifacts-tab-btn');
 if (artifactsTabBtn) artifactsTabBtn.addEventListener('click', () => requireVipModel(() => {
   showArtifactsModal();
 }));
+
+// ─── Real code execution ("Run") for non-HTML artifacts, e.g. Python ───────
+// HTML/CSS/JS artifacts already run for real, in-browser, via the sandboxed
+// iframe above. Other languages (Python, etc.) can't run in a browser at
+// all, so this calls the server's /api/execute-code, which itself runs the
+// code on Piston (a third-party sandbox) rather than on this app's own
+// server — see the long comment above api_execute_code() in the Python for
+// why that separation matters. Gated behind VIP the same way as the rest of
+// Cowork/Code/Artifacts.
+const RUNNABLE_LANGS = ['python', 'py', 'javascript', 'js', 'bash', 'sh', 'c', 'cpp', 'c++', 'java', 'go', 'rust', 'ruby', 'php'];
+function showCodeRunResultModal(title, body) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:650;display:flex;align-items:center;justify-content:center;padding:20px;';
+  overlay.innerHTML = `<div style="background:#111;border:1px solid #333;border-radius:12px;padding:16px;width:92%;max-width:640px;max-height:78vh;overflow-y:auto;color:#eee;font-family:ui-monospace,monospace;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <strong style="font-size:13px;">▶ ${title}</strong>
+      <button id="run-result-close" style="background:none;border:1px solid #444;color:#ccc;border-radius:6px;padding:4px 10px;cursor:pointer;font-family:inherit;">✕</button>
+    </div>
+    <pre style="white-space:pre-wrap;font-size:12.5px;margin:0;">${body}</pre>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#run-result-close').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+async function runArtifactCode(artifactId) {
+  const a = _artifacts.find(x => x.id === artifactId);
+  if (!a) return;
+  const lang = (a.lang || '').toLowerCase();
+  if (!RUNNABLE_LANGS.includes(lang)) {
+    showCodeRunResultModal('Can\'t run this', `"${lang}" isn't a runnable language here.`);
+    return;
+  }
+  showCodeRunResultModal('Running…', 'Executing on a sandboxed runner, one moment…');
+  try {
+    const r = await fetch('/api/execute-code', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: a.code, language: lang }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) {
+      showCodeRunResultModal('Run failed', (d.error || 'Unknown error') +
+        (r.status === 403 ? '\n\nUnlock VIP mode first (🔒 button in the header).' : ''));
+      return;
+    }
+    const out = [
+      d.stdout ? 'stdout:\n' + d.stdout : '',
+      d.stderr ? 'stderr:\n' + d.stderr : '',
+      (!d.stdout && !d.stderr) ? '(no output)' : '',
+      `\n[exit code ${d.exit_code}]`,
+    ].filter(Boolean).join('\n\n');
+    showCodeRunResultModal(`Result (${d.language} ${d.version || ''})`, out);
+  } catch (err) {
+    showCodeRunResultModal('Network error', String(err.message || err));
+  }
+}
+// Hook into the Artifacts modal's row buttons for non-HTML runnable code —
+// showArtifactsModal() only wires up '.art-run' for HTML groups today, so
+// this listens at the document level and covers any '.art-run-code' button
+// we add per-row (see the small patch to the row template just below).
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.art-run-code');
+  if (btn) runArtifactCode(btn.dataset.id);
+});
+
+// ─── Message search across every chat (not just the open one) ─────────────
+const searchChatsBtn = document.getElementById('search-chats-btn');
+function showSearchModal() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px;';
+  overlay.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;width:92%;max-width:520px;max-height:78vh;overflow-y:auto;">
+    <h3 style="margin:0 0 12px;font-size:16px;">🔎 Search your chats</h3>
+    <input id="search-chats-input" type="text" placeholder="Search all conversations..." autocomplete="off"
+      style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-family:inherit;font-size:14px;margin-bottom:12px;">
+    <div id="search-chats-results" style="font-size:13px;color:var(--muted);"></div>
+    <button id="search-chats-close" style="margin-top:10px;width:100%;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:9px;cursor:pointer;font-family:inherit;">Close</button>
+  </div>`;
+  document.body.appendChild(overlay);
+  const input2 = overlay.querySelector('#search-chats-input');
+  const resultsEl = overlay.querySelector('#search-chats-results');
+  let debounceTimer = null;
+  input2.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    const q = input2.value.trim();
+    if (q.length < 2) { resultsEl.innerHTML = ''; return; }
+    debounceTimer = setTimeout(async () => {
+      resultsEl.textContent = 'Searching…';
+      try {
+        const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+        const d = await r.json();
+        const results = d.results || [];
+        resultsEl.innerHTML = results.length ? results.map(res => `
+          <div class="search-result-row" data-conv="${res.conv_id}" style="padding:10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer;">
+            <div style="font-weight:600;font-size:12.5px;margin-bottom:3px;">${(res.title || '').replace(/</g,'&lt;')}</div>
+            <div style="opacity:.8;">${(res.role === 'user' ? '🧑' : '🤖')} ${(res.snippet || '').replace(/</g,'&lt;')}</div>
+          </div>`).join('') : '<div style="padding:12px;text-align:center;">No matches.</div>';
+        resultsEl.querySelectorAll('.search-result-row').forEach(row => {
+          row.addEventListener('click', () => { overlay.remove(); openConversation(row.dataset.conv); });
+        });
+      } catch { resultsEl.textContent = 'Search failed — try again.'; }
+    }, 300);
+  });
+  overlay.querySelector('#search-chats-close').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  requestAnimationFrame(() => input2.focus());
+}
+if (searchChatsBtn) searchChatsBtn.addEventListener('click', showSearchModal);
+
+// ─── Reminders & scheduled tasks (delivered via existing Web Push) ─────────
+const remindersBtn = document.getElementById('reminders-btn');
+async function loadRemindersList(container) {
+  container.textContent = 'Loading…';
+  try {
+    const r = await fetch('/api/reminders');
+    const d = await r.json();
+    const list = d.reminders || [];
+    container.innerHTML = list.length ? list.map(rem => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;font-size:12.5px;">
+        <div>
+          <div>${rem.text.replace(/</g,'&lt;')}</div>
+          <div style="opacity:.7;font-size:11px;">${new Date(rem.fire_at * 1000).toLocaleString()}</div>
+        </div>
+        <button class="reminder-del" data-id="${rem.id}" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;">✕</button>
+      </div>`).join('') : '<div style="padding:12px;text-align:center;color:var(--muted);">No reminders set.</div>';
+    container.querySelectorAll('.reminder-del').forEach(btn => btn.addEventListener('click', async () => {
+      await fetch('/api/reminders/' + btn.dataset.id, { method: 'DELETE' });
+      loadRemindersList(container);
+    }));
+  } catch { container.textContent = 'Could not load reminders.'; }
+}
+function showRemindersModal() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px;';
+  const now = new Date(Date.now() + 5 * 60000);
+  const defaultLocal = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  overlay.innerHTML = `<div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;width:92%;max-width:480px;max-height:80vh;overflow-y:auto;">
+    <h3 style="margin:0 0 12px;font-size:16px;">⏰ Reminders</h3>
+    <p style="font-size:12px;color:var(--muted);margin:0 0 12px;">Delivered as a push notification (enable notifications in Settings first). Requires the app to stay running on the server (works on Render; not on serverless hosts like Vercel).</p>
+    <input id="reminder-text-input" type="text" placeholder="Remind me to..." maxlength="200"
+      style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-family:inherit;font-size:14px;margin-bottom:8px;">
+    <input id="reminder-time-input" type="datetime-local" value="${defaultLocal}"
+      style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-family:inherit;font-size:14px;margin-bottom:10px;">
+    <button id="reminder-add-btn" style="width:100%;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px;cursor:pointer;font-family:inherit;margin-bottom:14px;">Set reminder</button>
+    <div id="reminders-list"></div>
+    <button id="reminders-close" style="margin-top:10px;width:100%;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:9px;cursor:pointer;font-family:inherit;">Close</button>
+  </div>`;
+  document.body.appendChild(overlay);
+  const listEl = overlay.querySelector('#reminders-list');
+  loadRemindersList(listEl);
+  overlay.querySelector('#reminder-add-btn').addEventListener('click', async () => {
+    const text = overlay.querySelector('#reminder-text-input').value.trim();
+    const localVal = overlay.querySelector('#reminder-time-input').value;
+    if (!text || !localVal) return;
+    const fireAt = new Date(localVal).getTime() / 1000;
+    try {
+      const r = await fetch('/api/reminders', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, fire_at: fireAt }),
+      });
+      const d = await r.json();
+      if (!r.ok) { alert(d.error || 'Could not set reminder.'); return; }
+      overlay.querySelector('#reminder-text-input').value = '';
+      loadRemindersList(listEl);
+    } catch (err) { alert('Network error: ' + err.message); }
+  });
+  overlay.querySelector('#reminders-close').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+if (remindersBtn) remindersBtn.addEventListener('click', showRemindersModal);
+
+// ─── Full backup export / import (all chats, not just one) ────────────────
+// Wired into the Settings modal — see #backup-export-btn / #backup-import-*
+// elements added to the settings modal markup.
+const backupExportBtn = document.getElementById('backup-export-btn');
+const backupImportBtn = document.getElementById('backup-import-btn');
+const backupImportFile = document.getElementById('backup-import-file');
+const backupStatusEl   = document.getElementById('backup-status');
+if (backupExportBtn) backupExportBtn.addEventListener('click', () => {
+  window.location.href = '/api/backup/export';
+});
+if (backupImportBtn && backupImportFile) {
+  backupImportBtn.addEventListener('click', () => backupImportFile.click());
+  backupImportFile.addEventListener('change', async () => {
+    const file = backupImportFile.files[0];
+    if (!file) return;
+    if (backupStatusEl) backupStatusEl.textContent = 'Importing…';
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const r = await fetch('/api/backup/import', { method: 'POST', body: fd });
+      const d = await r.json();
+      if (backupStatusEl) {
+        backupStatusEl.textContent = r.ok
+          ? `Imported ${d.imported} conversation(s).`
+          : (d.error || 'Import failed.');
+      }
+      loadConversationList();
+    } catch (err) {
+      if (backupStatusEl) backupStatusEl.textContent = 'Network error: ' + err.message;
+    }
+    backupImportFile.value = '';
+  });
+}
+
+// ─── Cowork mode: real multi-step task runner ──────────────────────────────
+// Renders a distinct "steps" card (plan → each step's result → final
+// answer) instead of a normal streamed reply, so it's visibly different
+// from a single chat completion.
+function renderCoworkResult(container, data) {
+  const stepsHtml = (data.steps || []).map((s, i) => `
+    <div style="margin-bottom:8px;padding:8px 10px;border-left:2px solid var(--accent);">
+      <div style="font-size:11.5px;font-weight:600;opacity:.8;">Step ${i + 1}: ${s.step.replace(/</g,'&lt;')}</div>
+      <div style="font-size:13px;margin-top:3px;">${s.result.replace(/</g,'&lt;')}</div>
+    </div>`).join('');
+  container.innerHTML = `
+    <div style="font-size:12px;font-weight:700;opacity:.7;margin-bottom:8px;">🗂 COWORK — ${(data.steps||[]).length} step(s)</div>
+    ${stepsHtml}
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);white-space:pre-wrap;">${(data.final_answer || '').replace(/</g,'&lt;')}</div>`;
+}
+async function runCoworkTask(task) {
+  addMessage('user', task);
+  // addMessage() returns the message's text element directly (see its
+  // definition above), not the whole row — safe to update in place.
+  const textEl = addMessage('ai', '⏳ Planning and working through the task…');
+  try {
+    const r = await fetch('/api/cowork/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) {
+      if (textEl) textEl.textContent = d.error || 'Cowork task failed.';
+      return;
+    }
+    if (textEl) renderCoworkResult(textEl, d);
+  } catch (err) {
+    if (textEl) textEl.textContent = 'Network error: ' + err.message;
+  }
+}
 
 // ─── Starred view toggle ─────────────────────────────────────────────────────
 const archivedToggleBtn = document.getElementById('archived-toggle-btn');
@@ -7450,6 +7712,389 @@ def generate_image():
 
     except Exception as e:
         return jsonify({"error": f"Image generation error: {str(e)}"}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# NEW FEATURE: real, sandboxed code execution (Python/JS/etc.) for the Code
+# tab and for "Run" on non-HTML Artifacts.
+#
+# Execution happens on Piston (emkc.org's free public code-execution API),
+# NOT on this server. That matters: this Render instance holds real secrets
+# (GROQ/CEREBRAS/SUPABASE keys) in its environment, so running arbitrary,
+# untrusted code IN THIS PROCESS would let anyone with the invite link read
+# those secrets or pivot into this box. Piston runs the code in its own
+# disposable sandbox instead, so a malicious snippet can at worst mess with
+# a throwaway container that has none of this app's secrets.
+# Still gated behind the existing VIP session flag (server-side, not just a
+# client-side lock icon) — it's real third-party compute, not something to
+# leave wide open to every anonymous visitor of the public invite link.
+# ══════════════════════════════════════════════════════════════════════════
+PISTON_API = "https://emkc.org/api/v2/piston/execute"
+PISTON_RUNTIMES_API = "https://emkc.org/api/v2/piston/runtimes"
+_piston_runtimes_cache = {"ts": 0.0, "data": []}
+_PISTON_LANGUAGE_ALIASES = {
+    "py": "python", "python3": "python", "js": "javascript", "node": "javascript",
+    "nodejs": "javascript", "ts": "typescript", "sh": "bash", "shell": "bash",
+    "c++": "cpp", "golang": "go",
+}
+_PISTON_FILENAMES = {
+    "python": "main.py", "javascript": "main.js", "typescript": "main.ts",
+    "bash": "main.sh", "c": "main.c", "cpp": "main.cpp", "java": "Main.java",
+    "go": "main.go", "rust": "main.rs", "ruby": "main.rb", "php": "main.php",
+}
+
+def _piston_runtimes():
+    now = time.time()
+    if _piston_runtimes_cache["data"] and (now - _piston_runtimes_cache["ts"]) < 3600:
+        return _piston_runtimes_cache["data"]
+    try:
+        r = requests.get(PISTON_RUNTIMES_API, timeout=10)
+        if r.status_code == 200:
+            _piston_runtimes_cache["data"] = r.json()
+            _piston_runtimes_cache["ts"] = now
+    except Exception as e:
+        print(f"[Piston] failed to fetch runtimes: {e}")
+    return _piston_runtimes_cache["data"]
+
+
+@app.route("/api/execute-code", methods=["POST"])
+@login_required
+def api_execute_code():
+    if not session.get("vip_unlocked"):
+        return jsonify({"error": "Unlock VIP mode first to run code."}), 403
+    data = request.get_json(force=True) or {}
+    code = (data.get("code") or "")
+    if not code.strip():
+        return jsonify({"error": "No code provided."}), 400
+    if len(code) > 20000:
+        return jsonify({"error": "Code is too long (max 20,000 characters)."}), 400
+    lang_in = (data.get("language") or "python").strip().lower()
+    lang = _PISTON_LANGUAGE_ALIASES.get(lang_in, lang_in)
+
+    runtimes = _piston_runtimes()
+    version = "*"
+    if runtimes:
+        match = next((r for r in runtimes if r.get("language") == lang
+                       or lang in (r.get("aliases") or [])), None)
+        if not match:
+            supported = sorted({r.get("language") for r in runtimes})
+            return jsonify({"error": f"'{lang_in}' isn't a supported language.",
+                             "supported": supported[:30]}), 400
+        version = match.get("version", "*")
+
+    filename = _PISTON_FILENAMES.get(lang, "main.txt")
+    try:
+        resp = requests.post(PISTON_API, json={
+            "language": lang,
+            "version": version,
+            "files": [{"name": filename, "content": code}],
+            "stdin": (data.get("stdin") or "")[:5000],
+            "run_timeout": 8000,
+            "compile_timeout": 10000,
+        }, timeout=25)
+        if resp.status_code != 200:
+            return jsonify({"error": f"Execution service returned HTTP {resp.status_code}."}), 502
+        result = resp.json()
+        run = result.get("run") or {}
+        compiled = result.get("compile") or {}
+        return jsonify({
+            "stdout": run.get("stdout", ""),
+            "stderr": run.get("stderr", "") or compiled.get("stderr", ""),
+            "exit_code": run.get("code"),
+            "language": lang,
+            "version": version,
+        })
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Execution timed out."}), 504
+    except Exception as e:
+        return jsonify({"error": f"Execution failed: {e}"}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# NEW FEATURE: Cowork mode — real multi-step task execution, not just a
+# different system prompt. Breaks the task into steps, works through each
+# one (carrying forward what earlier steps produced), then synthesizes a
+# single final answer. Uses the existing _quick_completion() Groq→Cerebras
+# fallback helper, so it inherits the same silent-provider-fallback behavior
+# as the rest of the app.
+# ══════════════════════════════════════════════════════════════════════════
+@app.route("/api/cowork/run", methods=["POST"])
+@login_required
+def api_cowork_run():
+    if not session.get("vip_unlocked"):
+        return jsonify({"error": "Unlock VIP mode first to use Cowork."}), 403
+    data = request.get_json(force=True) or {}
+    task = (data.get("task") or "").strip()
+    if not task:
+        return jsonify({"error": "No task provided."}), 400
+    task = task[:4000]
+    user_groq = (data.get("groqKey") or "").strip() or None
+    user_cerebras = (data.get("cerebrasKey") or "").strip() or None
+
+    plan_text = _quick_completion(
+        [
+            {"role": "system", "content": (
+                "You are a meticulous project planner. Break the user's task into 3 to 6 "
+                "short, concrete, sequential steps a capable assistant could execute one "
+                "at a time. Reply with ONLY a numbered list, one short step per line, "
+                "nothing else — no preamble, no explanation."
+            )},
+            {"role": "user", "content": task},
+        ],
+        user_groq, user_cerebras, max_tokens=300,
+    ) or ""
+    steps = []
+    for line in plan_text.splitlines():
+        line = re.sub(r"^\s*[\d]+[\.\)]\s*", "", line).strip("-• \t")
+        if line:
+            steps.append(line)
+    steps = steps[:6] or [task]
+
+    step_results = []
+    running_context = ""
+    for i, step in enumerate(steps, 1):
+        step_prompt = (
+            f"Overall task: {task}\n\n"
+            f"Progress so far:\n{running_context[-3000:] or '(nothing yet)'}\n\n"
+            f"Do ONLY this step ({i} of {len(steps)}): {step}\n"
+            "Give a direct, concrete result for this step alone — don't restate the "
+            "whole task or repeat earlier steps."
+        )
+        result = _quick_completion(
+            [
+                {"role": "system", "content": "You are a focused task executor. Do exactly "
+                                               "the step given, concisely and concretely."},
+                {"role": "user", "content": step_prompt},
+            ],
+            user_groq, user_cerebras, max_tokens=600,
+        ) or "(no result — provider unavailable)"
+        step_results.append({"step": step, "result": result})
+        running_context += f"\nStep {i} — {step}:\n{result}\n"
+
+    final_answer = _quick_completion(
+        [
+            {"role": "system", "content": "You synthesize completed work into one final, "
+                                           "coherent answer or deliverable."},
+            {"role": "user", "content": (
+                f"Task: {task}\n\nStep-by-step work completed:\n{running_context[-6000:]}\n\n"
+                "Write the final, complete answer for the task, weaving the step results "
+                "together into one coherent response. Don't just list the steps again."
+            )},
+        ],
+        user_groq, user_cerebras, max_tokens=1400,
+    ) or running_context
+
+    return jsonify({"task": task, "steps": step_results, "final_answer": final_answer})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# NEW FEATURE: search across every one of this visitor's conversations
+# (not just the currently open one).
+# ══════════════════════════════════════════════════════════════════════════
+@app.route("/api/search", methods=["GET"])
+@login_required
+def api_search_messages():
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return jsonify({"results": [], "query": q})
+    q_lower = q.lower()
+    username = current_username()
+    results = []
+    for c in list_conversations(username):
+        conv = load_conversation(username, c["id"])
+        if not conv:
+            continue
+        for idx, m in enumerate(conv.get("messages", []) or []):
+            text = m.get("text") or ""
+            pos = text.lower().find(q_lower)
+            if pos == -1:
+                continue
+            start = max(0, pos - 40)
+            snippet = text[start:start + 160].strip()
+            results.append({
+                "conv_id": c["id"],
+                "title": c.get("title") or "Untitled",
+                "role": m.get("role"),
+                "msg_index": idx,
+                "snippet": ("…" if start > 0 else "") + snippet + ("…" if start + 160 < len(text) else ""),
+            })
+            if len(results) >= 50:
+                break
+        if len(results) >= 50:
+            break
+    return jsonify({"results": results, "query": q})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# NEW FEATURE: reminders / scheduled tasks. Reuses the existing Web Push
+# infrastructure (send_push_notification_to_user, built for re-engagement
+# notifications) to actually deliver the reminder at the right time.
+# ══════════════════════════════════════════════════════════════════════════
+_REMINDERS_FILE = _os.path.join(_DATA_DIR, "reminders.json")
+_reminders_lock = threading.Lock()
+
+def _load_reminders():
+    with _reminders_lock:
+        if _os.path.exists(_REMINDERS_FILE):
+            try:
+                with open(_REMINDERS_FILE, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+def _save_reminders(data):
+    with _reminders_lock:
+        try:
+            with open(_REMINDERS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"[reminders] failed to save: {e}")
+
+
+@app.route("/api/reminders", methods=["GET"])
+@login_required
+def api_list_reminders():
+    username = current_username()
+    all_r = _load_reminders()
+    mine = [r for r in all_r.values() if r.get("username") == username and not r.get("fired")]
+    mine.sort(key=lambda r: r.get("fire_at", 0))
+    return jsonify({"reminders": mine})
+
+
+@app.route("/api/reminders", methods=["POST"])
+@login_required
+def api_create_reminder():
+    data = request.get_json(force=True) or {}
+    text = (data.get("text") or "").strip()[:200]
+    fire_at = data.get("fire_at")
+    if not text or fire_at is None:
+        return jsonify({"error": "'text' and 'fire_at' (unix timestamp, seconds) are required."}), 400
+    try:
+        fire_at = float(fire_at)
+    except (TypeError, ValueError):
+        return jsonify({"error": "'fire_at' must be a numeric unix timestamp."}), 400
+    if fire_at < time.time() - 60:
+        return jsonify({"error": "That time is in the past."}), 400
+    rid = uuid.uuid4().hex[:12]
+    all_r = _load_reminders()
+    all_r[rid] = {
+        "id": rid, "username": current_username(), "text": text,
+        "fire_at": fire_at, "created_at": time.time(), "fired": False,
+    }
+    _save_reminders(all_r)
+    return jsonify({"reminder": all_r[rid]})
+
+
+@app.route("/api/reminders/<rid>", methods=["DELETE"])
+@login_required
+def api_delete_reminder(rid):
+    all_r = _load_reminders()
+    if rid in all_r and all_r[rid].get("username") == current_username():
+        del all_r[rid]
+        _save_reminders(all_r)
+    return jsonify({"ok": True})
+
+
+def _reminders_check_loop():
+    """Every 30s, fires any reminder whose time has come, via Web Push.
+    Render/always-on only, same limitation as the re-engagement loop below —
+    Vercel's serverless functions freeze between requests so a background
+    thread there would never actually get to run on schedule."""
+    while True:
+        try:
+            all_r = _load_reminders()
+            now = time.time()
+            changed = False
+            for rid, r in list(all_r.items()):
+                if not r.get("fired") and r.get("fire_at", 0) <= now:
+                    send_push_notification_to_user(
+                        r.get("username", ""), "⏰ Reminder", r.get("text", ""), url="/",
+                    )
+                    r["fired"] = True
+                    changed = True
+            if changed:
+                _save_reminders(all_r)
+        except Exception as e:
+            print(f"[reminders] loop error: {e}")
+        time.sleep(30)
+
+
+_reminders_thread_started = False
+
+def _start_reminders_thread_once():
+    global _reminders_thread_started
+    if _reminders_thread_started or IS_SERVERLESS:
+        return
+    threading.Thread(target=_reminders_check_loop, daemon=True).start()
+    _reminders_thread_started = True
+
+_start_reminders_thread_once()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# NEW FEATURE: export ALL conversations as one downloadable .zip backup, and
+# re-import them later (e.g. after clearing cookies, or on another device/
+# browser — since accounts are anonymous per-browser-cookie, this is also
+# the only way to move your chats to a different browser at all).
+# ══════════════════════════════════════════════════════════════════════════
+@app.route("/api/backup/export", methods=["GET"])
+@login_required
+def api_backup_export():
+    import io as _io, zipfile as _zipfile
+    username = current_username()
+    buf = _io.BytesIO()
+    manifest = []
+    with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as zf:
+        for c in list_conversations(username):
+            conv = load_conversation(username, c["id"])
+            if not conv:
+                continue
+            payload = dict(conv)
+            payload["id"] = c["id"]
+            zf.writestr(f"conversations/{c['id']}.json",
+                        json.dumps(payload, ensure_ascii=False))
+            manifest.append({"id": c["id"], "title": c.get("title")})
+        zf.writestr("manifest.json", json.dumps({
+            "exported_at": time.time(), "count": len(manifest), "conversations": manifest,
+        }, ensure_ascii=False))
+    buf.seek(0)
+    return Response(buf.read(), mimetype="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="mythic-ai-backup-{int(time.time())}.zip"',
+    })
+
+
+@app.route("/api/backup/import", methods=["POST"])
+@login_required
+def api_backup_import():
+    import io as _io, zipfile as _zipfile
+    username = current_username()
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file uploaded."}), 400
+    raw = f.read()
+    if len(raw) > 25 * 1024 * 1024:
+        return jsonify({"error": "Backup file too large (max 25MB)."}), 400
+    try:
+        zf = _zipfile.ZipFile(_io.BytesIO(raw))
+    except Exception as e:
+        return jsonify({"error": f"Not a valid backup file: {e}"}), 400
+    imported = 0
+    for name in zf.namelist():
+        if not name.startswith("conversations/") or not name.endswith(".json"):
+            continue
+        try:
+            payload = json.loads(zf.read(name).decode("utf-8"))
+        except Exception:
+            continue
+        # Always import under a brand-new id, even if the backup file still
+        # has its original id — prevents an import from silently clobbering
+        # an existing chat that happens to share the same id.
+        payload.pop("id", None)
+        new_id = uuid.uuid4().hex[:12]
+        save_conversation(username, new_id, payload)
+        imported += 1
+    return jsonify({"imported": imported})
 
 
 _reengagement_thread_started = False
