@@ -2003,7 +2003,7 @@ PAGE = r"""<!DOCTYPE html>
         </button>
         <button id="name-btn" title="What should Mythic AI call you?">🙂</button>
         <button id="settings-btn" title="Settings">⚙</button>
-        <button id="share-btn" title="Share this chat">🔗</button>
+        <button id="share-btn" title="Get invite link">🔗</button>
         <button id="export-btn" title="Export this chat">⬇</button>
         <button id="clear-btn">Delete chat</button>
       </div>
@@ -2130,8 +2130,8 @@ PAGE = r"""<!DOCTYPE html>
 
 <div id="share-modal-overlay">
   <div id="share-modal">
-    <h3>🔗 Share this chat</h3>
-    <p class="sub">Anyone with this link can view a read-only copy of this conversation and continue it as their own — they won't see any of your other chats.</p>
+    <h3>🔗 Invite link</h3>
+    <p class="sub">One permanent link for the whole app — not tied to any single chat. Share it with anyone; each person who opens it gets their own private conversation with Mythic AI, no login required.</p>
     <div id="share-link-row">
       <input type="text" id="share-link-input" readonly>
       <button id="share-open-btn" type="button" title="Open in a new tab">↗</button>
@@ -3096,15 +3096,11 @@ window.addEventListener('popstate', () => {
   else startNewChat({ updateUrl: false });
 });
 
-async function refreshShareBtnState() {
-  const btn = document.getElementById('share-btn');
-  if (!btn) return;
-  if (!activeConvId) { btn.classList.remove('active'); return; }
-  try {
-    const r = await fetch('/api/conversations/' + activeConvId + '/share');
-    const d = await r.json();
-    btn.classList.toggle('active', !!d.shared);
-  } catch { btn.classList.remove('active'); }
+function refreshShareBtnState() {
+  // The invite link is static and account-wide now (not per-conversation),
+  // so there's no per-chat "shared" state to check on the server anymore.
+  // Kept as a function (rather than removing every call site) so nothing
+  // else in the file needs to change.
 }
 
 let isGenerating = false;
@@ -3385,34 +3381,24 @@ const shareStatusEl     = document.getElementById('share-status');
 
 function closeShareModal() { shareModalOverlay.classList.remove('show'); }
 
-async function openShareModalFor(convId) {
-  if (!convId) { alert('Start or open a chat first.'); return; }
-  shareStatusEl.textContent = 'Creating link…';
-  shareLinkInput.value = '';
-  shareLinkInput.title = '';
+// One single, permanent link for the whole app/account — not one per chat.
+// No login, no server round-trip, no "start a chat first" requirement:
+// anyone who opens this URL lands straight on the chat screen and gets
+// their own private, anonymous conversation history (see current_username()
+// server-side). This is just the site's own root URL.
+function openInviteModal() {
+  const link = location.origin + '/';
+  shareLinkInput.value = link;
+  shareLinkInput.title = link;
+  shareStatusEl.textContent = 'Anyone who opens this link can chat with Mythic AI right away — ' +
+    'no login needed. Each person gets their own private conversation history; nobody sees yours.';
   shareModalOverlay.classList.add('show');
-  try {
-    const r = await fetch('/api/conversations/' + convId + '/share', { method: 'POST' });
-    const d = await r.json();
-    if (!r.ok || !d.share_url) {
-      shareStatusEl.textContent = d.error || 'Could not create a share link.';
-      return;
-    }
-    shareLinkInput.value = d.share_url;
-    shareLinkInput.title = d.share_url;   // hover to see the full link if it's truncated
-    shareLinkInput.dataset.convId = convId;
-    shareStatusEl.textContent = 'Anyone with this link can view this chat. Note: this link only ' +
-      'works once the app is deployed at a real public URL — not on localhost.';
-    shareBtn.classList.add('active');
-    // Auto-select so the full link is easy to see/copy, and so pressing
-    // Ctrl/Cmd+C right away just works without clicking Copy first.
-    requestAnimationFrame(() => { shareLinkInput.focus(); shareLinkInput.select(); });
-  } catch (err) {
-    shareStatusEl.textContent = 'Network error: ' + err.message;
-  }
+  shareBtn.classList.add('active');
+  if (shareRevokeBtn) shareRevokeBtn.style.display = 'none';  // nothing to revoke — it's a static link
+  requestAnimationFrame(() => { shareLinkInput.focus(); shareLinkInput.select(); });
 }
 
-if (shareBtn) shareBtn.addEventListener('click', () => openShareModalFor(activeConvId));
+if (shareBtn) shareBtn.addEventListener('click', openInviteModal);
 if (shareCloseBtn) shareCloseBtn.addEventListener('click', closeShareModal);
 if (shareModalOverlay) shareModalOverlay.addEventListener('click', e => { if (e.target === shareModalOverlay) closeShareModal(); });
 if (shareLinkInput) shareLinkInput.addEventListener('click', () => shareLinkInput.select());
@@ -3442,18 +3428,10 @@ if (shareNativeBtn) shareNativeBtn.addEventListener('click', async () => {
   shareCopyBtn.click();
 });
 
-if (shareRevokeBtn) shareRevokeBtn.addEventListener('click', async () => {
-  const convId = shareLinkInput.dataset.convId;
-  if (!convId) { closeShareModal(); return; }
-  try {
-    await fetch('/api/conversations/' + convId + '/share', { method: 'DELETE' });
-    shareStatusEl.textContent = 'Sharing stopped — the old link no longer works.';
-    shareLinkInput.value = '';
-    shareBtn.classList.remove('active');
-  } catch (err) {
-    shareStatusEl.textContent = 'Network error: ' + err.message;
-  }
-});
+// shareRevokeBtn is hidden in openInviteModal() — the invite link is static
+// and can't be "revoked" (it's just the site's own address). Kept wired to
+// closeShareModal() only in case older cached HTML still shows the button.
+if (shareRevokeBtn) shareRevokeBtn.addEventListener('click', closeShareModal);
 
 const settingsBtn        = document.getElementById('settings-btn');
 const settingsModalOverlay=document.getElementById('settings-modal-overlay');
