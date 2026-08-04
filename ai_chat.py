@@ -666,6 +666,47 @@ def _user_conv_dir(username):
     _os.makedirs(path, exist_ok=True)
     return path
 
+# --- Permanent, account-wide invite link -------------------------------------
+# One stable code, generated once and reused forever after (persisted to
+# disk / Supabase so it doesn't change on every restart or redeploy). This
+# is what makes the invite link look/behave like an actual generated share
+# link (…/invite/<code>) instead of just the bare domain, while still
+# always resolving to the same public, no-login chat page for everyone.
+_INVITE_CODE_FILE = _os.path.join(_DATA_DIR, "invite_code.txt")
+_invite_code_lock = threading.Lock()
+
+def get_or_create_invite_code():
+    with _invite_code_lock:
+        if SUPABASE_URL:
+            try:
+                r = requests.get(sb("app_settings?key=eq.invite_code&select=value"),
+                                  headers=sb_headers(), timeout=10)
+                if r.status_code == 200 and r.json():
+                    return r.json()[0]["value"]
+            except Exception as e:
+                print(f"[Supabase] get_or_create_invite_code read failed: {e} — falling back to local file.")
+        if _os.path.exists(_INVITE_CODE_FILE):
+            try:
+                with open(_INVITE_CODE_FILE, encoding="utf-8") as f:
+                    code = f.read().strip()
+                    if code:
+                        return code
+            except Exception:
+                pass
+        code = uuid.uuid4().hex[:12]
+        if SUPABASE_URL:
+            try:
+                requests.post(sb("app_settings"), headers=sb_headers(),
+                              json={"key": "invite_code", "value": code}, timeout=10)
+            except Exception as e:
+                print(f"[Supabase] get_or_create_invite_code write failed: {e} — falling back to local file.")
+        try:
+            with open(_INVITE_CODE_FILE, "w", encoding="utf-8") as f:
+                f.write(code)
+        except Exception as e:
+            print(f"[invite] could not persist invite code to disk: {e}")
+        return code
+
 def _conv_file(username, conv_id):
     return _os.path.join(_user_conv_dir(username), f"{conv_id}.json")
 
@@ -3387,15 +3428,23 @@ function closeShareModal() { shareModalOverlay.classList.remove('show'); }
 // their own private, anonymous conversation history (see current_username()
 // server-side). This is just the site's own root URL.
 function openInviteModal() {
-  const link = location.origin + '/';
-  shareLinkInput.value = link;
-  shareLinkInput.title = link;
-  shareStatusEl.textContent = 'Anyone who opens this link can chat with Mythic AI right away — ' +
-    'no login needed. Each person gets their own private conversation history; nobody sees yours.';
+  shareLinkInput.value = '';
+  shareLinkInput.title = '';
+  shareStatusEl.textContent = 'Loading your invite link…';
   shareModalOverlay.classList.add('show');
   shareBtn.classList.add('active');
   if (shareRevokeBtn) shareRevokeBtn.style.display = 'none';  // nothing to revoke — it's a static link
-  requestAnimationFrame(() => { shareLinkInput.focus(); shareLinkInput.select(); });
+  fetch('/api/invite-link').then(r => r.json()).then(d => {
+    const link = d.invite_url || (location.origin + '/');
+    shareLinkInput.value = link;
+    shareLinkInput.title = link;
+    shareStatusEl.textContent = 'Anyone who opens this link can chat with Mythic AI right away — ' +
+      'no login needed. Each person gets their own private conversation history; nobody sees yours.';
+    requestAnimationFrame(() => { shareLinkInput.focus(); shareLinkInput.select(); });
+  }).catch(() => {
+    shareLinkInput.value = location.origin + '/';
+    shareStatusEl.textContent = 'Could not generate a custom link, showing the site link instead.';
+  });
 }
 
 if (shareBtn) shareBtn.addEventListener('click', openInviteModal);
@@ -5710,6 +5759,23 @@ def favicon():
 @app.route("/")
 @login_required
 def index():
+    return Response(PAGE, mimetype="text/html; charset=utf-8")
+
+
+@app.route("/api/invite-link", methods=["GET"])
+@login_required
+def api_invite_link():
+    code = get_or_create_invite_code()
+    return jsonify({"invite_url": request.host_url.rstrip("/") + "/invite/" + code})
+
+
+@app.route("/invite/<code>")
+def invite_landing(code):
+    # The code isn't checked against the stored one on purpose: this app has
+    # no login/accounts, so there's no "wrong" invite code to reject — every
+    # visitor already gets their own private, anonymous conversation via
+    # current_username(). This route exists purely so the link looks and
+    # behaves like a real generated share link instead of the bare domain.
     return Response(PAGE, mimetype="text/html; charset=utf-8")
 
 
