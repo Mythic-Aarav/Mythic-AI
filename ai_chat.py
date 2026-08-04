@@ -416,19 +416,42 @@ def _persistent_secret_key():
     env_key = os.environ.get("FLASK_SECRET_KEY")
     if env_key:
         return env_key
+    # On Vercel (and any serverless host), the deployed script directory is
+    # READ-ONLY — only /tmp is writable, and /tmp itself is ephemeral and NOT
+    # shared across instances. That combination means this file-based fallback
+    # can never actually keep your session stable on Vercel: writes here may
+    # raise (read-only fs) or, even if /tmp is used, vanish on the next cold
+    # start / different instance, silently minting a new "you" and breaking
+    # owner checks like the API keys page. Detect that case explicitly instead
+    # of crashing, and fall back to a same-process-lifetime key so at least a
+    # single warm instance stays consistent — but this is NOT a real fix for
+    # Vercel; set FLASK_SECRET_KEY as an env var there (see comment above).
+    is_serverless = bool(os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"))
+    if is_serverless:
+        print("[secret-key] WARNING: FLASK_SECRET_KEY is not set and this is a "
+              "serverless (Vercel) deployment. Sessions/owner status WILL NOT "
+              "persist reliably across requests. Set FLASK_SECRET_KEY in your "
+              "Vercel project's environment variables to fix this.")
+        return str(uuid.uuid4())
     base_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(base_dir, "chat_data")
-    os.makedirs(data_dir, exist_ok=True)
-    key_path = os.path.join(data_dir, "flask_secret.key")
-    if os.path.exists(key_path):
-        with open(key_path, "r") as f:
-            existing = f.read().strip()
-        if existing:
-            return existing
-    new_key = str(uuid.uuid4())
-    with open(key_path, "w") as f:
-        f.write(new_key)
-    return new_key
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        key_path = os.path.join(data_dir, "flask_secret.key")
+        if os.path.exists(key_path):
+            with open(key_path, "r") as f:
+                existing = f.read().strip()
+            if existing:
+                return existing
+        new_key = str(uuid.uuid4())
+        with open(key_path, "w") as f:
+            f.write(new_key)
+        return new_key
+    except OSError as e:
+        print(f"[secret-key] Could not persist secret key to disk ({e}); "
+              f"using a process-lifetime key instead. Set FLASK_SECRET_KEY "
+              f"as an env var for a permanent fix.")
+        return str(uuid.uuid4())
 
 
 app.secret_key = _persistent_secret_key()
