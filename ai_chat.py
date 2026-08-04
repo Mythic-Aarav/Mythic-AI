@@ -786,7 +786,7 @@ def get_or_create_owner_id(preferred_id=None):
         return oid
 
 # --- Public API keys ("aarav-...") --------------------------------------------
-# Lets other apps/people call YOUR Mythic AI like a hosted API,
+# Lets other apps/people call YOUR Mythic AI like a hosted API (OpenAI-style),
 # authenticated with a personal key instead of the free chat UI. Keys are
 # generated as "aarav-<random>", and only a SHA-256 hash is ever stored —
 # the plaintext key is shown once at creation time and never again, same as
@@ -2207,6 +2207,7 @@ PAGE = r"""<!DOCTYPE html>
     #speak-toggle { display:none; }
   }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 <body>
 <div class="layout">
@@ -2377,6 +2378,16 @@ PAGE = r"""<!DOCTYPE html>
       <input type="text" id="share-link-input" readonly>
       <button id="share-open-btn" type="button" title="Open in a new tab">↗</button>
       <button id="share-copy-btn" type="button">Copy</button>
+    </div>
+    <div id="share-qr-wrap" style="display:flex;justify-content:center;margin:16px 0;">
+      <div id="share-qr-box" style="position:relative;width:220px;height:220px;background:#fff;padding:12px;border-radius:12px;">
+        <div id="share-qr-canvas" style="width:100%;height:100%;"></div>
+        <div id="share-qr-logo" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+             width:52px;height:52px;background:#fff;border-radius:12px;display:flex;align-items:center;
+             justify-content:center;box-shadow:0 0 0 4px #fff;">
+          <img src="/icon.png" alt="Mythic AI" style="width:40px;height:40px;border-radius:8px;object-fit:cover;">
+        </div>
+      </div>
     </div>
     <button id="share-native-btn" type="button">📤 Share via…</button>
     <button id="share-revoke-btn" type="button">Stop sharing</button>
@@ -3691,9 +3702,27 @@ function openInviteModal() {
     shareStatusEl.textContent = 'Anyone who opens this link can chat with Mythic AI right away — ' +
       'no login needed. Each person gets their own private conversation history; nobody sees yours.';
     requestAnimationFrame(() => { shareLinkInput.focus(); shareLinkInput.select(); });
+    renderInviteQrCode(link);
   }).catch(() => {
     shareLinkInput.value = location.origin + '/';
     shareStatusEl.textContent = 'Could not generate a custom link, showing the site link instead.';
+    renderInviteQrCode(location.origin + '/');
+  });
+}
+
+// High error-correction (level H) tolerates ~30% obscured area, which is
+// what makes the logo sit safely in the middle without breaking the scan.
+function renderInviteQrCode(link) {
+  const box = document.getElementById('share-qr-canvas');
+  if (!box || typeof QRCode === 'undefined') return;
+  box.innerHTML = '';
+  new QRCode(box, {
+    text: link,
+    width: 196,
+    height: 196,
+    colorDark: '#000000',
+    colorLight: '#ffffff',
+    correctLevel: QRCode.CorrectLevel.H,
   });
 }
 
