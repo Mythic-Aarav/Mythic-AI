@@ -3935,13 +3935,7 @@ settingsBtn.addEventListener('click', () => { settingsModalOverlay.style.display
 
 const apiKeysShortcutBtn = document.getElementById('api-keys-shortcut-btn');
 if (apiKeysShortcutBtn) apiKeysShortcutBtn.addEventListener('click', () => {
-  settingsModalOverlay.style.display = 'flex';
-  loadApiKeys();
-  requestAnimationFrame(() => {
-    const section = document.getElementById('api-keys-section');
-    if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  });
-  if (isMobile()) closeSidebar();
+  window.open('/api-usage', '_blank');
 });
 settingsCloseBtn.addEventListener('click', () => { saveSettings(); settingsModalOverlay.style.display = 'none'; });
 settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsModalOverlay) { saveSettings(); settingsModalOverlay.style.display = 'none'; } });
@@ -6448,82 +6442,177 @@ def api_usage_page():
         return Response("<h1 style='font-family:sans-serif'>Only the account owner can view API usage.</h1>",
                          mimetype="text/html; charset=utf-8"), 403
 
-    keys = list_api_keys()
-    total_calls = sum(k.get("request_count") or 0 for k in keys)
-    active_count = sum(1 for k in keys if k.get("active"))
-
-    rows = ""
-    for k in keys:
-        state = "ACTIVE" if k.get("active") else "REVOKED"
-        state_color = "#1a9e5c" if k.get("active") else "#c0392b"
-        rows += f"""
-        <div class="key-card">
-          <div class="key-top">
-            <div class="key-name">{k.get('label') or '(unnamed key)'}</div>
-            <div class="key-state" style="color:{state_color};border-color:{state_color};">{state}</div>
-          </div>
-          <div class="key-id">{k.get('key_prefix','')}</div>
-          <div class="key-stats">
-            <div class="stat">
-              <div class="stat-num">{k.get('request_count') or 0}</div>
-              <div class="stat-label">API calls</div>
-            </div>
-            <div class="stat">
-              <div class="stat-num small">{_fmt_dt(k.get('created_at'))}</div>
-              <div class="stat-label">Created</div>
-            </div>
-            <div class="stat">
-              <div class="stat-num small">{_fmt_dt(k.get('last_used_at'))}</div>
-              <div class="stat-label">Last used</div>
-            </div>
-          </div>
-        </div>"""
-
-    if not keys:
-        rows = "<div class='empty'>No API keys yet. Generate one from Settings → API Keys.</div>"
-
-    html = f"""<!DOCTYPE html>
+    html = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>API Usage · Mythic AI</title>
+<title>API Keys · Mythic AI</title>
 <style>
-  * {{ box-sizing:border-box; }}
-  body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-          background:#0f1115; color:#f2f2f2; margin:0; padding:32px 20px 60px; }}
-  .wrap {{ max-width:820px; margin:0 auto; }}
-  h1 {{ font-size:34px; margin:0 0 6px; }}
-  .sub {{ color:#9a9ea6; font-size:15px; margin-bottom:32px; }}
-  .totals {{ display:flex; gap:16px; margin-bottom:36px; flex-wrap:wrap; }}
-  .totals .box {{ flex:1; min-width:160px; background:#1a1d24; border:1px solid #2a2e37;
-                   border-radius:14px; padding:20px; text-align:center; }}
-  .totals .num {{ font-size:44px; font-weight:800; line-height:1.1; }}
-  .totals .label {{ font-size:13px; color:#9a9ea6; margin-top:6px; letter-spacing:.3px; text-transform:uppercase; }}
-  .key-card {{ background:#1a1d24; border:1px solid #2a2e37; border-radius:14px;
-               padding:20px 22px; margin-bottom:16px; }}
-  .key-top {{ display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }}
-  .key-name {{ font-size:22px; font-weight:700; }}
-  .key-state {{ font-size:11px; font-weight:700; letter-spacing:.5px; border:1px solid; border-radius:20px;
-                padding:3px 10px; }}
-  .key-id {{ font-family:monospace; color:#9a9ea6; font-size:13px; margin:6px 0 18px; }}
-  .key-stats {{ display:flex; gap:24px; flex-wrap:wrap; }}
-  .stat-num {{ font-size:38px; font-weight:800; }}
-  .stat-num.small {{ font-size:16px; font-weight:600; }}
-  .stat-label {{ font-size:12px; color:#9a9ea6; margin-top:4px; text-transform:uppercase; letter-spacing:.3px; }}
-  .empty {{ color:#9a9ea6; font-size:16px; padding:40px 0; text-align:center; }}
-  a.back {{ color:#9a9ea6; text-decoration:none; font-size:14px; display:inline-block; margin-bottom:20px; }}
-  a.back:hover {{ color:#fff; }}
+  * { box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+          background:#0f1115; color:#f2f2f2; margin:0; padding:32px 24px 60px; }
+  .wrap { max-width:1000px; margin:0 auto; }
+  a.back { color:#9a9ea6; text-decoration:none; font-size:14px; display:inline-block; margin-bottom:20px; }
+  a.back:hover { color:#fff; }
+  .headrow { display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:14px; margin-bottom:8px; }
+  h1 { font-size:30px; margin:0 0 6px; }
+  .sub { color:#9a9ea6; font-size:14px; margin-bottom:30px; max-width:560px; line-height:1.5; }
+  .gen-btn { background:#e8532a; color:#fff; border:none; border-radius:8px; padding:11px 18px;
+             font-size:13px; font-weight:700; letter-spacing:.3px; cursor:pointer; white-space:nowrap; }
+  .gen-btn:hover { background:#d1471f; }
+  .totals { display:flex; gap:16px; margin-bottom:30px; flex-wrap:wrap; }
+  .totals .box { flex:1; min-width:150px; background:#1a1d24; border:1px solid #2a2e37;
+                   border-radius:14px; padding:18px; text-align:center; }
+  .totals .num { font-size:40px; font-weight:800; line-height:1.1; }
+  .totals .label { font-size:12px; color:#9a9ea6; margin-top:6px; letter-spacing:.3px; text-transform:uppercase; }
+  table { width:100%; border-collapse:collapse; background:#1a1d24; border:1px solid #2a2e37; border-radius:14px; overflow:hidden; }
+  thead th { text-align:left; font-size:11px; letter-spacing:.5px; text-transform:uppercase; color:#9a9ea6;
+             padding:14px 16px; border-bottom:1px solid #2a2e37; }
+  tbody td { padding:16px; border-bottom:1px solid #22252c; font-size:14px; vertical-align:middle; }
+  tbody tr:last-child td { border-bottom:none; }
+  tbody tr:hover { background:#20232b; }
+  .name-cell { font-weight:700; font-size:15px; }
+  .key-cell { font-family:monospace; color:#c7cad1; display:flex; align-items:center; gap:8px; }
+  .copy-btn { background:none; border:none; color:#9a9ea6; cursor:pointer; font-size:14px; padding:2px 4px; }
+  .copy-btn:hover { color:#fff; }
+  .calls-cell { font-weight:700; font-size:18px; }
+  .state-pill { font-size:11px; font-weight:700; letter-spacing:.4px; border:1px solid; border-radius:20px; padding:3px 10px; display:inline-block; }
+  .state-active { color:#1a9e5c; border-color:#1a9e5c; }
+  .state-revoked { color:#c0392b; border-color:#c0392b; }
+  .revoke-btn { background:none; border:1px solid #3a3e47; color:#c0392b; border-radius:6px; padding:6px 10px;
+                font-size:12px; cursor:pointer; }
+  .revoke-btn:hover { background:#c0392b; color:#fff; border-color:#c0392b; }
+  .empty { color:#9a9ea6; font-size:15px; padding:50px 0; text-align:center; }
+  .modal-overlay { display:none; position:fixed; inset:0; background:#000a; align-items:center; justify-content:center; z-index:50; }
+  .modal { background:#1a1d24; border:1px solid #2a2e37; border-radius:14px; padding:26px; width:min(90vw,420px); }
+  .modal h3 { margin:0 0 14px; font-size:18px; }
+  .modal input { width:100%; padding:10px 12px; border-radius:8px; border:1px solid #3a3e47; background:#0f1115;
+                 color:#fff; font-size:14px; margin-bottom:14px; }
+  .modal-actions { display:flex; gap:10px; justify-content:flex-end; }
+  .modal-actions button { border-radius:8px; padding:9px 16px; font-size:13px; cursor:pointer; border:none; }
+  .btn-cancel { background:#2a2e37; color:#f2f2f2; }
+  .btn-confirm { background:#e8532a; color:#fff; font-weight:700; }
+  .new-key-box { background:#0f1115; border:1px solid #1a9e5c; border-radius:8px; padding:12px; margin-bottom:14px;
+                 font-family:monospace; font-size:13px; word-break:break-all; color:#7be3ab; }
 </style></head>
 <body>
   <div class="wrap">
     <a class="back" href="/">← Back to chat</a>
-    <h1>API Usage</h1>
-    <div class="sub">Mythic AI · API keys and call activity</div>
-    <div class="totals">
-      <div class="box"><div class="num">{active_count}</div><div class="label">Active Keys</div></div>
-      <div class="box"><div class="num">{total_calls}</div><div class="label">Total Calls</div></div>
-      <div class="box"><div class="num">{len(keys)}</div><div class="label">Total Keys</div></div>
+    <div class="headrow">
+      <div>
+        <h1>API keys</h1>
+        <div class="sub">Create and manage API keys for authenticating requests to Mythic AI. These keys allow programmatic access to your app.</div>
+      </div>
+      <button class="gen-btn" onclick="openCreateModal()">GENERATE API KEY</button>
     </div>
-    {rows}
+    <div class="totals" id="totals-row"></div>
+    <table>
+      <thead><tr>
+        <th>Name</th><th>API Key</th><th>Created At</th><th>Calls</th><th>State</th><th>Options</th>
+      </tr></thead>
+      <tbody id="keys-tbody"></tbody>
+    </table>
+    <div class="empty" id="empty-msg" style="display:none;">No API keys yet. Click "Generate API Key" to create one.</div>
   </div>
+
+  <div class="modal-overlay" id="create-overlay">
+    <div class="modal">
+      <h3>Generate API key</h3>
+      <input type="text" id="create-label" placeholder="Key name (optional)" maxlength="100">
+      <div id="new-key-result"></div>
+      <div class="modal-actions">
+        <button class="btn-cancel" onclick="closeCreateModal()">Close</button>
+        <button class="btn-confirm" id="create-confirm-btn" onclick="doCreateKey()">Generate</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+function fmtDate(iso) {
+  if (!iso) return 'Never';
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString(undefined, { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' });
+}
+
+async function loadKeys() {
+  const res = await fetch('/api/keys');
+  if (res.status === 403) {
+    document.querySelector('.wrap').innerHTML = '<a class="back" href="/">← Back to chat</a><div class="empty">Only the account owner can view API keys.</div>';
+    return;
+  }
+  const data = await res.json();
+  const keys = data.keys || [];
+  const totalsRow = document.getElementById('totals-row');
+  const tbody = document.getElementById('keys-tbody');
+  const emptyMsg = document.getElementById('empty-msg');
+
+  const activeCount = keys.filter(k => k.active).length;
+  const totalCalls = keys.reduce((s,k) => s + (k.request_count || 0), 0);
+  totalsRow.innerHTML = `
+    <div class="box"><div class="num">${activeCount}</div><div class="label">Active Keys</div></div>
+    <div class="box"><div class="num">${totalCalls}</div><div class="label">Total Calls</div></div>
+    <div class="box"><div class="num">${keys.length}</div><div class="label">Total Keys</div></div>`;
+
+  if (!keys.length) {
+    tbody.innerHTML = '';
+    emptyMsg.style.display = 'block';
+    return;
+  }
+  emptyMsg.style.display = 'none';
+
+  tbody.innerHTML = keys.map(k => `
+    <tr>
+      <td class="name-cell">${(k.label || '(unnamed key)').replace(/</g,'&lt;')}</td>
+      <td><div class="key-cell"><span>${k.key_prefix || ''}</span>
+        <button class="copy-btn" title="Copy prefix" onclick="navigator.clipboard.writeText('${(k.key_prefix||'').replace(/'/g,"")}')">📋</button></div></td>
+      <td>${fmtDate(k.created_at)}</td>
+      <td class="calls-cell">${k.request_count || 0}</td>
+      <td><span class="state-pill ${k.active ? 'state-active' : 'state-revoked'}">${k.active ? 'ACTIVE' : 'REVOKED'}</span></td>
+      <td>${k.active ? `<button class="revoke-btn" onclick="revokeKey('${k.id}')">Revoke</button>` : '—'}</td>
+    </tr>`).join('');
+}
+
+async function revokeKey(id) {
+  if (!confirm('Revoke this key? Apps using it will stop working immediately.')) return;
+  await fetch('/api/keys/' + id, { method: 'DELETE' });
+  loadKeys();
+}
+
+function openCreateModal() {
+  document.getElementById('create-label').value = '';
+  document.getElementById('new-key-result').innerHTML = '';
+  document.getElementById('create-overlay').style.display = 'flex';
+}
+function closeCreateModal() {
+  document.getElementById('create-overlay').style.display = 'none';
+  loadKeys();
+}
+async function doCreateKey() {
+  const label = document.getElementById('create-label').value.trim();
+  const btn = document.getElementById('create-confirm-btn');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+    });
+    const data = await res.json();
+    if (data.api_key) {
+      document.getElementById('new-key-result').innerHTML =
+        '<div class="new-key-box">' + data.api_key + '</div><div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again.</div>';
+      loadKeys();
+    } else if (data.error) {
+      alert(data.error);
+    }
+  } catch (e) {
+    alert('Could not create key.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+loadKeys();
+</script>
 </body></html>"""
     return Response(html, mimetype="text/html; charset=utf-8")
 
