@@ -746,7 +746,11 @@ def _save_shares_index(data):
 
 def get_active_share_id(username, conv_id):
     """Returns the existing active (non-revoked) share id for this
-    conversation, or None if it has never been shared / was revoked."""
+    conversation, or None if it has never been shared / was revoked.
+    Checks Supabase first (if configured), then always falls back to
+    checking the local file index too — a share may have landed there if
+    Supabase writes were failing (e.g. the `shares` table doesn't exist
+    yet) when it was created. See create_share_link()."""
     if SUPABASE_URL:
         try:
             r = requests.get(
@@ -755,9 +759,11 @@ def get_active_share_id(username, conv_id):
             )
             if r.status_code == 200 and r.json():
                 return r.json()[0]["id"]
+            elif r.status_code != 200:
+                print(f"[Supabase] get_active_share_id: HTTP {r.status_code} — {r.text[:200]}")
         except Exception as e:
             print(f"[Supabase] get_active_share_id exception: {e}")
-        return None
+
     with _shares_lock:
         idx = _load_shares_index()
     for sid, rec in idx.items():
@@ -768,7 +774,13 @@ def get_active_share_id(username, conv_id):
 
 def create_share_link(username, conv_id):
     """Creates (or reuses, if one is already active) a public share id for
-    conv_id owned by username. Returns the share_id string."""
+    conv_id owned by username. Returns the share_id string.
+
+    IMPORTANT: if Supabase is configured but the write fails for any reason
+    (most commonly: the `shares` table hasn't been created yet), this does
+    NOT hand back a link that silently 404s — it transparently falls back
+    to the local JSON index instead, so the link that's returned always
+    actually works."""
     existing = get_active_share_id(username, conv_id)
     if existing:
         return existing
@@ -783,11 +795,12 @@ def create_share_link(username, conv_id):
                       "revoked": False, "created_at": time.time()},
                 timeout=10,
             )
-            if r.status_code not in (200, 201, 204):
-                print(f"[Supabase] create_share_link failed: HTTP {r.status_code} — {r.text[:300]}")
+            if r.status_code in (200, 201, 204):
+                return share_id
+            print(f"[Supabase] create_share_link failed: HTTP {r.status_code} — {r.text[:300]}"
+                  f" — falling back to local storage for this share link.")
         except Exception as e:
-            print(f"[Supabase] create_share_link exception: {e}")
-        return share_id
+            print(f"[Supabase] create_share_link exception: {e} — falling back to local storage.")
 
     with _shares_lock:
         idx = _load_shares_index()
@@ -799,7 +812,9 @@ def create_share_link(username, conv_id):
 
 def resolve_share_link(share_id):
     """Returns {"username":..., "conv_id":...} for an active (non-revoked)
-    share id, or None if it doesn't exist / has been revoked."""
+    share id, or None if it doesn't exist / has been revoked. Checks
+    Supabase first (if configured), then always checks the local file
+    index too, since create_share_link() may have fallen back to it."""
     if SUPABASE_URL:
         try:
             r = requests.get(
@@ -808,11 +823,14 @@ def resolve_share_link(share_id):
             )
             if r.status_code == 200:
                 rows = r.json()
-                if rows and not rows[0].get("revoked"):
+                if rows:
+                    if rows[0].get("revoked"):
+                        return None
                     return {"username": rows[0]["username"], "conv_id": rows[0]["conv_id"]}
+            else:
+                print(f"[Supabase] resolve_share_link: HTTP {r.status_code} — {r.text[:200]}")
         except Exception as e:
             print(f"[Supabase] resolve_share_link exception: {e}")
-        return None
 
     idx = _load_shares_index()
     rec = idx.get(share_id)
@@ -822,7 +840,9 @@ def resolve_share_link(share_id):
 
 
 def revoke_share_link(username, conv_id):
-    """Revokes any active share link(s) for this conversation."""
+    """Revokes any active share link(s) for this conversation, in both
+    Supabase and the local index (a share may live in either, depending on
+    whether Supabase writes were working when it was created)."""
     if SUPABASE_URL:
         try:
             requests.patch(
@@ -831,7 +851,6 @@ def revoke_share_link(username, conv_id):
             )
         except Exception as e:
             print(f"[Supabase] revoke_share_link exception: {e}")
-        return
     with _shares_lock:
         idx = _load_shares_index()
         changed = False
@@ -5286,9 +5305,12 @@ SHARE_PAGE = r"""<!DOCTYPE html>
   header { position:sticky; top:0; background:var(--bg); border-bottom:1px solid var(--border);
     padding:14px 20px; display:flex; align-items:center; justify-content:space-between; gap:10px;
     z-index:10; }
-  header .brand { font-weight:700; color:var(--accent); font-variant:small-caps; letter-spacing:.5px; }
-  header .badge { font-size:11px; color:var(--muted); border:1px solid var(--border); border-radius:20px;
-    padding:4px 10px; }
+  header .brand { display:flex; align-items:center; gap:8px; font-weight:700; color:var(--accent);
+    font-variant:small-caps; letter-spacing:.5px; }
+  header .brand img { width:26px; height:26px; border-radius:7px; display:block; }
+  header .badge { display:inline-flex; align-items:center; gap:6px; font-size:11px; color:var(--muted);
+    border:1px solid var(--border); border-radius:20px; padding:5px 12px; }
+  header .badge svg { width:13px; height:13px; flex-shrink:0; }
   header a.cta { background:var(--accent); color:#fff; text-decoration:none; font-size:12.5px;
     font-weight:700; padding:8px 14px; border-radius:8px; }
   #wrap { max-width:760px; margin:0 auto; padding:20px; }
@@ -5310,8 +5332,14 @@ SHARE_PAGE = r"""<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <span class="brand">Mythic AI</span>
-  <span class="badge">🔗 Shared chat · read-only</span>
+  <span class="brand"><img src="/icon.png" alt="Mythic AI"> Mythic AI</span>
+  <span class="badge">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+    </svg>
+    Shared chat · read-only
+  </span>
   <a class="cta" href="/">Open Mythic AI</a>
 </header>
 <div id="wrap">
@@ -6412,6 +6440,11 @@ def api_health():
                     ("No SUPABASE_URL set — conversations are saved to local disk on the server. "
                      "On Render this works fine while the instance stays up, but is wiped on redeploy "
                      "and isn't shared across instances."),
+            "shares_note": ("Share links (/share/<id>) use a separate `shares` table in Supabase when "
+                             "configured: columns id (text, primary key), username (text), conv_id (text), "
+                             "revoked (bool, default false), created_at (float8). If that table doesn't "
+                             "exist yet, share links automatically fall back to local storage instead of "
+                             "breaking, but they'll be lost on redeploy — create the table for persistence."),
         },
         "image_generation": {
             "nano_banana":  bool(NANO_BANANA_API_KEY),
