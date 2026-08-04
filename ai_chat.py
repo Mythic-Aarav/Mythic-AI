@@ -847,15 +847,18 @@ def _save_local_api_keys(keys):
     except Exception as e:
         print(f"[api_keys] could not persist keys to disk: {e}")
 
-def create_api_key(label=""):
+def create_api_key(label="", username=""):
     """Generates a new 'aarav-...' key, stores only its hash, and returns the
-    ONE-TIME plaintext key alongside its public record."""
+    ONE-TIME plaintext key alongside its public record. Scoped to `username`
+    (the creator's session id) so each visitor only ever sees/manages their
+    own keys, not everyone else's."""
     raw_key = API_KEY_PREFIX + secrets.token_urlsafe(32)
     record = {
         "id": str(uuid.uuid4()),
         "key_hash": _hash_api_key(raw_key),
         "key_prefix": raw_key[:len(API_KEY_PREFIX) + 6] + "…",
         "label": (label or "").strip()[:100],
+        "username": username,
         "created_at": datetime.datetime.utcnow().isoformat() + "Z",
         "active": True,
         "last_used_at": None,
@@ -877,31 +880,38 @@ def create_api_key(label=""):
         _save_local_api_keys(keys)
         return raw_key, record
 
-def list_api_keys():
-    """Returns key records WITHOUT the hash (never expose that) for display."""
+def list_api_keys(username=""):
+    """Returns key records WITHOUT the hash (never expose that) for display,
+    filtered to only the ones the calling user created."""
     if SUPABASE_URL:
         try:
-            r = requests.get(sb("api_keys?select=id,key_prefix,label,created_at,active,last_used_at,request_count&order=created_at.desc"),
-                              headers=sb_headers(), timeout=10)
+            r = requests.get(
+                sb(f"api_keys?select=id,key_prefix,label,created_at,active,last_used_at,request_count"
+                   f"&username=eq.{urllib.parse.quote(username)}&order=created_at.desc"),
+                headers=sb_headers(), timeout=10)
             if r.status_code == 200:
                 return r.json()
         except Exception as e:
             print(f"[api_keys] Supabase read failed: {e} — falling back to local file.")
     keys = _load_local_api_keys()
-    return [{k: v for k, v in rec.items() if k != "key_hash"} for rec in reversed(keys)]
+    return [{k: v for k, v in rec.items() if k != "key_hash"}
+            for rec in reversed(keys) if rec.get("username") == username]
 
-def revoke_api_key(key_id):
+def revoke_api_key(key_id, username=""):
+    """Only revokes the key if it belongs to `username` — prevents one
+    visitor from revoking someone else's key by guessing/reusing an id."""
     if SUPABASE_URL:
         try:
-            requests.patch(sb(f"api_keys?id=eq.{key_id}"), headers=sb_headers(),
-                            json={"active": False}, timeout=10)
-            return True
+            r = requests.patch(
+                sb(f"api_keys?id=eq.{key_id}&username=eq.{urllib.parse.quote(username)}"),
+                headers=sb_headers(), json={"active": False}, timeout=10)
+            return r.status_code in (200, 204)
         except Exception as e:
             print(f"[api_keys] Supabase revoke failed: {e} — falling back to local file.")
     keys = _load_local_api_keys()
     found = False
     for rec in keys:
-        if rec["id"] == key_id:
+        if rec["id"] == key_id and rec.get("username") == username:
             rec["active"] = False
             found = True
     if found:
@@ -6670,9 +6680,7 @@ def _require_owner():
 @app.route("/api/keys", methods=["GET"])
 @login_required
 def api_keys_list():
-    if not _require_owner():
-        return jsonify({"error": "Only the account owner can manage API keys."}), 403
-    return jsonify({"keys": list_api_keys()})
+    return jsonify({"keys": list_api_keys(current_username())})
 
 def _fmt_dt(iso_str):
     if not iso_str:
@@ -6686,23 +6694,6 @@ def _fmt_dt(iso_str):
 @app.route("/api-usage")
 @login_required
 def api_usage_page():
-    if not _require_owner():
-        return Response(
-            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-            "<style>body{background:#0f1115;color:#f2f2f2;font-family:-apple-system,"
-            "BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;padding:40px 24px;}"
-            "h1{font-size:22px;margin:0 0 10px;} p{color:#9a9ea6;font-size:14px;max-width:480px;"
-            "line-height:1.5;} a{color:#e8532a;}</style></head><body>"
-            "<h1>Only the account owner can view API usage.</h1>"
-            "<p>If this is your own app and you're seeing this unexpectedly, your session "
-            "likely isn't recognized as the owner session — this commonly happens on serverless "
-            "hosts (like Vercel) where the account/session data resets between requests unless "
-            "FLASK_SECRET_KEY and a persistent database (e.g. Supabase) are configured. "
-            "<a href='/'>← Back to chat</a></p>"
-            "</body></html>",
-            mimetype="text/html; charset=utf-8"), 403
-
     html = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>API Keys · Mythic AI</title>
