@@ -6439,8 +6439,21 @@ def _fmt_dt(iso_str):
 @login_required
 def api_usage_page():
     if not _require_owner():
-        return Response("<h1 style='font-family:sans-serif'>Only the account owner can view API usage.</h1>",
-                         mimetype="text/html; charset=utf-8"), 403
+        return Response(
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+            "<style>body{background:#0f1115;color:#f2f2f2;font-family:-apple-system,"
+            "BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;padding:40px 24px;}"
+            "h1{font-size:22px;margin:0 0 10px;} p{color:#9a9ea6;font-size:14px;max-width:480px;"
+            "line-height:1.5;} a{color:#e8532a;}</style></head><body>"
+            "<h1>Only the account owner can view API usage.</h1>"
+            "<p>If this is your own app and you're seeing this unexpectedly, your session "
+            "likely isn't recognized as the owner session — this commonly happens on serverless "
+            "hosts (like Vercel) where the account/session data resets between requests unless "
+            "FLASK_SECRET_KEY and a persistent database (e.g. Supabase) are configured. "
+            "<a href='/'>← Back to chat</a></p>"
+            "</body></html>",
+            mimetype="text/html; charset=utf-8"), 403
 
     html = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
