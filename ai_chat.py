@@ -1884,9 +1884,13 @@ PAGE = r"""<!DOCTYPE html>
     border-right:1px solid var(--border); display:flex; flex-direction:column;
     transition:margin-left .2s ease; }
   #sidebar.hidden { margin-left:calc(-1 * var(--sidebar-w)); }
-  #new-chat-btn { margin:12px; padding:10px 14px; background:var(--accent); color:#fff;
+  #new-chat-btn { margin:12px 12px 6px; padding:10px 14px; background:var(--accent); color:#fff;
     border:none; border-radius:8px; font-size:13.5px; font-weight:600; cursor:pointer; text-align:left; }
   #new-chat-btn:hover { opacity:.9; }
+  #settings-btn { margin:0 12px 6px; padding:9px 14px; background:none; border:1px solid var(--border);
+    color:var(--muted); border-radius:8px; font-size:13px; font-weight:500; cursor:pointer;
+    text-align:left; touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+  #settings-btn:hover { background:var(--panel); color:var(--text); border-color:var(--accent); }
   #conv-list { flex:1; overflow-y:auto; padding:0 8px; display:flex; flex-direction:column; gap:2px; }
   .conv-item { display:flex; align-items:center; justify-content:space-between; gap:6px;
     padding:9px 10px; border-radius:7px; cursor:pointer; font-size:13px; color:var(--muted); }
@@ -1919,10 +1923,6 @@ PAGE = r"""<!DOCTYPE html>
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
   #name-btn:hover { background:var(--panel); }
-  #settings-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
-    display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
-  #settings-btn:hover { background:var(--panel); }
   #export-btn { background:none; border:1px solid var(--border); color:var(--muted);
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
@@ -2168,7 +2168,6 @@ PAGE = r"""<!DOCTYPE html>
     header h1 { font-size:14px; }
     #sidebar-toggle { width:36px; height:36px; font-size:13px; }
     #name-btn { width:36px; height:36px; font-size:13px; }
-    #settings-btn { width:36px; height:36px; font-size:13px; }
     #export-btn { width:36px; height:36px; font-size:13px; }
     #share-btn { width:36px; height:36px; font-size:13px; }
     #vip-btn { width:36px; height:36px; font-size:13px; }
@@ -2214,6 +2213,7 @@ PAGE = r"""<!DOCTYPE html>
   <div id="sidebar-overlay" style="display:none;position:fixed;inset:0;background:#0007;z-index:99"></div>
   <div id="sidebar">
     <button id="new-chat-btn">+ New chat</button>
+    <button id="settings-btn" title="Settings">⚙ Settings</button>
     <div style="display:flex;gap:6px;margin:6px 0;">
       <button id="search-chats-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:7px 4px;font-size:12px;cursor:pointer;font-family:inherit;">🔎 Search</button>
       <button id="reminders-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:7px 4px;font-size:12px;cursor:pointer;font-family:inherit;">⏰ Reminders</button>
@@ -2244,7 +2244,6 @@ PAGE = r"""<!DOCTYPE html>
           <span id="fullscreen-icon">⛶</span>
         </button>
         <button id="name-btn" title="What should Mythic AI call you?">🙂</button>
-        <button id="settings-btn" title="Settings">⚙</button>
         <button id="share-btn" title="Get invite link">🔗</button>
         <button id="export-btn" title="Export this chat">⬇</button>
         <button id="clear-btn">Delete chat</button>
