@@ -854,8 +854,12 @@ def create_api_key(label=""):
     with _api_keys_lock:
         if SUPABASE_URL:
             try:
-                requests.post(sb("api_keys"), headers=sb_headers(), json=record, timeout=10)
-                return raw_key, record
+                r = requests.post(sb("api_keys"), headers={**sb_headers(), "Prefer": "return=minimal"},
+                                   json=record, timeout=10)
+                if r.status_code in (200, 201, 204):
+                    return raw_key, record
+                print(f"[api_keys] Supabase write failed: HTTP {r.status_code} — {r.text[:300]} "
+                      f"— falling back to local file.")
             except Exception as e:
                 print(f"[api_keys] Supabase write failed: {e} — falling back to local file.")
         keys = _load_local_api_keys()
