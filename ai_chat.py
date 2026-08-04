@@ -57,6 +57,7 @@ import re
 import json
 import uuid
 import time
+import secrets
 import base64
 import random
 import hashlib
@@ -783,6 +784,124 @@ def get_or_create_owner_id(preferred_id=None):
         except Exception as e:
             print(f"[owner] could not persist owner id to disk: {e}")
         return oid
+
+# --- Public API keys ("aarav-...") --------------------------------------------
+# Lets other apps/people call YOUR Mythic AI like a hosted API (OpenAI-style),
+# authenticated with a personal key instead of the free chat UI. Keys are
+# generated as "aarav-<random>", and only a SHA-256 hash is ever stored —
+# the plaintext key is shown once at creation time and never again, same as
+# how OpenAI/Anthropic/Stripe etc. handle API keys.
+_API_KEYS_FILE = _os.path.join(_DATA_DIR, "api_keys.json")
+_api_keys_lock = threading.Lock()
+API_KEY_PREFIX = "aarav-"
+
+def _hash_api_key(raw_key):
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+def _load_local_api_keys():
+    if _os.path.exists(_API_KEYS_FILE):
+        try:
+            with open(_API_KEYS_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def _save_local_api_keys(keys):
+    try:
+        with open(_API_KEYS_FILE, "w", encoding="utf-8") as f:
+            json.dump(keys, f)
+    except Exception as e:
+        print(f"[api_keys] could not persist keys to disk: {e}")
+
+def create_api_key(label=""):
+    """Generates a new 'aarav-...' key, stores only its hash, and returns the
+    ONE-TIME plaintext key alongside its public record."""
+    raw_key = API_KEY_PREFIX + secrets.token_urlsafe(32)
+    record = {
+        "id": str(uuid.uuid4()),
+        "key_hash": _hash_api_key(raw_key),
+        "key_prefix": raw_key[:len(API_KEY_PREFIX) + 6] + "…",
+        "label": (label or "").strip()[:100],
+        "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "active": True,
+        "last_used_at": None,
+        "request_count": 0,
+    }
+    with _api_keys_lock:
+        if SUPABASE_URL:
+            try:
+                requests.post(sb("api_keys"), headers=sb_headers(), json=record, timeout=10)
+                return raw_key, record
+            except Exception as e:
+                print(f"[api_keys] Supabase write failed: {e} — falling back to local file.")
+        keys = _load_local_api_keys()
+        keys.append(record)
+        _save_local_api_keys(keys)
+        return raw_key, record
+
+def list_api_keys():
+    """Returns key records WITHOUT the hash (never expose that) for display."""
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb("api_keys?select=id,key_prefix,label,created_at,active,last_used_at,request_count&order=created_at.desc"),
+                              headers=sb_headers(), timeout=10)
+            if r.status_code == 200:
+                return r.json()
+        except Exception as e:
+            print(f"[api_keys] Supabase read failed: {e} — falling back to local file.")
+    keys = _load_local_api_keys()
+    return [{k: v for k, v in rec.items() if k != "key_hash"} for rec in reversed(keys)]
+
+def revoke_api_key(key_id):
+    if SUPABASE_URL:
+        try:
+            requests.patch(sb(f"api_keys?id=eq.{key_id}"), headers=sb_headers(),
+                            json={"active": False}, timeout=10)
+            return True
+        except Exception as e:
+            print(f"[api_keys] Supabase revoke failed: {e} — falling back to local file.")
+    keys = _load_local_api_keys()
+    found = False
+    for rec in keys:
+        if rec["id"] == key_id:
+            rec["active"] = False
+            found = True
+    if found:
+        _save_local_api_keys(keys)
+    return found
+
+def verify_api_key(raw_key):
+    """Returns True and records usage if raw_key is a valid, active key."""
+    if not raw_key or not raw_key.startswith(API_KEY_PREFIX):
+        return False
+    key_hash = _hash_api_key(raw_key)
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"api_keys?key_hash=eq.{key_hash}&active=eq.true&select=id,request_count"),
+                              headers=sb_headers(), timeout=10)
+            if r.status_code == 200 and r.json():
+                rec = r.json()[0]
+                try:
+                    requests.patch(sb(f"api_keys?id=eq.{rec['id']}"), headers=sb_headers(),
+                                    json={"last_used_at": now, "request_count": (rec.get("request_count") or 0) + 1},
+                                    timeout=10)
+                except Exception:
+                    pass  # usage tracking is best-effort, shouldn't block the request
+                return True
+            return False
+        except Exception as e:
+            print(f"[api_keys] Supabase verify failed: {e} — falling back to local file.")
+    keys = _load_local_api_keys()
+    for rec in keys:
+        if rec.get("key_hash") == key_hash and rec.get("active"):
+            rec["last_used_at"] = now
+            rec["request_count"] = (rec.get("request_count") or 0) + 1
+            _save_local_api_keys(keys)
+            return True
+    return False
+
 
 def _conv_file(username, conv_id):
     return _os.path.join(_user_conv_dir(username), f"{conv_id}.json")
@@ -2326,19 +2445,19 @@ PAGE = r"""<!DOCTYPE html>
     </div>
 
     <div class="settings-section" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
-      <label>🔑 Your own Groq API key (optional)</label>
-      <input type="password" id="user-groq-key-input" class="settings-text-input"
-        placeholder="gsk_... (leave blank to use the server's key)" autocomplete="off">
-      <div class="hint">Get a free key at console.groq.com/keys. Stored only in this browser, sent
-        with your requests, and used instead of the server's key when present.</div>
-    </div>
-
-    <div class="settings-section">
-      <label>🔑 Your own Cerebras API key (optional)</label>
-      <input type="password" id="user-cerebras-key-input" class="settings-text-input"
-        placeholder="csk-... (leave blank to use the server's key)" autocomplete="off">
-      <div class="hint">Used as your personal fallback if Groq is unavailable. Get one free at
-        cloud.cerebras.ai.</div>
+      <label>🔑 API Keys <span style="font-weight:400;opacity:.7;">(owner only)</span></label>
+      <div class="hint">Let other apps call Mythic AI like an OpenAI-style API. Keys start with
+        <code>aarav-</code> and are shown only once — copy them right away.</div>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <input type="text" id="api-key-label-input" class="settings-text-input"
+          placeholder="Label (e.g. 'BattleZoneApp')" style="flex:1;">
+        <button type="button" id="api-key-create-btn" class="settings-btn">+ Generate</button>
+      </div>
+      <div id="api-key-new-box" style="display:none;margin-top:10px;padding:10px;border:1px solid var(--accent);border-radius:8px;">
+        <div style="font-size:12px;opacity:.8;margin-bottom:4px;">New key — copy it now, it won't be shown again:</div>
+        <code id="api-key-new-value" style="word-break:break-all;user-select:all;"></code>
+      </div>
+      <div id="api-key-list" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;"></div>
     </div>
 
     <div class="settings-section" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
@@ -3622,8 +3741,6 @@ const fontSizeLabel      = document.getElementById('font-size-label');
 const toneSelect         = document.getElementById('tone-select');
 const lengthSelect       = document.getElementById('length-select');
 const customInstructions = document.getElementById('custom-instructions-input');
-const userGroqKeyInput   = document.getElementById('user-groq-key-input');
-const userCerebrasKeyInput = document.getElementById('user-cerebras-key-input');
 
 function loadSettings() {
   const s = JSON.parse(localStorage.getItem('mythic_settings') || '{}');
@@ -3650,8 +3767,6 @@ function loadSettings() {
   if (toneSelect) toneSelect.value = s.tone || 'default';
   if (lengthSelect) lengthSelect.value = s.length || 'default';
   if (customInstructions) customInstructions.value = s.customInstructions || '';
-  if (userGroqKeyInput) userGroqKeyInput.value = localStorage.getItem('mythic_user_groq_key') || '';
-  if (userCerebrasKeyInput) userCerebrasKeyInput.value = localStorage.getItem('mythic_user_cerebras_key') || '';
 }
 
 function saveSettings() {
@@ -3665,16 +3780,72 @@ function saveSettings() {
   s.length = lengthSelect ? lengthSelect.value : 'default';
   s.customInstructions = customInstructions ? customInstructions.value : '';
   localStorage.setItem('mythic_settings', JSON.stringify(s));
-  if (userGroqKeyInput) {
-    const v = userGroqKeyInput.value.trim();
-    if (v) localStorage.setItem('mythic_user_groq_key', v);
-    else localStorage.removeItem('mythic_user_groq_key');
+}
+
+// ─── API key management (owner only — settings panel) ───────────────────────
+const apiKeyLabelInput = document.getElementById('api-key-label-input');
+const apiKeyCreateBtn  = document.getElementById('api-key-create-btn');
+const apiKeyNewBox     = document.getElementById('api-key-new-box');
+const apiKeyNewValue   = document.getElementById('api-key-new-value');
+const apiKeyListEl     = document.getElementById('api-key-list');
+
+async function loadApiKeys() {
+  if (!apiKeyListEl) return;
+  try {
+    const res = await fetch('/api/keys');
+    if (res.status === 403) { apiKeyListEl.innerHTML = ''; return; } // not the owner — hide silently
+    const data = await res.json();
+    const keys = data.keys || [];
+    apiKeyListEl.innerHTML = keys.length ? '' : '<div class="hint">No keys yet.</div>';
+    keys.forEach(k => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;';
+      const used = k.request_count ? `${k.request_count} calls` : 'unused';
+      row.innerHTML = `<span>${k.active ? '🟢' : '⚪'} <code>${k.key_prefix}</code> ${k.label ? '— ' + k.label : ''} <span style="opacity:.6;">(${used})</span></span>`;
+      if (k.active) {
+        const revokeBtn = document.createElement('button');
+        revokeBtn.type = 'button';
+        revokeBtn.textContent = 'Revoke';
+        revokeBtn.className = 'settings-btn';
+        revokeBtn.onclick = async () => {
+          if (!confirm('Revoke this key? Apps using it will stop working immediately.')) return;
+          await fetch('/api/keys/' + k.id, { method: 'DELETE' });
+          loadApiKeys();
+        };
+        row.appendChild(revokeBtn);
+      }
+      apiKeyListEl.appendChild(row);
+    });
+  } catch (e) {
+    console.warn('Could not load API keys:', e);
   }
-  if (userCerebrasKeyInput) {
-    const v = userCerebrasKeyInput.value.trim();
-    if (v) localStorage.setItem('mythic_user_cerebras_key', v);
-    else localStorage.removeItem('mythic_user_cerebras_key');
-  }
+}
+
+if (apiKeyCreateBtn) {
+  apiKeyCreateBtn.addEventListener('click', async () => {
+    const label = apiKeyLabelInput ? apiKeyLabelInput.value.trim() : '';
+    apiKeyCreateBtn.disabled = true;
+    try {
+      const res = await fetch('/api/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label }),
+      });
+      const data = await res.json();
+      if (data.api_key) {
+        apiKeyNewValue.textContent = data.api_key;
+        apiKeyNewBox.style.display = 'block';
+        if (apiKeyLabelInput) apiKeyLabelInput.value = '';
+        loadApiKeys();
+      } else if (data.error) {
+        alert(data.error);
+      }
+    } catch (e) {
+      console.warn('Could not create API key:', e);
+    } finally {
+      apiKeyCreateBtn.disabled = false;
+    }
+  });
 }
 
 function applyTheme(t) {
@@ -3686,7 +3857,7 @@ function applyTheme(t) {
   }
 }
 
-settingsBtn.addEventListener('click', () => { settingsModalOverlay.style.display = 'flex'; });
+settingsBtn.addEventListener('click', () => { settingsModalOverlay.style.display = 'flex'; loadApiKeys(); });
 settingsCloseBtn.addEventListener('click', () => { saveSettings(); settingsModalOverlay.style.display = 'none'; });
 settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsModalOverlay) { saveSettings(); settingsModalOverlay.style.display = 'none'; } });
 
@@ -3800,8 +3971,7 @@ fontSizeSlider.addEventListener('input', () => {
   fontSizeLabel.textContent = fontSizeSlider.value + 'px';
   document.documentElement.style.setProperty('--msg-font-size', fontSizeSlider.value + 'px');
 });
-if (userGroqKeyInput) userGroqKeyInput.addEventListener('change', saveSettings);
-if (userCerebrasKeyInput) userCerebrasKeyInput.addEventListener('change', saveSettings);
+
 
 loadSettings();
 
@@ -6156,6 +6326,108 @@ def invite_landing(code):
     session["user_id"] = get_or_create_owner_id()
     session.permanent = True
     return Response(PAGE, mimetype="text/html; charset=utf-8")
+
+
+# --- API key management (owner only) ------------------------------------------
+def _require_owner():
+    """Only the owner account (you, or someone using your invite link) may
+    create/list/revoke API keys — not every anonymous visitor."""
+    return current_username() == get_or_create_owner_id()
+
+@app.route("/api/keys", methods=["GET"])
+@login_required
+def api_keys_list():
+    if not _require_owner():
+        return jsonify({"error": "Only the account owner can manage API keys."}), 403
+    return jsonify({"keys": list_api_keys()})
+
+@app.route("/api/keys", methods=["POST"])
+@login_required
+def api_keys_create():
+    if not _require_owner():
+        return jsonify({"error": "Only the account owner can manage API keys."}), 403
+    data = request.get_json(silent=True) or {}
+    label = (data.get("label") or "").strip()
+    raw_key, record = create_api_key(label)
+    return jsonify({
+        "api_key": raw_key,  # shown ONCE — the frontend must display and never re-fetch this
+        "id": record["id"],
+        "key_prefix": record["key_prefix"],
+        "label": record["label"],
+        "created_at": record["created_at"],
+    })
+
+@app.route("/api/keys/<key_id>", methods=["DELETE"])
+@login_required
+def api_keys_revoke(key_id):
+    if not _require_owner():
+        return jsonify({"error": "Only the account owner can manage API keys."}), 403
+    ok = revoke_api_key(key_id)
+    return jsonify({"revoked": ok})
+
+
+# --- Public API: OpenAI-style chat completions, authenticated with an
+# "aarav-..." key from /api/keys. Lets other apps/people call your Mythic AI
+# the same way they'd call OpenAI's API. -----------------------------------
+@app.route("/v1/chat/completions", methods=["POST"])
+def v1_chat_completions():
+    auth = request.headers.get("Authorization", "")
+    raw_key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not verify_api_key(raw_key):
+        return jsonify({"error": {"message": "Invalid or missing API key. Include "
+                                              "'Authorization: Bearer aarav-...'.",
+                                   "type": "invalid_request_error"}}), 401
+
+    data = request.get_json(silent=True) or {}
+    incoming = data.get("messages") or []
+    if not incoming:
+        return jsonify({"error": {"message": "'messages' is required.",
+                                   "type": "invalid_request_error"}}), 400
+
+    system_prompt = SYSTEM_PROMPT
+    gemini_messages = []
+    for m in incoming:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if role == "system":
+            system_prompt = content or system_prompt
+            continue
+        gemini_messages.append({
+            "role": "user" if role == "user" else "model",
+            "parts": [{"text": content}],
+        })
+
+    stream_requested = bool(data.get("stream"))
+    model_name = data.get("model") or "mythic-2"
+
+    if stream_requested:
+        def sse():
+            for chunk in auto_stream_chunks(None, gemini_messages, system_prompt):
+                payload = {
+                    "id": "chatcmpl-" + uuid.uuid4().hex[:24],
+                    "object": "chat.completion.chunk",
+                    "model": model_name,
+                    "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(payload)}\n\n"
+            yield "data: [DONE]\n\n"
+        return Response(stream_with_context(sse()), mimetype="text/event-stream")
+
+    full_reply = "".join(auto_stream_chunks(None, gemini_messages, system_prompt))
+    return jsonify({
+        "id": "chatcmpl-" + uuid.uuid4().hex[:24],
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_name,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": full_reply},
+            "finish_reason": "stop",
+        }],
+        "usage": {  # not tracked precisely — placeholder for client compatibility
+            "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
+        },
+    })
 
 
 @app.route("/api/conversations", methods=["GET"])
