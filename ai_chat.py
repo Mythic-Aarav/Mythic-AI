@@ -3940,9 +3940,48 @@ async function loadApiKeys() {
     apiKeyListEl.innerHTML = keys.length ? '' : '<div class="hint">No keys yet.</div>';
     keys.forEach(k => {
       const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;';
+      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;flex-wrap:wrap;';
       const used = k.request_count ? `${k.request_count} calls` : 'unused';
-      row.innerHTML = `<span>${k.active ? '🟢' : '⚪'} <code>${k.key_prefix}</code> ${k.label ? '— ' + k.label : ''} <span style="opacity:.6;">(${used})</span></span>`;
+      const labelSpan = document.createElement('span');
+      labelSpan.innerHTML = `${k.active ? '🟢' : '⚪'} <code>${k.key_prefix}</code> ${k.label ? '— ' + k.label.replace(/</g,'&lt;') : ''} <span style="opacity:.6;">(${used})</span>`;
+      row.appendChild(labelSpan);
+
+      const btnGroup = document.createElement('div');
+      btnGroup.style.cssText = 'display:flex;gap:6px;';
+
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.textContent = '📋 Copy';
+      copyBtn.className = 'settings-btn';
+      copyBtn.onclick = () => {
+        navigator.clipboard.writeText(k.key_prefix || '').then(() => {
+          const orig = copyBtn.textContent;
+          copyBtn.textContent = '✓ Copied';
+          setTimeout(() => { copyBtn.textContent = orig; }, 1200);
+        });
+      };
+      btnGroup.appendChild(copyBtn);
+
+      const renameBtn = document.createElement('button');
+      renameBtn.type = 'button';
+      renameBtn.textContent = '✎ Rename';
+      renameBtn.className = 'settings-btn';
+      renameBtn.onclick = async () => {
+        const newLabel = prompt('New name for this key:', k.label || '');
+        if (newLabel === null) return;
+        const trimmed = newLabel.trim();
+        if (!trimmed) { alert('Name cannot be empty.'); return; }
+        const r = await fetch('/api/keys/' + k.id, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ label: trimmed }),
+        });
+        const d = await r.json();
+        if (d.error) { alert(d.error); return; }
+        loadApiKeys();
+        loadApiUsageSummary();
+      };
+      btnGroup.appendChild(renameBtn);
+
       if (k.active) {
         const revokeBtn = document.createElement('button');
         revokeBtn.type = 'button';
@@ -3954,8 +3993,9 @@ async function loadApiKeys() {
           loadApiKeys();
           loadApiUsageSummary();
         };
-        row.appendChild(revokeBtn);
+        btnGroup.appendChild(revokeBtn);
       }
+      row.appendChild(btnGroup);
       apiKeyListEl.appendChild(row);
     });
   } catch (e) {
@@ -4061,14 +4101,20 @@ async function refreshApiUsageOverlay() {
     apiUsageTbodyEl.innerHTML = keys.map(k => `
       <tr>
         <td style="padding:16px;border-bottom:1px solid #22252c;font-size:14px;font-weight:700;">${(k.label || '(unnamed key)').replace(/</g,'&lt;')}</td>
-        <td style="padding:16px;border-bottom:1px solid #22252c;font-size:14px;font-family:monospace;color:#c7cad1;">${k.key_prefix || ''}</td>
+        <td style="padding:16px;border-bottom:1px solid #22252c;font-size:14px;font-family:monospace;color:#c7cad1;">
+          <div style="display:flex;align-items:center;gap:8px;"><span>${k.key_prefix || ''}</span>
+          <button class="api-usage-copy-btn" data-prefix="${(k.key_prefix||'').replace(/"/g,'&quot;')}" style="background:none;border:1px solid #3a3e47;color:#c7cad1;cursor:pointer;font-size:11.5px;padding:4px 9px;border-radius:6px;font-weight:600;font-family:inherit;white-space:nowrap;">📋 Copy</button></div>
+        </td>
         <td style="padding:16px;border-bottom:1px solid #22252c;font-size:14px;">${fmtApiUsageDate(k.created_at)}</td>
         <td style="padding:16px;border-bottom:1px solid #22252c;font-size:18px;font-weight:700;">${k.request_count || 0}</td>
         <td style="padding:16px;border-bottom:1px solid #22252c;font-size:14px;">
           <span style="font-size:11px;font-weight:700;letter-spacing:.4px;border:1px solid;border-radius:20px;padding:3px 10px;color:${k.active ? '#1a9e5c' : '#c0392b'};border-color:${k.active ? '#1a9e5c' : '#c0392b'};">${k.active ? 'ACTIVE' : 'REVOKED'}</span>
         </td>
         <td style="padding:16px;border-bottom:1px solid #22252c;font-size:14px;">
-          ${k.active ? `<button class="api-usage-revoke-btn" data-id="${k.id}" style="background:none;border:1px solid #3a3e47;color:#c0392b;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;">Revoke</button>` : '—'}
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="api-usage-rename-btn" data-id="${k.id}" data-label="${(k.label||'').replace(/"/g,'&quot;')}" style="background:none;border:1px solid #3a3e47;color:#9a9ea6;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;font-family:inherit;">✎ Rename</button>
+            ${k.active ? `<button class="api-usage-revoke-btn" data-id="${k.id}" style="background:none;border:1px solid #3a3e47;color:#c0392b;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;font-family:inherit;">Revoke</button>` : ''}
+          </div>
         </td>
       </tr>`).join('');
 
@@ -4076,6 +4122,31 @@ async function refreshApiUsageOverlay() {
       btn.addEventListener('click', async () => {
         if (!confirm('Revoke this key? Apps using it will stop working immediately.')) return;
         await fetch('/api/keys/' + btn.dataset.id, { method: 'DELETE' });
+        refreshApiUsageOverlay();
+        loadApiUsageSummary();
+      });
+    });
+    apiUsageTbodyEl.querySelectorAll('.api-usage-copy-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        navigator.clipboard.writeText(btn.dataset.prefix || '').then(() => {
+          const orig = btn.textContent;
+          btn.textContent = '✓ Copied';
+          setTimeout(() => { btn.textContent = orig; }, 1200);
+        });
+      });
+    });
+    apiUsageTbodyEl.querySelectorAll('.api-usage-rename-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const newLabel = prompt('New name for this key:', btn.dataset.label || '');
+        if (newLabel === null) return;
+        const trimmed = newLabel.trim();
+        if (!trimmed) { alert('Name cannot be empty.'); return; }
+        const r = await fetch('/api/keys/' + btn.dataset.id, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ label: trimmed }),
+        });
+        const d = await r.json();
+        if (d.error) { alert(d.error); return; }
         refreshApiUsageOverlay();
         loadApiUsageSummary();
       });
