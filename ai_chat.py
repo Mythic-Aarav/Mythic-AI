@@ -848,15 +848,17 @@ def _save_local_api_keys(keys):
         print(f"[api_keys] could not persist keys to disk: {e}")
 
 def create_api_key(label="", username=""):
-    """Generates a new 'aarav-...' key, stores only its hash, and returns the
+    """Generates a new 'aarav-...' key (total 25 chars), stores only its hash, and returns the
     ONE-TIME plaintext key alongside its public record. Scoped to `username`
     (the creator's session id) so each visitor only ever sees/manages their
     own keys, not everyone else's."""
-    raw_key = API_KEY_PREFIX + secrets.token_urlsafe(32)
+    # Generate random part: 25 total - 6 (aarav-) = 19 random chars
+    random_part = secrets.token_urlsafe(14)[:19]  # 14 bytes base64 ≈ 19 chars
+    raw_key = API_KEY_PREFIX + random_part
     record = {
         "id": str(uuid.uuid4()),
         "key_hash": _hash_api_key(raw_key),
-        "key_prefix": raw_key[:len(API_KEY_PREFIX) + 6] + "…",
+        "key_prefix": raw_key,  # full key is short (25 chars), no need to truncate
         "label": (label or "").strip()[:100],
         "username": username,
         "created_at": datetime.datetime.utcnow().isoformat() + "Z",
@@ -2581,7 +2583,7 @@ PAGE = r"""<!DOCTYPE html>
           <span>New key — copy it now, it won't be shown again:</span>
           <button type="button" id="api-key-copy-btn" style="background:var(--accent);color:#000;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:700;white-space:nowrap;">Copy</button>
         </div>
-        <input type="text" id="api-key-new-value" readonly style="width:100%;padding:10px;font-family:monospace;font-size:12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);box-sizing:border-box;cursor:text;" />
+        <input type="text" id="api-key-new-value" readonly style="width:100%;padding:10px;font-family:monospace;font-size:12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);box-sizing:border-box;cursor:text;overflow:auto;" />
       </div>
       <div id="api-key-list" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;"></div>
     </div>
@@ -4216,8 +4218,15 @@ if (apiKeyCreateBtn) {
         body: JSON.stringify({ label }),
       });
       const data = await res.json();
+      console.log('=== API Key Generation Response ===');
+      console.log('Response data:', data);
+      console.log('data.api_key length:', data.api_key ? data.api_key.length : 'undefined');
+      console.log('data.api_key (first 50):', data.api_key ? data.api_key.substring(0, 50) : 'undefined');
+      console.log('Full data.api_key:', data.api_key);
+      
       if (data.api_key) {
         apiKeyNewValue.value = data.api_key;  // input field uses .value
+        console.log('Set input field value, now contains:', apiKeyNewValue.value.substring(0, 50));
         apiKeyNewBox.style.display = 'block';
         if (apiKeyLabelInput) apiKeyLabelInput.value = '';
         loadApiKeys();
@@ -4237,24 +4246,33 @@ const apiKeyCopyBtn = document.getElementById('api-key-copy-btn');
 if (apiKeyCopyBtn) {
   apiKeyCopyBtn.addEventListener('click', async () => {
     const keyInput = document.getElementById('api-key-new-value');
-    if (!keyInput || !keyInput.value || keyInput.value.length < 20) {
-      alert('Key is empty or invalid.');
+    const keyValue = keyInput ? keyInput.value : '';
+    console.log('=== API Key Copy Debug ===');
+    console.log('keyInput element:', keyInput);
+    console.log('keyInput.value length:', keyValue.length);
+    console.log('keyInput.value (first 50 chars):', keyValue.substring(0, 50));
+    console.log('Full keyInput.value:', keyValue);
+    
+    if (!keyValue || keyValue.length < 20) {
+      alert(`Key is incomplete (only ${keyValue.length} chars). Check browser console for details.`);
       return;
     }
     
     try {
-      // For input fields, just use select() + execCommand, it's 100% reliable
       keyInput.select();
       document.execCommand('copy');
       apiKeyCopyBtn.textContent = '✓ Copied!';
+      console.log('✓ Copy succeeded');
       setTimeout(() => { apiKeyCopyBtn.textContent = 'Copy'; }, 2500);
     } catch (e) {
-      // Fallback to clipboard API
+      console.error('execCommand failed:', e);
       try {
-        await navigator.clipboard.writeText(keyInput.value);
+        await navigator.clipboard.writeText(keyValue);
         apiKeyCopyBtn.textContent = '✓ Copied!';
+        console.log('✓ Clipboard API succeeded');
         setTimeout(() => { apiKeyCopyBtn.textContent = 'Copy'; }, 2500);
       } catch (e2) {
+        console.error('Both methods failed:', e2);
         alert('Copy failed. Try Ctrl+A then Ctrl+C in the box above.');
       }
     }
