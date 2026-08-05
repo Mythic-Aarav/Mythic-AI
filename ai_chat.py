@@ -2578,12 +2578,10 @@ PAGE = r"""<!DOCTYPE html>
       </div>
       <div id="api-key-new-box" style="display:none;margin-top:10px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--bg);">
         <div style="font-size:12px;opacity:.8;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-          <span>New key — select & copy it now, it won't be shown again:</span>
+          <span>New key — copy it now, it won't be shown again:</span>
           <button type="button" id="api-key-copy-btn" style="background:var(--accent);color:#000;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:700;white-space:nowrap;">Copy</button>
         </div>
-        <div style="background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px;font-family:monospace;font-size:12px;line-height:1.8;max-width:100%;overflow:hidden;min-height:40px;display:flex;align-items:center;">
-          <code id="api-key-new-value" style="user-select:all;cursor:text;word-break:break-all;overflow-wrap:break-word;white-space:normal;display:block;width:100%;"></code>
-        </div>
+        <input type="text" id="api-key-new-value" readonly style="width:100%;padding:10px;font-family:monospace;font-size:12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);box-sizing:border-box;cursor:text;" />
       </div>
       <div id="api-key-list" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;"></div>
     </div>
@@ -4219,8 +4217,7 @@ if (apiKeyCreateBtn) {
       });
       const data = await res.json();
       if (data.api_key) {
-        apiKeyNewValue.textContent = data.api_key;
-        apiKeyNewValue.setAttribute('data-key', data.api_key);  // backup storage
+        apiKeyNewValue.value = data.api_key;  // input field uses .value
         apiKeyNewBox.style.display = 'block';
         if (apiKeyLabelInput) apiKeyLabelInput.value = '';
         loadApiKeys();
@@ -4239,26 +4236,27 @@ if (apiKeyCreateBtn) {
 const apiKeyCopyBtn = document.getElementById('api-key-copy-btn');
 if (apiKeyCopyBtn) {
   apiKeyCopyBtn.addEventListener('click', async () => {
-    // Try data attribute first (most reliable), fall back to textContent
-    let key = apiKeyNewValue.getAttribute('data-key') || apiKeyNewValue.textContent;
-    if (!key || key.length < 10) {
-      alert('Key not available — try selecting the text manually.');
+    const keyInput = document.getElementById('api-key-new-value');
+    if (!keyInput || !keyInput.value || keyInput.value.length < 20) {
+      alert('Key is empty or invalid.');
       return;
     }
+    
     try {
-      await navigator.clipboard.writeText(key);
+      // For input fields, just use select() + execCommand, it's 100% reliable
+      keyInput.select();
+      document.execCommand('copy');
       apiKeyCopyBtn.textContent = '✓ Copied!';
       setTimeout(() => { apiKeyCopyBtn.textContent = 'Copy'; }, 2500);
     } catch (e) {
-      console.error('Copy failed:', e);
-      // Fallback: select the text so user can Ctrl+C manually
-      const range = document.createRange();
-      range.selectNodeContents(apiKeyNewValue);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-      apiKeyCopyBtn.textContent = 'Select & Ctrl+C';
-      setTimeout(() => { apiKeyCopyBtn.textContent = 'Copy'; }, 2500);
+      // Fallback to clipboard API
+      try {
+        await navigator.clipboard.writeText(keyInput.value);
+        apiKeyCopyBtn.textContent = '✓ Copied!';
+        setTimeout(() => { apiKeyCopyBtn.textContent = 'Copy'; }, 2500);
+      } catch (e2) {
+        alert('Copy failed. Try Ctrl+A then Ctrl+C in the box above.');
+      }
     }
   });
 }
