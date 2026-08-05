@@ -918,6 +918,27 @@ def revoke_api_key(key_id, username=""):
         _save_local_api_keys(keys)
     return found
 
+def rename_api_key(key_id, new_label, username=""):
+    """Renames (relabels) a key — only if it belongs to `username`."""
+    new_label = (new_label or "").strip()[:100]
+    if SUPABASE_URL:
+        try:
+            r = requests.patch(
+                sb(f"api_keys?id=eq.{key_id}&username=eq.{urllib.parse.quote(username)}"),
+                headers=sb_headers(), json={"label": new_label}, timeout=10)
+            return r.status_code in (200, 204)
+        except Exception as e:
+            print(f"[api_keys] Supabase rename failed: {e} — falling back to local file.")
+    keys = _load_local_api_keys()
+    found = False
+    for rec in keys:
+        if rec["id"] == key_id and rec.get("username") == username:
+            rec["label"] = new_label
+            found = True
+    if found:
+        _save_local_api_keys(keys)
+    return found
+
 def verify_api_key(raw_key):
     """Returns True and records usage if raw_key is a valid, active key."""
     if not raw_key or not raw_key.startswith(API_KEY_PREFIX):
@@ -6712,8 +6733,9 @@ def api_usage_page():
   tbody tr:hover { background:#20232b; }
   .name-cell { font-weight:700; font-size:15px; }
   .key-cell { font-family:monospace; color:#c7cad1; display:flex; align-items:center; gap:8px; }
-  .copy-btn { background:none; border:none; color:#9a9ea6; cursor:pointer; font-size:14px; padding:2px 4px; }
-  .copy-btn:hover { color:#fff; }
+  .copy-btn { background:none; border:1px solid #3a3e47; color:#c7cad1; cursor:pointer; font-size:11.5px;
+              padding:4px 9px; border-radius:6px; font-weight:600; white-space:nowrap; }
+  .copy-btn:hover { border-color:#7be3ab; color:#7be3ab; }
   .calls-cell { font-weight:700; font-size:18px; }
   .state-pill { font-size:11px; font-weight:700; letter-spacing:.4px; border:1px solid; border-radius:20px; padding:3px 10px; display:inline-block; }
   .state-active { color:#1a9e5c; border-color:#1a9e5c; }
@@ -6721,6 +6743,10 @@ def api_usage_page():
   .revoke-btn { background:none; border:1px solid #3a3e47; color:#c0392b; border-radius:6px; padding:6px 10px;
                 font-size:12px; cursor:pointer; }
   .revoke-btn:hover { background:#c0392b; color:#fff; border-color:#c0392b; }
+  .rename-btn { background:none; border:1px solid #3a3e47; color:#9a9ea6; border-radius:6px; padding:6px 10px;
+                font-size:12px; cursor:pointer; margin-right:6px; }
+  .rename-btn:hover { border-color:#e8532a; color:#e8532a; }
+  .options-cell { display:flex; gap:6px; flex-wrap:wrap; }
   .empty { color:#9a9ea6; font-size:15px; padding:50px 0; text-align:center; }
   .modal-overlay { display:none; position:fixed; inset:0; background:#000a; align-items:center; justify-content:center; z-index:50; }
   .modal { background:#1a1d24; border:1px solid #2a2e37; border-radius:14px; padding:26px; width:min(90vw,420px); }
@@ -6802,14 +6828,40 @@ async function loadKeys() {
 
   tbody.innerHTML = keys.map(k => `
     <tr>
-      <td class="name-cell">${(k.label || '(unnamed key)').replace(/</g,'&lt;')}</td>
+      <td class="name-cell" id="name-cell-${k.id}">${(k.label || '(unnamed key)').replace(/</g,'&lt;')}</td>
       <td><div class="key-cell"><span>${k.key_prefix || ''}</span>
-        <button class="copy-btn" title="Copy prefix" onclick="navigator.clipboard.writeText('${(k.key_prefix||'').replace(/'/g,"")}')">📋</button></div></td>
+        <button class="copy-btn" title="Copy key prefix" onclick="copyKeyPrefix('${(k.key_prefix||'').replace(/'/g,"")}', this)">📋 Copy</button></div></td>
       <td>${fmtDate(k.created_at)}</td>
       <td class="calls-cell">${k.request_count || 0}</td>
       <td><span class="state-pill ${k.active ? 'state-active' : 'state-revoked'}">${k.active ? 'ACTIVE' : 'REVOKED'}</span></td>
-      <td>${k.active ? `<button class="revoke-btn" onclick="revokeKey('${k.id}')">Revoke</button>` : '—'}</td>
+      <td><div class="options-cell">
+        <button class="rename-btn" onclick="renameKey('${k.id}', ${JSON.stringify(k.label || '')})">✎ Rename</button>
+        ${k.active ? `<button class="revoke-btn" onclick="revokeKey('${k.id}')">Revoke</button>` : ''}
+      </div></td>
     </tr>`).join('');
+}
+
+function copyKeyPrefix(prefix, btn) {
+  navigator.clipboard.writeText(prefix).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  });
+}
+
+async function renameKey(id, currentLabel) {
+  const newLabel = prompt('New name for this key:', currentLabel || '');
+  if (newLabel === null) return;
+  const trimmed = newLabel.trim();
+  if (!trimmed) { alert('Name cannot be empty.'); return; }
+  const res = await fetch('/api/keys/' + id, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: trimmed }),
+  });
+  const data = await res.json();
+  if (data.error) { alert(data.error); return; }
+  loadKeys();
 }
 
 async function revokeKey(id) {
@@ -6876,6 +6928,18 @@ def api_keys_create():
 def api_keys_revoke(key_id):
     ok = revoke_api_key(key_id, current_username())
     return jsonify({"revoked": ok})
+
+@app.route("/api/keys/<key_id>", methods=["PATCH"])
+@login_required
+def api_keys_rename(key_id):
+    data = request.get_json(silent=True) or {}
+    new_label = (data.get("label") or "").strip()
+    if not new_label:
+        return jsonify({"error": "label is required"}), 400
+    ok = rename_api_key(key_id, new_label, current_username())
+    if not ok:
+        return jsonify({"error": "key not found"}), 404
+    return jsonify({"renamed": ok, "label": new_label})
 
 
 # --- Public API: OpenAI-style chat completions, authenticated with an
