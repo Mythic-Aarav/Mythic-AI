@@ -2577,12 +2577,12 @@ PAGE = r"""<!DOCTYPE html>
         <button type="button" id="api-key-create-btn" class="settings-btn">+ Generate</button>
       </div>
       <div id="api-key-new-box" style="display:none;margin-top:10px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--bg);">
-        <div style="font-size:12px;opacity:.8;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+        <div style="font-size:12px;opacity:.8;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
           <span>New key — select & copy it now, it won't be shown again:</span>
-          <button type="button" id="api-key-copy-btn" style="background:var(--accent);color:#000;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:700;">Copy</button>
+          <button type="button" id="api-key-copy-btn" style="background:var(--accent);color:#000;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:700;white-space:nowrap;">Copy</button>
         </div>
-        <div style="background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:8px;overflow-wrap:break-word;word-break:break-all;white-space:normal;font-family:monospace;font-size:11px;line-height:1.6;">
-          <code id="api-key-new-value" style="user-select:all;cursor:text;display:block;"></code>
+        <div style="background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px;font-family:monospace;font-size:12px;line-height:1.8;max-width:100%;overflow:hidden;min-height:40px;display:flex;align-items:center;">
+          <code id="api-key-new-value" style="user-select:all;cursor:text;word-break:break-all;overflow-wrap:break-word;white-space:normal;display:block;width:100%;"></code>
         </div>
       </div>
       <div id="api-key-list" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;"></div>
@@ -4220,6 +4220,7 @@ if (apiKeyCreateBtn) {
       const data = await res.json();
       if (data.api_key) {
         apiKeyNewValue.textContent = data.api_key;
+        apiKeyNewValue.setAttribute('data-key', data.api_key);  // backup storage
         apiKeyNewBox.style.display = 'block';
         if (apiKeyLabelInput) apiKeyLabelInput.value = '';
         loadApiKeys();
@@ -4238,14 +4239,26 @@ if (apiKeyCreateBtn) {
 const apiKeyCopyBtn = document.getElementById('api-key-copy-btn');
 if (apiKeyCopyBtn) {
   apiKeyCopyBtn.addEventListener('click', async () => {
-    const key = apiKeyNewValue.textContent;
-    if (!key) return;
+    // Try data attribute first (most reliable), fall back to textContent
+    let key = apiKeyNewValue.getAttribute('data-key') || apiKeyNewValue.textContent;
+    if (!key || key.length < 10) {
+      alert('Key not available — try selecting the text manually.');
+      return;
+    }
     try {
       await navigator.clipboard.writeText(key);
-      apiKeyCopyBtn.textContent = 'Copied!';
-      setTimeout(() => { apiKeyCopyBtn.textContent = 'Copy'; }, 2000);
+      apiKeyCopyBtn.textContent = '✓ Copied!';
+      setTimeout(() => { apiKeyCopyBtn.textContent = 'Copy'; }, 2500);
     } catch (e) {
-      alert('Could not copy — try selecting and copying manually.');
+      console.error('Copy failed:', e);
+      // Fallback: select the text so user can Ctrl+C manually
+      const range = document.createRange();
+      range.selectNodeContents(apiKeyNewValue);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      apiKeyCopyBtn.textContent = 'Select & Ctrl+C';
+      setTimeout(() => { apiKeyCopyBtn.textContent = 'Copy'; }, 2500);
     }
   });
 }
