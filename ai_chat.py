@@ -7077,6 +7077,37 @@ def v1_chat_completions():
     })
 
 
+# --- Public API: /v1/images/generations (OpenAI-compatible, requires API key) -----
+@app.route("/v1/images/generations", methods=["POST"])
+def v1_images_generations():
+    """OpenAI-compatible endpoint: POST with prompt + style, get back image URLs."""
+    auth = request.headers.get("Authorization", "")
+    raw_key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not verify_api_key(raw_key):
+        return jsonify({"error": {"message": "Invalid or missing API key.",
+                                   "type": "invalid_request_error"}}), 401
+    
+    # Reuse the existing /api/generate-image logic by calling it internally
+    # We'll just set the session and call the endpoint function
+    session["user_id"] = get_or_create_owner_id(preferred_id=raw_key)
+    return generate_image()
+
+
+# --- Public API: /v1/code/execute (OpenAI-compatible, requires API key) ----------
+@app.route("/v1/code/execute", methods=["POST"])
+def v1_code_execute():
+    """OpenAI-compatible endpoint: POST with code + language, get back output/errors."""
+    auth = request.headers.get("Authorization", "")
+    raw_key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not verify_api_key(raw_key):
+        return jsonify({"error": {"message": "Invalid or missing API key.",
+                                   "type": "invalid_request_error"}}), 401
+    
+    # Reuse the existing /api/execute-code logic
+    session["user_id"] = get_or_create_owner_id(preferred_id=raw_key)
+    return api_execute_code()
+
+
 @app.route("/api/conversations", methods=["GET"])
 @login_required
 def api_list_conversations():
