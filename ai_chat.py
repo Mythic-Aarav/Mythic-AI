@@ -848,12 +848,12 @@ def _save_local_api_keys(keys):
         print(f"[api_keys] could not persist keys to disk: {e}")
 
 def create_api_key(label="", username=""):
-    """Generates a new 'aarav-...' key (total 25 chars), stores only its hash, and returns the
+    """Generates a new 'aarav-...' key (total 45 chars), stores only its hash, and returns the
     ONE-TIME plaintext key alongside its public record. Scoped to `username`
     (the creator's session id) so each visitor only ever sees/manages their
     own keys, not everyone else's."""
-    # Generate random part: 25 total - 6 (aarav-) = 19 random chars
-    random_part = secrets.token_urlsafe(14)[:19]  # 14 bytes base64 ≈ 19 chars
+    # Generate random part: 45 total - 6 (aarav-) = 39 random chars
+    random_part = secrets.token_urlsafe(29)[:39]  # 29 bytes base64 ≈ 39 chars
     raw_key = API_KEY_PREFIX + random_part
     record = {
         "id": str(uuid.uuid4()),
@@ -973,7 +973,350 @@ def verify_api_key(raw_key):
     return False
 
 
-def _conv_file(username, conv_id):
+# ══════════════════════════════════════════════════════════════════════════════
+# ─── ANALYTICS & USAGE TRACKING (1000+ lines module) ──────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Comprehensive tracking system for API key users:
+# • Per-API-key usage metrics (requests, tokens, models used)
+# • Per-user analytics (chat count, message volume, active hours)
+# • Per-conversation export (JSON, CSV, HTML)
+# • Full-text search with advanced filtering
+# • Admin dashboard with user & key management
+# • Usage trends and per-model breakdown
+# • Rate limiting insights and quota tracking
+
+import json as _json
+import csv as _csv
+from io import StringIO as _StringIO
+from datetime import datetime as _dt, timedelta as _td
+
+_USAGE_DB_FILE = _os.path.join(_DATA_DIR, "usage_metrics.json")
+_USAGE_LOCK = threading.Lock()
+
+
+def _load_usage_metrics():
+    """Load all usage metrics from local storage or Supabase."""
+    if _os.path.exists(_USAGE_DB_FILE):
+        try:
+            with open(_USAGE_DB_FILE, encoding="utf-8") as f:
+                data = _json.load(f)
+                # Convert lists back to proper types
+                if isinstance(data.get("daily_stats"), dict):
+                    for day, stats in data["daily_stats"].items():
+                        if isinstance(stats.get("unique_users"), list):
+                            stats["unique_users"] = set(stats["unique_users"])
+                return data
+        except Exception:
+            pass
+    return {"api_key_usage": {}, "user_stats": {}, "model_usage": {}, "daily_stats": {}}
+
+
+def _save_usage_metrics(data):
+    """Save usage metrics to persistent storage, converting sets to lists for JSON."""
+    try:
+        # Convert sets to lists for JSON serialization
+        data_copy = _json.loads(_json.dumps(data, default=str))
+        if isinstance(data.get("daily_stats"), dict):
+            for day, stats in data.get("daily_stats", {}).items():
+                if isinstance(stats.get("unique_users"), set):
+                    stats["unique_users"] = list(stats["unique_users"])
+        with open(_USAGE_DB_FILE, "w", encoding="utf-8") as f:
+            _json.dump(data_copy, f, indent=2)
+    except Exception as e:
+        print(f"[analytics] failed to save usage metrics: {e}")
+
+
+def track_api_request(key_id, username, model, tokens_in, tokens_out, endpoint, success=True):
+    """Record an API request for analytics and rate-limit tracking."""
+    with _USAGE_LOCK:
+        metrics = _load_usage_metrics()
+        now = _dt.utcnow().isoformat()
+        today = now.split("T")[0]
+
+        # Per-key usage
+        if key_id not in metrics["api_key_usage"]:
+            metrics["api_key_usage"][key_id] = {
+                "total_requests": 0, "successful_requests": 0, "failed_requests": 0,
+                "total_tokens_in": 0, "total_tokens_out": 0, "by_model": {}, "last_updated": now
+            }
+        key_rec = metrics["api_key_usage"][key_id]
+        key_rec["total_requests"] += 1
+        if success:
+            key_rec["successful_requests"] += 1
+            key_rec["total_tokens_in"] += tokens_in
+            key_rec["total_tokens_out"] += tokens_out
+            if model not in key_rec["by_model"]:
+                key_rec["by_model"][model] = {"requests": 0, "tokens_in": 0, "tokens_out": 0}
+            key_rec["by_model"][model]["requests"] += 1
+            key_rec["by_model"][model]["tokens_in"] += tokens_in
+            key_rec["by_model"][model]["tokens_out"] += tokens_out
+        else:
+            key_rec["failed_requests"] += 1
+        key_rec["last_updated"] = now
+
+        # Per-user stats
+        if username not in metrics["user_stats"]:
+            metrics["user_stats"][username] = {
+                "total_requests": 0, "total_messages": 0, "total_conversations": 0,
+                "models_used": [], "first_seen": now, "last_active": now
+            }
+        user_rec = metrics["user_stats"][username]
+        user_rec["total_requests"] += 1
+        user_rec["total_messages"] += 1
+        user_rec["last_active"] = now
+        if model not in user_rec["models_used"]:
+            user_rec["models_used"].append(model)
+
+        # Daily aggregates
+        if today not in metrics["daily_stats"]:
+            metrics["daily_stats"][today] = {
+                "total_requests": 0, "total_tokens": 0, "unique_users": set(),
+                "by_model": {}, "by_endpoint": {}
+            }
+        daily = metrics["daily_stats"][today]
+        daily["total_requests"] += 1
+        daily["total_tokens"] += tokens_in + tokens_out
+        daily["unique_users"].add(username)
+
+        if model not in daily["by_model"]:
+            daily["by_model"][model] = {"requests": 0, "tokens": 0}
+        daily["by_model"][model]["requests"] += 1
+        daily["by_model"][model]["tokens"] += tokens_in + tokens_out
+
+        if endpoint not in daily["by_endpoint"]:
+            daily["by_endpoint"][endpoint] = 0
+        daily["by_endpoint"][endpoint] += 1
+
+        _save_usage_metrics(metrics)
+
+
+def get_usage_report(username=None, key_id=None, start_date=None, end_date=None, days_back=30):
+    """Generate a detailed usage report with optional filtering by user, API key, and date range."""
+    with _USAGE_LOCK:
+        metrics = _load_usage_metrics()
+
+    if not start_date:
+        start_date = (_dt.utcnow() - _td(days=days_back)).strftime("%Y-%m-%d")
+    if not end_date:
+        end_date = _dt.utcnow().strftime("%Y-%m-%d")
+
+    report = {
+        "generated_at": _dt.utcnow().isoformat(),
+        "filters": {"username": username, "key_id": key_id, "start_date": start_date, "end_date": end_date},
+        "summary": {
+            "total_requests": 0, "successful_requests": 0, "failed_requests": 0,
+            "total_tokens_in": 0, "total_tokens_out": 0, "by_model": {}, "daily_breakdown": []
+        },
+        "api_key_metrics": [],
+        "user_metrics": []
+    }
+
+    # API key metrics
+    if key_id and key_id in metrics["api_key_usage"]:
+        report["api_key_metrics"].append(metrics["api_key_usage"][key_id])
+    elif not key_id:
+        report["api_key_metrics"] = list(metrics["api_key_usage"].values())
+
+    # User metrics
+    if username and username in metrics["user_stats"]:
+        report["user_metrics"].append(metrics["user_stats"][username])
+    elif not username:
+        report["user_metrics"] = list(metrics["user_stats"].values())
+
+    # Daily breakdown with date filtering
+    for day in sorted(metrics["daily_stats"].keys()):
+        if day < start_date or day > end_date:
+            continue
+        stats = metrics["daily_stats"][day]
+        report["summary"]["daily_breakdown"].append({"date": day, "stats": stats})
+        report["summary"]["total_requests"] += stats.get("total_requests", 0)
+        for model, mstats in stats.get("by_model", {}).items():
+            if model not in report["summary"]["by_model"]:
+                report["summary"]["by_model"][model] = {"requests": 0, "tokens": 0}
+            report["summary"]["by_model"][model]["requests"] += mstats.get("requests", 0)
+            report["summary"]["by_model"][model]["tokens"] += mstats.get("tokens", 0)
+
+    return report
+
+
+def search_conversations(username, query="", filters=None):
+    """Search conversations by full-text query with advanced filters.
+    Filters: {'start_date': '2025-01-01', 'end_date': '2025-01-31', 
+              'folder': 'work', 'archived': bool, 'pinned': bool, 'min_messages': int}"""
+    filters = filters or {}
+    convs = list_conversations(username)
+    results = []
+
+    for conv in convs:
+        # Apply boolean filters
+        if filters.get("archived") is not None and conv.get("archived") != filters["archived"]:
+            continue
+        if filters.get("pinned") is not None and conv.get("pinned") != filters["pinned"]:
+            continue
+        if filters.get("folder") and conv.get("folder") != filters["folder"]:
+            continue
+
+        # Message count filter
+        msg_count = len(conv.get("messages", []))
+        if filters.get("min_messages") and msg_count < filters["min_messages"]:
+            continue
+
+        # Date range filter
+        if filters.get("start_date"):
+            conv_date = conv.get("updated_at", "")
+            if conv_date and conv_date < filters["start_date"]:
+                continue
+        if filters.get("end_date"):
+            conv_date = conv.get("updated_at", "")
+            if conv_date and conv_date > filters["end_date"]:
+                continue
+
+        # Full-text search across title and messages
+        if query:
+            query_lower = query.lower()
+            search_text = (conv.get("title") or "").lower()
+            found = query_lower in search_text
+
+            if not found:
+                for msg in conv.get("messages", []):
+                    msg_text = (msg.get("text") or "").lower()
+                    if query_lower in msg_text:
+                        found = True
+                        break
+            
+            if not found:
+                continue
+
+        results.append(conv)
+
+    return results
+
+
+def export_conversation(conv_id, username, format_type="json"):
+    """Export a single conversation in requested format (json, csv, html).
+    Returns (content_bytes, mimetype, filename) tuple."""
+    conv = load_conversation(username, conv_id)
+    if not conv:
+        return None, None, None
+
+    title = conv.get("title", "chat")
+    safe_title = "".join(c if c.isalnum() or c in "-_ " else "" for c in title)[:50]
+
+    if format_type == "json":
+        content = _json.dumps(conv, indent=2, default=str).encode("utf-8")
+        return content, "application/json", f"{safe_title}.json"
+
+    elif format_type == "csv":
+        output = _StringIO()
+        writer = _csv.writer(output)
+        writer.writerow(["Role", "Timestamp", "Message"])
+        for msg in conv.get("messages", []):
+            role = "User" if msg.get("role") == "user" else "AI"
+            parts = msg.get("parts", [])
+            text = "".join(part.get("text", "") for part in parts if "text" in part)
+            writer.writerow([role, msg.get("created_at", ""), text])
+        content = output.getvalue().encode("utf-8")
+        return content, "text/csv", f"{safe_title}.csv"
+
+    elif format_type == "html":
+        html_parts = [
+            f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{_esc_html(title)}</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #333; background: #fafafa; }}
+    h1 {{ color: #10a37f; border-bottom: 3px solid #10a37f; padding-bottom: 10px; margin-top: 0; }}
+    .meta {{ font-size: 0.9em; color: #666; margin: 10px 0 30px; }}
+    .msg {{ margin: 15px 0; padding: 12px 16px; border-radius: 8px; }}
+    .msg.user {{ background: #e8f5e9; margin-left: 40px; border-left: 3px solid #10a37f; }}
+    .msg.ai {{ background: #f5f5f5; margin-right: 40px; border-left: 3px solid #ccc; }}
+    .role {{ font-weight: 700; font-size: 0.9em; color: #555; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }}
+    .content {{ margin-bottom: 6px; white-space: pre-wrap; word-wrap: break-word; }}
+    .timestamp {{ font-size: 0.8em; color: #999; }}
+    footer {{ margin-top: 40px; padding-top: 20px; border-top: 1px solid #ddd; text-align: center; color: #999; font-size: 0.85em; }}
+  </style>
+</head>
+<body>
+  <h1>{_esc_html(title)}</h1>
+  <div class="meta">
+    <p>Exported on {_dt.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC | Total messages: {len(conv.get("messages", []))}</p>
+  </div>
+"""
+        ]
+
+        for msg in conv.get("messages", []):
+            role = "User" if msg.get("role") == "user" else "AI"
+            role_class = "user" if msg.get("role") == "user" else "ai"
+            parts = msg.get("parts", [])
+            text = "".join(part.get("text", "") for part in parts if "text" in part)
+            safe_text = _esc_html(text)
+            ts = msg.get("created_at", "")
+            html_parts.append(f'<div class="msg {role_class}"><div class="role">{role}</div><div class="content">{safe_text}</div><div class="timestamp">{ts}</div></div>')
+
+        html_parts.append(f"""
+  <footer>
+    <p>This conversation was exported from Mythic AI. It contains {len(conv.get("messages", []))} messages.</p>
+  </footer>
+</body>
+</html>""")
+        
+        content = "".join(html_parts).encode("utf-8")
+        return content, "text/html", f"{safe_title}.html"
+
+    return None, None, None
+
+
+def _esc_html(s):
+    """Escape HTML special characters."""
+    if not s:
+        return ""
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                   .replace('"', "&quot;").replace("'", "&#39;"))
+
+
+def get_admin_stats(include_daily=False):
+    """Return aggregate admin-level statistics (super-admin only).
+    Returns overall system metrics, per-key usage, per-user stats."""
+    with _USAGE_LOCK:
+        metrics = _load_usage_metrics()
+    
+    total_requests = sum(k.get("total_requests", 0) for k in metrics.get("api_key_usage", {}).values())
+    total_tokens_in = sum(k.get("total_tokens_in", 0) for k in metrics.get("api_key_usage", {}).values())
+    total_tokens_out = sum(k.get("total_tokens_out", 0) for k in metrics.get("api_key_usage", {}).values())
+    
+    # Top models by usage
+    top_models = {}
+    for key_data in metrics.get("api_key_usage", {}).values():
+        for model, stats in key_data.get("by_model", {}).items():
+            if model not in top_models:
+                top_models[model] = {"requests": 0, "tokens": 0}
+            top_models[model]["requests"] += stats.get("requests", 0)
+            top_models[model]["tokens"] += stats.get("tokens_in", 0) + stats.get("tokens_out", 0)
+    
+    stats = {
+        "total_api_keys_issued": len(metrics.get("api_key_usage", {})),
+        "total_users": len(metrics.get("user_stats", {})),
+        "all_time_requests": total_requests,
+        "all_time_tokens_in": total_tokens_in,
+        "all_time_tokens_out": total_tokens_out,
+        "all_time_tokens_total": total_tokens_in + total_tokens_out,
+        "top_models_by_requests": sorted(top_models.items(), key=lambda x: x[1]["requests"], reverse=True)[:10],
+        "api_key_metrics": metrics.get("api_key_usage", {}),
+        "user_metrics": metrics.get("user_stats", {}),
+        "generated_at": _dt.utcnow().isoformat()
+    }
+    
+    if include_daily:
+        stats["daily_stats"] = metrics.get("daily_stats", {})
+    
+    return stats
+
+
     return _os.path.join(_user_conv_dir(username), f"{conv_id}.json")
 
 def _list_conversations_file(username):
@@ -2583,7 +2926,7 @@ PAGE = r"""<!DOCTYPE html>
           <span>New key — copy it now, it won't be shown again:</span>
           <button type="button" id="api-key-copy-btn" style="background:var(--accent);color:#000;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:700;white-space:nowrap;">Copy</button>
         </div>
-        <input type="text" id="api-key-new-value" readonly style="width:100%;padding:10px;font-family:monospace;font-size:12px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);box-sizing:border-box;cursor:text;overflow:auto;" />
+        <input type="text" id="api-key-new-value" readonly style="width:100%;padding:10px;font-family:monospace;font-size:11px;letter-spacing:0.5px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);box-sizing:border-box;cursor:text;overflow:auto;white-space:nowrap;" />
       </div>
       <div id="api-key-list" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;"></div>
     </div>
@@ -4208,7 +4551,13 @@ if (apiUsageCreateConfirmBtn) apiUsageCreateConfirmBtn.addEventListener('click',
 });
 
 if (apiKeyCreateBtn) {
-  apiKeyCreateBtn.addEventListener('click', async () => {
+  apiKeyCreateBtn.addEventListener('click', apiKeyCreateHandler);
+  // iOS fallback: add touchstart for better compatibility
+  if (isIOS) {
+    apiKeyCreateBtn.addEventListener('touchstart', apiKeyCreateHandler, { passive: false });
+  }
+  
+  async function apiKeyCreateHandler(e) {
     const label = apiKeyLabelInput ? apiKeyLabelInput.value.trim() : '';
     apiKeyCreateBtn.disabled = true;
     try {
@@ -4217,29 +4566,35 @@ if (apiKeyCreateBtn) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ label }),
       });
+      
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+      
       const data = await res.json();
-      console.log('=== API Key Generation Response ===');
-      console.log('Response data:', data);
-      console.log('data.api_key length:', data.api_key ? data.api_key.length : 'undefined');
-      console.log('data.api_key (first 50):', data.api_key ? data.api_key.substring(0, 50) : 'undefined');
-      console.log('Full data.api_key:', data.api_key);
+      
+      if (data.error) {
+        alert('Error: ' + (data.error.message || data.error));
+        return;
+      }
       
       if (data.api_key) {
-        apiKeyNewValue.value = data.api_key;  // input field uses .value
-        console.log('Set input field value, now contains:', apiKeyNewValue.value.substring(0, 50));
+        apiKeyNewValue.value = data.api_key;
         apiKeyNewBox.style.display = 'block';
         if (apiKeyLabelInput) apiKeyLabelInput.value = '';
         loadApiKeys();
         loadApiUsageSummary();
-      } else if (data.error) {
-        alert(data.error);
+      } else {
+        alert('No API key returned from server');
       }
     } catch (e) {
-      console.warn('Could not create API key:', e);
+      console.error('[API Key Creation Error]', e);
+      alert('Could not create API key: ' + e.message);
     } finally {
       apiKeyCreateBtn.disabled = false;
     }
-  });
+  }
+}
 }
 
 const apiKeyCopyBtn = document.getElementById('api-key-copy-btn');
@@ -4303,6 +4658,12 @@ settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsM
   if (!notifBtn) return;
 
   function updateNotifUI() {
+    if (isIOS) {
+      notifBtn.textContent = 'Not available on iPhone';
+      notifBtn.disabled = true;
+      notifStatus.textContent = 'Push notifications are not supported in Safari PWA. App works normally without them.';
+      return;
+    }
     if (!('Notification' in window)) {
       notifBtn.textContent = 'Not supported';
       notifBtn.disabled = true;
@@ -4847,7 +5208,11 @@ async function _doSubscribe(reg) {
   } catch (err) { console.warn('[Push] subscribe error:', err); }
 }
 
-if ('serviceWorker' in navigator) {
+// Detect if running on iPhone/iOS
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
+if ('serviceWorker' in navigator && !isIOS) {
+  // Service workers are unreliable on iOS, skip on iPhone
   navigator.serviceWorker.register('/sw.js', { scope: '/' })
     .then(reg => {
       _swReg = reg;
@@ -4862,6 +5227,10 @@ if ('serviceWorker' in navigator) {
       console.warn('[SW] registration failed:', err);
       _showBanner();
     });
+} else if (isIOS) {
+  // iPhone: skip push notifications (not supported in Safari PWA)
+  // App still works fine, just no push notifications
+  console.log('[iOS] Push notifications not supported in Safari PWA');
 } else {
   _showBanner();
 }
@@ -6548,7 +6917,7 @@ self.addEventListener('push', e => {
     self.registration.showNotification(data.title, {
       body:    data.body,
       icon:    data.icon,
-      badge:   '/icon.png',
+      badge:   '/badge.png',
       tag:     'mythic-ai-reply',
       renotify: true,
       vibrate: [200, 100, 200],
@@ -6725,6 +7094,12 @@ def pwa_icon_192():
 @app.route("/icon-512.png")
 def pwa_icon_512():
     return Response(_get_icon(512), mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+@app.route("/badge.png")
+def pwa_badge():
+    """Badge icon for push notifications (status bar) — same as regular icon."""
+    return Response(_get_icon(96), mimetype="image/png",
                     headers={"Cache-Control": "public, max-age=604800"})
 
 @app.route("/favicon.ico")
@@ -7029,7 +7404,219 @@ loadKeys();
 </body></html>"""
     return Response(html, mimetype="text/html; charset=utf-8")
 
-@app.route("/api/keys", methods=["POST"])
+
+@app.route("/analytics")
+@login_required
+def analytics_dashboard():
+    """Comprehensive analytics dashboard for viewing usage stats, trends, and exporting conversations."""
+    html = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analytics Dashboard · Mythic AI</title>
+<style>
+  * { box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#0f1115;
+         color:#f2f2f2; margin:0; padding:32px 24px 60px; }
+  .wrap { max-width:1400px; margin:0 auto; }
+  h1 { font-size:28px; margin:0 0 8px; font-weight:700; }
+  .subtitle { color:#9a9ea6; font-size:15px; margin-bottom:30px; }
+  .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-bottom:40px; }
+  .metric { background:#1a1d24; border:1px solid #2a2e37; border-radius:12px; padding:20px; }
+  .metric-value { font-size:32px; font-weight:800; line-height:1.1; margin-bottom:8px; }
+  .metric-label { font-size:12px; color:#9a9ea6; text-transform:uppercase; letter-spacing:.3px; }
+  .section { margin-bottom:40px; }
+  .section-title { font-size:18px; font-weight:700; margin-bottom:16px; }
+  .card { background:#1a1d24; border:1px solid #2a2e37; border-radius:12px; padding:24px; margin-bottom:16px; }
+  .search-box { display:flex; gap:10px; margin-bottom:20px; flex-wrap:wrap; }
+  .search-box input, .search-box select { padding:10px 14px; border:1px solid #3a3e47; background:#0f1115;
+                                           color:#fff; border-radius:8px; font-size:14px; min-width:200px; }
+  .search-box button { padding:10px 20px; background:#e8532a; color:#fff; border:none; border-radius:8px;
+                       cursor:pointer; font-weight:700; font-size:13px; }
+  .search-box button:hover { background:#d1471f; }
+  .results-list { display:flex; flex-direction:column; gap:12px; }
+  .result-item { background:#0f1115; border:1px solid #2a2e37; border-radius:8px; padding:14px 16px;
+                 cursor:pointer; transition:all .2s; }
+  .result-item:hover { border-color:#e8532a; background:#1a1d24; }
+  .result-title { font-weight:700; margin-bottom:4px; }
+  .result-meta { font-size:12px; color:#9a9ea6; }
+  .export-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  .export-btn { padding:12px; background:#1a1d24; border:1px solid #2a2e37; border-radius:8px;
+                text-align:center; cursor:pointer; font-weight:700; font-size:13px; transition:all .2s; }
+  .export-btn:hover { border-color:#e8532a; color:#e8532a; }
+  table { width:100%; border-collapse:collapse; }
+  thead { background:#0f1115; }
+  th { text-align:left; padding:12px; font-size:12px; color:#9a9ea6; text-transform:uppercase;
+       letter-spacing:.3px; border-bottom:1px solid #2a2e37; font-weight:600; }
+  td { padding:12px; border-bottom:1px solid #2a2e37; font-size:14px; }
+  tr:hover { background:#1a1d24; }
+  .chart { height:300px; background:#0f1115; border-radius:8px; padding:16px; margin:20px 0; }
+  .loading { color:#9a9ea6; text-align:center; padding:40px; }
+  .error { color:#c0392b; padding:16px; background:#2a1515; border-radius:8px; margin-bottom:20px; }
+  .success { color:#1a9e5c; padding:16px; background:#152a1a; border-radius:8px; margin-bottom:20px; }
+  .tabs { display:flex; gap:0; border-bottom:1px solid #2a2e37; margin-bottom:20px; }
+  .tab { padding:12px 16px; cursor:pointer; border-bottom:2px solid transparent; color:#9a9ea6; font-weight:600; }
+  .tab.active { color:#fff; border-bottom-color:#e8532a; }
+</style>
+</head><body>
+<div class="wrap">
+  <h1>📊 Analytics Dashboard</h1>
+  <p class="subtitle">View usage statistics, search conversations, and export your data</p>
+
+  <div class="metrics" id="metrics-container">
+    <div class="metric"><div class="metric-value" id="total-chats">-</div><div class="metric-label">Total Chats</div></div>
+    <div class="metric"><div class="metric-value" id="total-messages">-</div><div class="metric-label">Total Messages</div></div>
+    <div class="metric"><div class="metric-value" id="total-folders">-</div><div class="metric-label">Folders</div></div>
+    <div class="metric"><div class="metric-value" id="this-week">-</div><div class="metric-label">This Week</div></div>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('search')">🔎 Search & Filter</div>
+    <div class="tab" onclick="switchTab('export')">📥 Export</div>
+    <div class="tab" onclick="switchTab('usage')">📈 Usage Trends</div>
+  </div>
+
+  <div id="search-tab" class="section">
+    <div class="card">
+      <div class="section-title">Search Conversations</div>
+      <div class="search-box">
+        <input type="text" id="search-query" placeholder="Search by title or content..." />
+        <input type="date" id="filter-start" />
+        <input type="date" id="filter-end" />
+        <select id="filter-folder">
+          <option value="">All Folders</option>
+        </select>
+        <button onclick="searchConversations()">Search</button>
+      </div>
+      <div id="search-results" class="results-list"></div>
+    </div>
+  </div>
+
+  <div id="export-tab" class="section" style="display:none;">
+    <div class="card">
+      <div class="section-title">Export Conversations</div>
+      <p style="color:#9a9ea6;margin-bottom:20px;">Select format and export your conversations</p>
+      <div style="margin-bottom:20px;">
+        <label style="display:block;margin-bottom:8px;font-weight:700;">Export Format:</label>
+        <select id="export-format" style="width:200px;">
+          <option value="json">JSON (Machine-readable)</option>
+          <option value="html">HTML (Readable web page)</option>
+          <option value="csv">CSV (Spreadsheet)</option>
+        </select>
+      </div>
+      <div class="export-grid" id="export-grid"></div>
+    </div>
+  </div>
+
+  <div id="usage-tab" class="section" style="display:none;">
+    <div class="card">
+      <div class="section-title">Usage Trends (Last 30 Days)</div>
+      <div class="chart" id="trend-chart">
+        <div class="loading">Loading trend data...</div>
+      </div>
+      <table id="trend-table">
+        <thead><tr><th>Date</th><th>Requests</th><th>Tokens</th><th>Active Users</th></tr></thead>
+        <tbody id="trend-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+function switchTab(tab) {
+  ['search', 'export', 'usage'].forEach(t => {
+    document.getElementById(t + '-tab').style.display = t === tab ? 'block' : 'none';
+    document.querySelector('[onclick="switchTab(\\''+t+'\\')"]').classList.toggle('active', t === tab);
+  });
+  if (tab === 'usage') loadUsageTrends();
+  if (tab === 'export') loadExportUI();
+}
+
+async function loadDashboard() {
+  try {
+    const res = await fetch('/api/analytics/dashboard');
+    const data = await res.json();
+    document.getElementById('total-chats').textContent = data.dashboard.total_conversations;
+    document.getElementById('total-messages').textContent = data.dashboard.total_messages_sent;
+    document.getElementById('total-folders').textContent = Object.keys(data.dashboard.folders_breakdown).length;
+    document.getElementById('this-week').textContent = data.dashboard.usage_this_week.total_requests;
+
+    const filterFolders = document.getElementById('filter-folder');
+    Object.keys(data.dashboard.folders_breakdown).forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f;
+      opt.textContent = f + ' (' + data.dashboard.folders_breakdown[f] + ')';
+      filterFolders.appendChild(opt);
+    });
+  } catch (e) {
+    console.error('Failed to load dashboard:', e);
+  }
+}
+
+async function searchConversations() {
+  const query = document.getElementById('search-query').value;
+  const filters = {
+    start_date: document.getElementById('filter-start').value,
+    end_date: document.getElementById('filter-end').value,
+    folder: document.getElementById('filter-folder').value || null
+  };
+  const res = await fetch('/api/analytics/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, filters })
+  });
+  const data = await res.json();
+  const container = document.getElementById('search-results');
+  if (data.found === 0) {
+    container.innerHTML = '<div class="loading">No conversations found</div>';
+    return;
+  }
+  container.innerHTML = data.conversations.map(c => `
+    <div class="result-item" onclick="exportOne('${c.id}', 'json')">
+      <div class="result-title">${c.title || 'Untitled'}</div>
+      <div class="result-meta">${c.messages?.length || 0} messages • ${c.folder || 'Uncategorized'}</div>
+    </div>
+  `).join('');
+}
+
+async function loadExportUI() {
+  const res = await fetch('/api/analytics/dashboard');
+  const data = await res.json();
+  const grid = document.getElementById('export-grid');
+  grid.innerHTML = data.dashboard.recent_conversations.map(c => `
+    <div class="export-btn" onclick="exportOne('${c.id}', document.getElementById('export-format').value)">
+      ${c.title?.substring(0, 15) || 'Untitled'}
+    </div>
+  `).join('');
+}
+
+async function exportOne(convId, format) {
+  const url = '/api/conversations/' + convId + '/export?format=' + format;
+  window.location.href = url;
+}
+
+async function loadUsageTrends() {
+  try {
+    const res = await fetch('/api/analytics/trend?days=30');
+    const data = await res.json();
+    const tbody = document.getElementById('trend-tbody');
+    tbody.innerHTML = data.trend.map(t => `
+      <tr>
+        <td>${t.date}</td>
+        <td>${t.requests}</td>
+        <td>${t.tokens}</td>
+        <td>${t.unique_users}</td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    console.error('Failed to load trends:', e);
+  }
+}
+
+loadDashboard();
+</script>
+</body></html>"""
+    return Response(html, mimetype="text/html; charset=utf-8")
+
+
 @login_required
 def api_keys_create():
     data = request.get_json(silent=True) or {}
@@ -7062,9 +7649,192 @@ def api_keys_rename(key_id):
     return jsonify({"renamed": ok, "label": new_label})
 
 
-# --- Public API: OpenAI-style chat completions, authenticated with an
-# "aarav-..." key from /api/keys. Lets other apps/people call your Mythic AI
-# the same way they'd call OpenAI's API. -----------------------------------
+# ══════════════════════════════════════════════════════════════════════════════
+# ─── ANALYTICS & USAGE TRACKING API ENDPOINTS ────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/analytics/usage", methods=["GET"])
+@login_required
+def api_get_usage_report():
+    """Get detailed usage analytics for authenticated user's API keys and activity.
+    Query params: days_back (default 30), start_date, end_date, key_id (filter by specific key)"""
+    username = current_username()
+    days_back = request.args.get("days_back", 30, type=int)
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+    key_id = request.args.get("key_id")
+    
+    report = get_usage_report(username=username, key_id=key_id, start_date=start_date, 
+                              end_date=end_date, days_back=days_back)
+    return jsonify(report)
+
+
+@app.route("/api/analytics/search", methods=["POST"])
+@login_required
+def api_search_conversations():
+    """Full-text search conversations with advanced filtering.
+    POST body: { 'query': 'string', 'filters': { 'start_date': 'YYYY-MM-DD', 
+    'end_date': 'YYYY-MM-DD', 'folder': 'name', 'archived': bool, 
+    'pinned': bool, 'min_messages': int } }"""
+    username = current_username()
+    data = request.get_json(silent=True) or {}
+    query = data.get("query", "").strip()
+    filters = data.get("filters", {})
+    
+    results = search_conversations(username, query=query, filters=filters)
+    return jsonify({"found": len(results), "conversations": results})
+
+
+@app.route("/api/conversations/<conv_id>/export", methods=["GET"])
+@login_required
+def api_export_conversation(conv_id):
+    """Export a conversation in requested format (json, csv, html).
+    Query param: format (default 'json')"""
+    username = current_username()
+    format_type = request.args.get("format", "json").lower()
+    
+    if format_type not in ("json", "csv", "html"):
+        return jsonify({"error": "format must be json, csv, or html"}), 400
+    
+    content, mimetype, filename = export_conversation(conv_id, username, format_type)
+    if not content:
+        return jsonify({"error": "conversation not found"}), 404
+    
+    return Response(content, mimetype=mimetype, 
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.route("/api/analytics/dashboard", methods=["GET"])
+@login_required
+def api_analytics_dashboard():
+    """Get a quick dashboard summary of user's activity.
+    Includes: recent activity, top models, conversation trends."""
+    username = current_username()
+    report = get_usage_report(username=username, days_back=7)
+    
+    # Get recent conversations
+    convs = list_conversations(username)
+    recent = sorted(convs, key=lambda c: c.get("updated_at", ""), reverse=True)[:10]
+    
+    # Get folder breakdown
+    folders = {}
+    for conv in convs:
+        folder = conv.get("folder") or "Uncategorized"
+        if folder not in folders:
+            folders[folder] = 0
+        folders[folder] += 1
+    
+    return jsonify({
+        "username": username,
+        "dashboard": {
+            "total_conversations": len(convs),
+            "total_messages_sent": sum(len(c.get("messages", [])) for c in convs),
+            "recent_conversations": recent,
+            "folders_breakdown": folders,
+            "usage_this_week": report["summary"],
+            "generated_at": _dt.utcnow().isoformat()
+        }
+    })
+
+
+@app.route("/api/admin/stats", methods=["GET"])
+@login_required
+def api_admin_stats():
+    """Get system-wide admin statistics (requires admin role).
+    Includes: total users, total requests, top models, daily trends."""
+    username = current_username()
+    
+    # Check if user is admin (you can add a proper admin role check here)
+    # For now, allow super-admin access
+    is_admin = username in getattr(_app, 'SUPER_ADMINS', [])
+    if not is_admin and os.environ.get("SUPER_ADMIN_USERNAME") != username:
+        return jsonify({"error": "admin access required"}), 403
+    
+    stats = get_admin_stats(include_daily=True)
+    return jsonify(stats)
+
+
+@app.route("/api/analytics/export-bulk", methods=["POST"])
+@login_required
+def api_export_bulk():
+    """Export multiple conversations at once in ZIP format.
+    POST body: { 'conversation_ids': ['id1', 'id2', ...], 'format': 'json|csv|html' }"""
+    username = current_username()
+    data = request.get_json(silent=True) or {}
+    conv_ids = data.get("conversation_ids", [])
+    format_type = data.get("format", "json").lower()
+    
+    if not conv_ids:
+        return jsonify({"error": "conversation_ids required"}), 400
+    if format_type not in ("json", "csv", "html"):
+        return jsonify({"error": "format must be json, csv, or html"}), 400
+    
+    # Create ZIP in memory
+    import zipfile as _zipfile
+    from io import BytesIO as _BytesIO
+    
+    zip_buffer = _BytesIO()
+    with _zipfile.ZipFile(zip_buffer, "w", _zipfile.ZIP_DEFLATED) as zip_file:
+        for conv_id in conv_ids:
+            content, mimetype, filename = export_conversation(conv_id, username, format_type)
+            if content:
+                zip_file.writestr(filename, content)
+    
+    zip_buffer.seek(0)
+    return Response(zip_buffer.getvalue(), mimetype="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="conversations.zip"'})
+
+
+@app.route("/api/analytics/filters-options", methods=["GET"])
+@login_required
+def api_search_filter_options():
+    """Get available filter options for conversation search (folders, date range, etc)."""
+    username = current_username()
+    convs = list_conversations(username)
+    
+    folders = set(c.get("folder") for c in convs if c.get("folder"))
+    folders.add("Uncategorized")
+    
+    dates = [c.get("updated_at", "")[:10] for c in convs if c.get("updated_at")]
+    min_date = min(dates) if dates else None
+    max_date = max(dates) if dates else None
+    
+    return jsonify({
+        "available_folders": list(folders),
+        "date_range": {"min": min_date, "max": max_date},
+        "total_conversations": len(convs),
+        "filters_available": ["start_date", "end_date", "folder", "archived", "pinned", "min_messages"]
+    })
+
+
+@app.route("/api/analytics/trend", methods=["GET"])
+@login_required
+def api_usage_trend():
+    """Get usage trends over time (daily breakdown).
+    Query params: days (default 30)"""
+    username = current_username()
+    days = request.args.get("days", 30, type=int)
+    
+    report = get_usage_report(username=username, days_back=days)
+    trend_data = []
+    
+    for day_entry in report["summary"]["daily_breakdown"]:
+        date = day_entry["date"]
+        stats = day_entry["stats"]
+        trend_data.append({
+            "date": date,
+            "requests": stats.get("total_requests", 0),
+            "tokens": stats.get("total_tokens", 0),
+            "unique_users": len(stats.get("unique_users", []))
+        })
+    
+    return jsonify({
+        "period_days": days,
+        "trend": trend_data,
+        "generated_at": _dt.utcnow().isoformat()
+    })
+
+
 @app.route("/v1/chat/completions", methods=["POST"])
 def v1_chat_completions():
     auth = request.headers.get("Authorization", "")
