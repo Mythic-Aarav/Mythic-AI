@@ -7524,7 +7524,10 @@ def analytics_dashboard():
 function switchTab(tab) {
   ['search', 'export', 'usage'].forEach(t => {
     document.getElementById(t + '-tab').style.display = t === tab ? 'block' : 'none';
-    document.querySelector('[onclick="switchTab(\\''+t+'\\')"]').classList.toggle('active', t === tab);
+  });
+  document.querySelectorAll('.tab').forEach((el, idx) => {
+    const tabNames = ['search', 'export', 'usage'];
+    el.classList.toggle('active', tabNames[idx] === tab);
   });
   if (tab === 'usage') loadUsageTrends();
   if (tab === 'export') loadExportUI();
