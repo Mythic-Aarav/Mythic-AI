@@ -7330,7 +7330,7 @@ async function loadKeys() {
       <td class="calls-cell">${k.request_count || 0}</td>
       <td><span class="state-pill ${k.active ? 'state-active' : 'state-revoked'}">${k.active ? 'ACTIVE' : 'REVOKED'}</span></td>
       <td><div class="options-cell">
-        <button class="rename-btn" onclick="renameKey('${k.id}', ${JSON.stringify(k.label || '')})">✎ Rename</button>
+        <button class="rename-btn" onclick="renameKey('${k.id}', '${(k.label || '').replace(/'/g, "&apos;").replace(/"/g, "&quot;")}')">✎ Rename</button>
         ${k.active ? `<button class="revoke-btn" onclick="revokeKey('${k.id}')">Revoke</button>` : ''}
       </div></td>
     </tr>`).join('');
