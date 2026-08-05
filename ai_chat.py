@@ -2547,7 +2547,7 @@ PAGE = r"""<!DOCTYPE html>
     </div>
 
     <div class="settings-section" id="api-keys-section" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
-      <label>🔑 API Keys <span style="font-weight:400;opacity:.7;">(owner only)</span></label>
+      <label>🔑 API Keys</label>
       <div class="hint">Let other apps call Mythic AI like an OpenAI-style API. Keys start with
         <code>aarav-</code> and are shown only once — copy them right away.</div>
       <div style="display:flex;gap:8px;margin-top:8px;">
@@ -6665,18 +6665,7 @@ def claim_owner(secret):
         mimetype="text/html; charset=utf-8")
 
 
-# --- API key management (owner only) ------------------------------------------
-def _require_owner():
-    """Only the owner account (you, or someone using your invite link) may
-    create/list/revoke API keys — not every anonymous visitor.
-
-    IMPORTANT: if no owner has been claimed yet, the FIRST caller to check
-    this becomes the owner (using their own existing session id, same as
-    /api/invite-link does) — never a disconnected random id. Otherwise
-    whoever happened to load Settings first would get silently locked out
-    of their own account."""
-    return current_username() == get_or_create_owner_id(preferred_id=current_username())
-
+# --- API key management (open to everyone — no owner gate) --------------------
 @app.route("/api/keys", methods=["GET"])
 @login_required
 def api_keys_list():
@@ -6871,11 +6860,9 @@ loadKeys();
 @app.route("/api/keys", methods=["POST"])
 @login_required
 def api_keys_create():
-    if not _require_owner():
-        return jsonify({"error": "Only the account owner can manage API keys."}), 403
     data = request.get_json(silent=True) or {}
     label = (data.get("label") or "").strip()
-    raw_key, record = create_api_key(label)
+    raw_key, record = create_api_key(label, current_username())
     return jsonify({
         "api_key": raw_key,  # shown ONCE — the frontend must display and never re-fetch this
         "id": record["id"],
@@ -6887,9 +6874,7 @@ def api_keys_create():
 @app.route("/api/keys/<key_id>", methods=["DELETE"])
 @login_required
 def api_keys_revoke(key_id):
-    if not _require_owner():
-        return jsonify({"error": "Only the account owner can manage API keys."}), 403
-    ok = revoke_api_key(key_id)
+    ok = revoke_api_key(key_id, current_username())
     return jsonify({"revoked": ok})
 
 
