@@ -6697,16 +6697,19 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// ─── Auto-generate a smart AI title after the first exchange in a new chat ──
+// ─── Refresh the sidebar after the first exchange in a new chat ────────────
+// The backend already generates a smart title automatically as part of the
+// streaming response itself (see generate_smart_title() server-side) — we
+// just need to reload the list to pick it up. There used to be a second,
+// separate call to /generate-title here, but it duplicated the server-side
+// logic with its own (buggier) prompt and would overwrite the good title
+// with a worse one, so it's been removed.
 const _origStreamReply = streamReply;
 streamReply = async function(opts) {
   const wasNewChat = !activeConvId;
   await _origStreamReply(opts);
   if (wasNewChat && activeConvId && !(opts && opts.regenerate)) {
-    fetch('/api/conversations/' + activeConvId + '/generate-title', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(getUserApiKeys())
-    }).then(() => loadConversationList()).catch(() => {});
+    loadConversationList().catch(() => {});
   }
 };
 </script>
@@ -8206,7 +8209,11 @@ def api_generate_title(conv_id):
     """Asks the AI to write a short, punchy title from the first exchange in
     the conversation, replacing the naive first-40-characters title. Safe to
     call any time; falls back to leaving the title unchanged if the AI can't
-    be reached."""
+    be reached. Reuses generate_smart_title() so this stays in sync with the
+    automatic title generation that already happens after the first reply —
+    this route used to have its own separate prompt (which incorrectly
+    included the full SYSTEM_PROMPT persona and produced confused titles),
+    that duplication has been removed."""
     username = current_username()
     conv = load_conversation(username, conv_id)
     if conv is None:
@@ -8215,42 +8222,35 @@ def api_generate_title(conv_id):
     if not messages:
         return jsonify({"error": "conversation has no messages yet"}), 400
 
-    convo_excerpt = []
+    def _text_of(m):
+        return "".join(p.get("text", "") for p in m.get("parts", []) if "text" in p)
+
+    first_user_message = ""
+    first_ai_reply = ""
     for m in messages[:4]:
-        text = "".join(p.get("text", "") for p in m.get("parts", []) if "text" in p)
-        if text:
-            speaker = "User" if m["role"] == "user" else "Assistant"
-            convo_excerpt.append(f"{speaker}: {text[:300]}")
-    excerpt = "\n".join(convo_excerpt)
-    if not excerpt.strip():
+        text = _text_of(m)
+        if not text:
+            continue
+        if m["role"] == "user" and not first_user_message:
+            first_user_message = text
+        elif m["role"] != "user" and not first_ai_reply:
+            first_ai_reply = text
+        if first_user_message and first_ai_reply:
+            break
+
+    if not first_user_message and not first_ai_reply:
         return jsonify({"error": "no text content to summarize"}), 400
 
-    title_prompt = [{"role": "user", "parts": [{"text":
-        "Write a short chat title (max 6 words, no quotes, no trailing "
-        "punctuation, plain text only) that summarizes this conversation:\n\n"
-        f"{excerpt}"
-    }]}]
     data = request.get_json(silent=True) or {}
     user_groq_key = (data.get("groq_api_key") or "").strip()
     user_cerebras_key = (data.get("cerebras_api_key") or "").strip()
 
     try:
-        raw_title = _collect_full_reply(
-            auto_stream_chunks(None, title_prompt, SYSTEM_PROMPT, user_groq_key, user_cerebras_key)
-        ).strip()
-    except Exception:
-        raw_title = ""
-
-    raw_title = raw_title.strip().strip('"').strip("'")
-    raw_title = re.sub(r'^\[Instructions:.*?\]\s*', '', raw_title, flags=re.DOTALL)
-    # Take just the first line/sentence in case the model added extra
-    # commentary despite instructions — truncate rather than reject outright,
-    # so a slightly-verbose reply still produces a usable title.
-    raw_title = raw_title.split("\n")[0].strip()
-    if not raw_title:
+        new_title = generate_smart_title(first_user_message, first_ai_reply, user_groq_key, user_cerebras_key)
+    except Exception as e:
+        print(f"[generate-title] failed: {e}")
         return jsonify({"status": "unchanged", "title": conv.get("title", "New chat")})
 
-    new_title = raw_title[:60]
     conv["title"] = new_title
     save_conversation(username, conv_id, conv)
     return jsonify({"status": "generated", "title": new_title})
