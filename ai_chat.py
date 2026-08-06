@@ -8483,15 +8483,29 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
     if not user_msg and not ai_reply:
         return "New chat"
 
+    # Fast-path: a bare greeting with nothing else shouldn't need a whole AI
+    # round-trip, and the AI tends to over-elaborate ("Friendly AI Assist
+    # Conversation...") for something this simple. Handle it directly.
+    greeting_only = re.fullmatch(
+        r"(hi+|hello+|hey+|yo|sup|howdy|good\s?(morning|afternoon|evening|day)|"
+        r"greetings?)[\s!.?]*",
+        user_msg, flags=re.IGNORECASE
+    )
+    if greeting_only:
+        return "Greeting"
+
     prompt = (
-        "Generate a short, natural chat title (3-6 words, no quotes, no punctuation "
-        "at the end, no emoji, title case) that summarizes what this conversation is "
-        "about. Reply with ONLY the title text, nothing else.\n\n"
+        "Generate a short, natural chat title (2-5 words, no quotes, no "
+        "punctuation at the end, no emoji, title case) that summarizes what "
+        "this conversation is about. Prefer plain, simple phrasing over "
+        "formal or generic-sounding titles (for example, prefer 'Trip to "
+        "Japan' over 'Travel Planning Assistance Conversation'). "
+        "Reply with ONLY the title text, nothing else.\n\n"
         f"User: {user_msg[:400]}\n"
         f"Assistant: {ai_reply[:400]}"
     )
     messages = [
-        {"role": "system", "content": "You generate concise chat titles. Reply with only the title, no extra text."},
+        {"role": "system", "content": "You generate concise, plain-spoken chat titles. Reply with only the title, no extra text."},
         {"role": "user", "content": prompt},
     ]
     result = _quick_completion(messages, api_key_groq, api_key_cerebras, max_tokens=16)
@@ -8503,6 +8517,7 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
         title = re.sub(r'[.!?]+$', '', title).strip()
         looks_bad = (
             len(title) < 3 or
+            len(title.split()) > 6 or
             any(ch in title for ch in '[]"“”') or
             title.lower().startswith(('based on', 'here is', 'here\'s', 'sure,', 'title:'))
         )
