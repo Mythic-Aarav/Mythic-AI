@@ -2709,7 +2709,6 @@ PAGE = r"""<!DOCTYPE html>
   <div id="sidebar">
     <button id="new-chat-btn">+ New chat</button>
     <button id="api-keys-shortcut-btn" title="Manage API keys">🔑 API Keys</button>
-    <button id="analytics-shortcut-btn" title="View analytics">📊 Analytics</button>
     <div id="api-usage-summary" style="display:none;margin:0 12px 6px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:11.5px;color:var(--muted);cursor:pointer;" title="Click to manage API keys"></div>
     <div style="display:flex;gap:6px;margin:6px 0;">
       <button id="search-chats-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:7px 4px;font-size:12px;cursor:pointer;font-family:inherit;">🔎 Search</button>
@@ -2927,31 +2926,6 @@ PAGE = r"""<!DOCTYPE html>
         <button id="api-usage-create-close-btn" style="border-radius:8px;padding:9px 16px;font-size:13px;cursor:pointer;border:none;background:#2a2e37;color:#f2f2f2;">Close</button>
         <button id="api-usage-create-confirm-btn" style="border-radius:8px;padding:9px 16px;font-size:13px;cursor:pointer;border:none;background:#e8532a;color:#fff;font-weight:700;">Generate</button>
       </div>
-    </div>
-  </div>
-</div>
-
-<div id="analytics-overlay" style="display:none;position:fixed;inset:0;background:#0f1115;color:#f2f2f2;z-index:200;overflow-y:auto;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-  <div style="max-width:900px;margin:0 auto;padding:32px 24px 60px;">
-    <button id="analytics-close-btn" style="background:none;border:none;color:#9a9ea6;font-size:14px;cursor:pointer;padding:0;margin-bottom:20px;font-family:inherit;">← Back to chat</button>
-    <h1 style="font-size:30px;margin:0 0 6px;">Analytics</h1>
-    <div style="color:#9a9ea6;font-size:14px;margin-bottom:30px;max-width:560px;line-height:1.5;">Your activity metrics and usage patterns over the past 7 days.</div>
-    
-    <div id="analytics-totals" style="display:flex;gap:16px;margin-bottom:30px;flex-wrap:wrap;"></div>
-    
-    <div style="background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:20px;margin-bottom:24px;">
-      <h3 style="margin:0 0 16px;font-size:16px;">Recent Conversations</h3>
-      <div id="analytics-recent" style="display:flex;flex-direction:column;gap:8px;"></div>
-    </div>
-
-    <div style="background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:20px;margin-bottom:24px;">
-      <h3 style="margin:0 0 16px;font-size:16px;">Folders</h3>
-      <div id="analytics-folders" style="display:flex;flex-direction:column;gap:8px;"></div>
-    </div>
-
-    <div style="background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:20px;">
-      <h3 style="margin:0 0 16px;font-size:16px;">This Week's Usage</h3>
-      <div id="analytics-usage" style="display:flex;flex-direction:column;gap:8px;"></div>
     </div>
   </div>
 </div>
@@ -4792,109 +4766,7 @@ if (apiKeysShortcutBtn) apiKeysShortcutBtn.addEventListener('click', () => {
   openApiUsageOverlay();
 });
 
-// ─── Analytics Dashboard ─────────────────────────────────────────────────────
-const analyticsOverlayEl = document.getElementById('analytics-overlay');
-const analyticsCloseBtn = document.getElementById('analytics-close-btn');
-const analyticsTotalsEl = document.getElementById('analytics-totals');
-const analyticsRecentEl = document.getElementById('analytics-recent');
-const analyticsFoldersEl = document.getElementById('analytics-folders');
-const analyticsUsageEl = document.getElementById('analytics-usage');
-
-const analyticsShortcutBtn = document.getElementById('analytics-shortcut-btn');
-if (analyticsShortcutBtn) analyticsShortcutBtn.addEventListener('click', () => {
-  openAnalyticsOverlay();
-});
-
-function openAnalyticsOverlay() {
-  if (!analyticsOverlayEl) return;
-  analyticsOverlayEl.style.display = 'block';
-  loadAnalyticsDashboard();
-}
-function closeAnalyticsOverlay() {
-  if (analyticsOverlayEl) analyticsOverlayEl.style.display = 'none';
-}
-if (analyticsCloseBtn) analyticsCloseBtn.addEventListener('click', closeAnalyticsOverlay);
-
-async function loadAnalyticsDashboard() {
-  try {
-    // Fetch conversations and stats data
-    const [convsRes, statsRes] = await Promise.all([
-      fetch('/api/conversations'),
-      fetch('/api/streak')
-    ]);
-    
-    const convs = convsRes.ok ? (await convsRes.json()).conversations || [] : [];
-    const streak = statsRes.ok ? (await statsRes.json()).streak || 0 : 0;
-
-    // Calculate totals
-    let totalMsgs = 0;
-    const recentConvs = [...convs].sort((a, b) => {
-      const aDate = new Date(a.updated_at || 0).getTime();
-      const bDate = new Date(b.updated_at || 0).getTime();
-      return bDate - aDate;
-    }).slice(0, 10);
-    
-    recentConvs.forEach(c => { totalMsgs += (c.messages || []).length; });
-
-    // Folder breakdown
-    const folders = {};
-    convs.forEach(c => {
-      const folder = c.folder || 'Uncategorized';
-      folders[folder] = (folders[folder] || 0) + 1;
-    });
-
-    // Totals
-    analyticsTotalsEl.innerHTML = `
-      <div style="flex:1;min-width:150px;background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:18px;text-align:center;">
-        <div style="font-size:40px;font-weight:800;line-height:1.1;">${convs.length}</div>
-        <div style="font-size:12px;color:#9a9ea6;margin-top:6px;letter-spacing:.3px;text-transform:uppercase;">Total Conversations</div>
-      </div>
-      <div style="flex:1;min-width:150px;background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:18px;text-align:center;">
-        <div style="font-size:40px;font-weight:800;line-height:1.1;">${totalMsgs}</div>
-        <div style="font-size:12px;color:#9a9ea6;margin-top:6px;letter-spacing:.3px;text-transform:uppercase;">Total Messages</div>
-      </div>
-      <div style="flex:1;min-width:150px;background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:18px;text-align:center;">
-        <div style="font-size:40px;font-weight:800;line-height:1.1;">${streak}</div>
-        <div style="font-size:12px;color:#9a9ea6;margin-top:6px;letter-spacing:.3px;text-transform:uppercase;">Day Streak</div>
-      </div>`;
-
-    // Recent conversations
-    analyticsRecentEl.innerHTML = recentConvs.length ? recentConvs.map((c, i) => {
-      const title = c.title || '(Untitled)';
-      const msgCount = (c.messages || []).length;
-      const updated = c.updated_at ? new Date(c.updated_at).toLocaleDateString() : 'unknown';
-      return `<div style="padding:10px;background:#0f1115;border-radius:8px;border:1px solid #2a2e37;font-size:13px;">
-        <div style="font-weight:600;color:#d9a441;">${title.substring(0,50)}</div>
-        <div style="font-size:11.5px;color:#9a9ea6;margin-top:4px;">${msgCount} messages • ${updated}</div>
-      </div>`;
-    }).join('') : '<div style="color:#9a9ea6;font-size:13px;padding:10px;">No conversations yet</div>';
-
-    // Folders
-    analyticsFoldersEl.innerHTML = Object.entries(folders).length ? Object.entries(folders).map(([folder, count]) => {
-      return `<div style="display:flex;justify-content:space-between;padding:10px;background:#0f1115;border-radius:8px;border:1px solid #2a2e37;font-size:13px;">
-        <span style="font-weight:600;color:#d9a441;">${folder}</span>
-        <span style="color:#9a9ea6;">${count} conversation${count!==1?'s':''}</span>
-      </div>`;
-    }).join('') : '<div style="color:#9a9ea6;font-size:13px;padding:10px;">No folders yet</div>';
-
-    // Usage summary (conversations per day estimate)
-    const today = new Date().toISOString().split('T')[0];
-    const todayConvs = convs.filter(c => c.created_at && c.created_at.startsWith(today)).length;
-    analyticsUsageEl.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f1115;border-radius:8px;border:1px solid #2a2e37;font-size:13px;">
-        <span style="font-weight:600;color:#d9a441;">Today</span>
-        <span style="color:#9a9ea6;">${todayConvs} new conversation${todayConvs!==1?'s':''}</span>
-      </div>
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f1115;border-radius:8px;border:1px solid #2a2e37;font-size:13px;">
-        <span style="font-weight:600;color:#d9a441;">All Time</span>
-        <span style="color:#9a9ea6;">${convs.length} conversations • ${totalMsgs} messages</span>
-      </div>`;
-
-  } catch (e) {
-    console.warn('Could not load stats:', e);
-    analyticsTotalsEl.innerHTML = '<div style="color:#e0806b;font-size:14px;padding:20px;text-align:center;">Error loading stats</div>';
-  }
-}
+// ─── Analytics removed - use Stats button in chat instead ─────────────────
 
 settingsCloseBtn.addEventListener('click', () => { saveSettings(); settingsModalOverlay.style.display = 'none'; });
 settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsModalOverlay) { saveSettings(); settingsModalOverlay.style.display = 'none'; } });
