@@ -3837,11 +3837,19 @@ function startNewChat(opts) {
   activeConvId = null;
   messagesEl.innerHTML = '';
   showEmptyState();
-  loadConversationList();
   refreshShareBtnState();
   if (!opts || opts.updateUrl !== false) {
     try { history.pushState({}, '', location.pathname); } catch {}
   }
+  // Create the conversation on the server right away so it shows up in the
+  // sidebar immediately, instead of only appearing after the first message.
+  fetch('/api/conversations', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      if (d.id) activeConvId = d.id;
+      loadConversationList();
+    })
+    .catch(() => { loadConversationList(); }); // still refresh list even if this failed
 }
 
 // Keep the address bar in sync with Back/Forward navigation between chats.
@@ -4536,8 +4544,36 @@ if (apiUsageCreateConfirmBtn) apiUsageCreateConfirmBtn.addEventListener('click',
     const data = await res.json();
     if (data.api_key) {
       apiUsageNewKeyResultEl.innerHTML =
-        '<div style="background:#0f1115;border:1px solid #1a9e5c;border-radius:8px;padding:12px;margin-bottom:14px;font-family:monospace;font-size:13px;word-break:break-all;color:#7be3ab;">' + data.api_key + '</div>' +
-        '<div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again.</div>';
+        '<div style="background:#0f1115;border:1px solid #1a9e5c;border-radius:8px;padding:12px;margin-bottom:14px;">' +
+          '<div style="display:flex;gap:8px;align-items:center;">' +
+            '<input type="text" id="api-usage-new-key-input" readonly value="' + data.api_key.replace(/"/g, '&quot;') + '" ' +
+              'style="flex:1;background:#0f1115;border:1px solid #1a9e5c;border-radius:6px;padding:8px;font-family:monospace;font-size:12px;color:#7be3ab;box-sizing:border-box;min-width:0;">' +
+            '<button type="button" id="api-usage-new-key-copy-btn" ' +
+              'style="background:#1a9e5c;color:#04140b;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;white-space:nowrap;">Copy</button>' +
+          '</div>' +
+        '</div>' +
+        '<div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again. (Double-clicking to select may only grab part of the key due to the hyphens — use the Copy button instead.)</div>';
+      const newKeyCopyBtn = document.getElementById('api-usage-new-key-copy-btn');
+      if (newKeyCopyBtn) {
+        newKeyCopyBtn.addEventListener('click', async () => {
+          const keyInput = document.getElementById('api-usage-new-key-input');
+          if (!keyInput) return;
+          try {
+            keyInput.select();
+            document.execCommand('copy');
+            newKeyCopyBtn.textContent = '✓ Copied!';
+            setTimeout(() => { newKeyCopyBtn.textContent = 'Copy'; }, 2500);
+          } catch (e) {
+            try {
+              await navigator.clipboard.writeText(keyInput.value);
+              newKeyCopyBtn.textContent = '✓ Copied!';
+              setTimeout(() => { newKeyCopyBtn.textContent = 'Copy'; }, 2500);
+            } catch (e2) {
+              alert('Copy failed. Try selecting the whole box manually (click once, then Ctrl+A, Ctrl+C).');
+            }
+          }
+        });
+      }
       refreshApiUsageOverlay();
       loadApiUsageSummary();
     } else if (data.error) {
@@ -8158,6 +8194,19 @@ def api_list_conversations():
     else:
         convs = [c for c in convs if not c.get("archived")]
     return jsonify({"conversations": convs})
+
+
+@app.route("/api/conversations", methods=["POST"])
+@login_required
+def api_create_conversation():
+    """Creates an empty 'New chat' conversation immediately, so it shows up
+    in the sidebar right away instead of only appearing after the first
+    message is sent. The conversation carries no messages yet — sending the
+    first message into it works exactly the same as any other conversation."""
+    username = current_username()
+    conv_id = str(uuid.uuid4())
+    save_conversation(username, conv_id, {"title": "New chat", "messages": []})
+    return jsonify({"id": conv_id, "title": "New chat"})
 
 
 # Patterns that identify a conversation as internal-tooling leakage rather
