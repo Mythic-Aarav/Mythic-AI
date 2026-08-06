@@ -7410,255 +7410,431 @@ loadKeys();
 def analytics_dashboard():
     """Comprehensive analytics dashboard for viewing usage stats, trends, and exporting conversations."""
     html = """<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Analytics Dashboard · Mythic AI</title>
-<style>
-  * { box-sizing:border-box; }
-  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#0f1115;
-         color:#f2f2f2; margin:0; padding:32px 24px 60px; }
-  .wrap { max-width:1400px; margin:0 auto; }
-  h1 { font-size:28px; margin:0 0 8px; font-weight:700; }
-  .subtitle { color:#9a9ea6; font-size:15px; margin-bottom:30px; }
-  .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-bottom:40px; }
-  .metric { background:#1a1d24; border:1px solid #2a2e37; border-radius:12px; padding:20px; }
-  .metric-value { font-size:32px; font-weight:800; line-height:1.1; margin-bottom:8px; }
-  .metric-label { font-size:12px; color:#9a9ea6; text-transform:uppercase; letter-spacing:.3px; }
-  .section { margin-bottom:40px; display:none; }
-  .section.active { display:block; }
-  .section-title { font-size:18px; font-weight:700; margin-bottom:16px; }
-  .card { background:#1a1d24; border:1px solid #2a2e37; border-radius:12px; padding:24px; margin-bottom:16px; }
-  .search-box { display:flex; gap:10px; margin-bottom:20px; flex-wrap:wrap; }
-  .search-box input, .search-box select { padding:10px 14px; border:1px solid #3a3e47; background:#0f1115;
-                                           color:#fff; border-radius:8px; font-size:14px; min-width:150px; }
-  .search-box button { padding:10px 20px; background:#e8532a; color:#fff; border:none; border-radius:8px;
-                       cursor:pointer; font-weight:700; font-size:13px; transition:all .2s; }
-  .search-box button:hover { background:#d1471f; }
-  .results-list { display:flex; flex-direction:column; gap:12px; max-height:600px; overflow-y:auto; }
-  .result-item { background:#0f1115; border:1px solid #2a2e37; border-radius:8px; padding:14px 16px;
-                 cursor:pointer; transition:all .2s; }
-  .result-item:hover { border-color:#e8532a; background:#1a1d24; }
-  .result-title { font-weight:700; margin-bottom:4px; }
-  .result-meta { font-size:12px; color:#9a9ea6; }
-  .export-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; }
-  .export-btn { padding:12px; background:#1a1d24; border:1px solid #2a2e37; border-radius:8px;
-                text-align:center; cursor:pointer; font-weight:700; font-size:13px; transition:all .2s; }
-  .export-btn:hover { border-color:#e8532a; color:#e8532a; }
-  table { width:100%; border-collapse:collapse; }
-  thead { background:#0f1115; }
-  th { text-align:left; padding:12px; font-size:12px; color:#9a9ea6; text-transform:uppercase;
-       letter-spacing:.3px; border-bottom:1px solid #2a2e37; font-weight:600; }
-  td { padding:12px; border-bottom:1px solid #2a2e37; font-size:14px; }
-  tr:hover { background:#1a1d24; }
-  .loading { color:#9a9ea6; text-align:center; padding:40px; }
-  .error { color:#c0392b; padding:16px; background:#2a1515; border-radius:8px; margin-bottom:20px; }
-  .success { color:#1a9e5c; padding:16px; background:#152a1a; border-radius:8px; margin-bottom:20px; }
-  .tabs { display:flex; gap:0; border-bottom:1px solid #2a2e37; margin-bottom:20px; }
-  .tab-btn { padding:12px 16px; cursor:pointer; border-bottom:2px solid transparent; color:#9a9ea6; 
-             font-weight:600; background:none; border:none; font-size:14px; transition:all .2s; }
-  .tab-btn:hover { color:#fff; }
-  .tab-btn.active { color:#fff; border-bottom-color:#e8532a; }
-</style>
-</head><body>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Analytics Dashboard · Mythic AI</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f1115;
+      color: #f2f2f2;
+      padding: 32px 20px;
+    }
+    .wrap { max-width: 1200px; margin: 0 auto; }
+    h1 { font-size: 28px; margin: 0 0 8px; font-weight: 700; }
+    .subtitle { color: #9a9ea6; font-size: 14px; margin-bottom: 30px; }
+    
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 40px;
+    }
+    .metric {
+      background: #1a1d24;
+      border: 1px solid #2a2e37;
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .metric-value { font-size: 32px; font-weight: 800; margin-bottom: 6px; }
+    .metric-label { font-size: 11px; color: #9a9ea6; text-transform: uppercase; }
+    
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid #2a2e37;
+      margin-bottom: 20px;
+    }
+    .tab-button {
+      padding: 12px 18px;
+      background: none;
+      border: none;
+      color: #9a9ea6;
+      font-weight: 600;
+      font-size: 14px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+    }
+    .tab-button:hover { color: #fff; }
+    .tab-button.active { color: #fff; border-bottom-color: #e8532a; }
+    
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    
+    .card {
+      background: #1a1d24;
+      border: 1px solid #2a2e37;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 16px;
+    }
+    
+    .search-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .search-row input,
+    .search-row select {
+      padding: 10px 14px;
+      border: 1px solid #3a3e47;
+      background: #0f1115;
+      color: #fff;
+      border-radius: 8px;
+      font-size: 13px;
+      font-family: inherit;
+    }
+    .search-row button {
+      padding: 10px 24px;
+      background: #e8532a;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+    .search-row button:hover { background: #d1471f; }
+    
+    .results {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 500px;
+      overflow-y: auto;
+    }
+    .result {
+      background: #0f1115;
+      border: 1px solid #2a2e37;
+      border-radius: 8px;
+      padding: 12px 14px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .result:hover { border-color: #e8532a; background: #1a1d24; }
+    .result-title { font-weight: 700; margin-bottom: 4px; }
+    .result-meta { font-size: 12px; color: #9a9ea6; }
+    
+    .export-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 12px;
+    }
+    .export-item {
+      background: #1a1d24;
+      border: 1px solid #2a2e37;
+      border-radius: 8px;
+      padding: 12px;
+      text-align: center;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+    .export-item:hover { border-color: #e8532a; color: #e8532a; }
+    
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    thead { background: #0f1115; }
+    th {
+      text-align: left;
+      padding: 12px;
+      font-size: 11px;
+      color: #9a9ea6;
+      text-transform: uppercase;
+      font-weight: 600;
+      border-bottom: 1px solid #2a2e37;
+    }
+    td { padding: 12px; border-bottom: 1px solid #2a2e37; }
+    tr:hover { background: #1a1d24; }
+    
+    .loading { text-align: center; color: #9a9ea6; padding: 40px 20px; }
+    .error { color: #ef4444; padding: 12px; background: #2a1515; border-radius: 8px; }
+    
+    .format-select {
+      padding: 10px 14px;
+      border: 1px solid #3a3e47;
+      background: #0f1115;
+      color: #fff;
+      border-radius: 8px;
+      font-size: 13px;
+      font-family: inherit;
+      width: 200px;
+      margin-bottom: 20px;
+    }
+  </style>
+</head>
+<body>
+
 <div class="wrap">
   <h1>📊 Analytics Dashboard</h1>
   <p class="subtitle">View usage statistics, search conversations, and export your data</p>
 
-  <div class="metrics" id="metrics-container">
-    <div class="metric"><div class="metric-value" id="total-chats">-</div><div class="metric-label">Total Chats</div></div>
-    <div class="metric"><div class="metric-value" id="total-messages">-</div><div class="metric-label">Total Messages</div></div>
-    <div class="metric"><div class="metric-value" id="total-folders">-</div><div class="metric-label">Folders</div></div>
-    <div class="metric"><div class="metric-value" id="this-week">-</div><div class="metric-label">This Week</div></div>
+  <div class="metrics">
+    <div class="metric">
+      <div class="metric-value" id="metric-chats">-</div>
+      <div class="metric-label">Total Chats</div>
+    </div>
+    <div class="metric">
+      <div class="metric-value" id="metric-messages">-</div>
+      <div class="metric-label">Total Messages</div>
+    </div>
+    <div class="metric">
+      <div class="metric-value" id="metric-folders">-</div>
+      <div class="metric-label">Folders</div>
+    </div>
+    <div class="metric">
+      <div class="metric-value" id="metric-week">-</div>
+      <div class="metric-label">This Week</div>
+    </div>
   </div>
 
   <div class="tabs">
-    <button class="tab-btn active" data-tab="search">🔎 Search & Filter</button>
-    <button class="tab-btn" data-tab="export">📥 Export</button>
-    <button class="tab-btn" data-tab="usage">📈 Usage Trends</button>
+    <button class="tab-button active" onclick="showTab('search')">🔎 Search</button>
+    <button class="tab-button" onclick="showTab('export')">📥 Export</button>
+    <button class="tab-button" onclick="showTab('trends')">📈 Trends</button>
   </div>
 
-  <div id="search" class="section active">
+  <!-- SEARCH TAB -->
+  <div id="search" class="tab-content active">
     <div class="card">
-      <div class="section-title">Search Conversations</div>
-      <div class="search-box">
-        <input type="text" id="search-query" placeholder="Search by title or content..." />
-        <input type="date" id="filter-start" />
-        <input type="date" id="filter-end" />
-        <select id="filter-folder">
+      <h2 style="margin-top: 0;">Search Conversations</h2>
+      <div class="search-row">
+        <input type="text" id="search-query" placeholder="Search..." />
+        <input type="date" id="search-start" />
+        <input type="date" id="search-end" />
+        <select id="search-folder">
           <option value="">All Folders</option>
         </select>
-        <button id="search-btn">Search</button>
+        <button onclick="performSearch()">Search</button>
       </div>
-      <div id="search-results" class="results-list"></div>
+      <div id="search-results" class="results"></div>
     </div>
   </div>
 
-  <div id="export" class="section">
+  <!-- EXPORT TAB -->
+  <div id="export" class="tab-content">
     <div class="card">
-      <div class="section-title">Export Conversations</div>
-      <p style="color:#9a9ea6;margin-bottom:20px;">Select format and export your conversations</p>
-      <div style="margin-bottom:20px;">
-        <label style="display:block;margin-bottom:8px;font-weight:700;">Export Format:</label>
-        <select id="export-format" style="width:200px;padding:8px;border:1px solid #3a3e47;background:#0f1115;color:#fff;border-radius:8px;">
-          <option value="json">JSON (Machine-readable)</option>
-          <option value="html">HTML (Readable web page)</option>
-          <option value="csv">CSV (Spreadsheet)</option>
-        </select>
-      </div>
-      <div class="export-grid" id="export-grid"><div class="loading">Loading conversations...</div></div>
+      <h2 style="margin-top: 0;">Export Conversations</h2>
+      <label style="display: block; margin-bottom: 8px; font-weight: 700;">Format:</label>
+      <select id="export-format" class="format-select">
+        <option value="json">JSON</option>
+        <option value="html">HTML</option>
+        <option value="csv">CSV</option>
+      </select>
+      <div id="export-list" class="export-grid"></div>
     </div>
   </div>
 
-  <div id="usage" class="section">
+  <!-- TRENDS TAB -->
+  <div id="trends" class="tab-content">
     <div class="card">
-      <div class="section-title">Usage Trends (Last 30 Days)</div>
-      <table id="trend-table">
-        <thead><tr><th>Date</th><th>Requests</th><th>Tokens</th><th>Active Users</th></tr></thead>
-        <tbody id="trend-tbody"><tr><td colspan="4" class="loading">Loading trend data...</td></tr></tbody>
+      <h2 style="margin-top: 0;">Usage Trends (Last 30 Days)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Requests</th>
+            <th>Tokens</th>
+            <th>Users</th>
+          </tr>
+        </thead>
+        <tbody id="trends-table"></tbody>
       </table>
     </div>
   </div>
+
 </div>
 
 <script>
-// Tab switching
-document.querySelectorAll('.tab-btn').forEach(btn => {
-  btn.addEventListener('click', function() {
-    const tabName = this.getAttribute('data-tab');
+  // Show/hide tabs
+  function showTab(tabName) {
+    // Hide all tabs
+    var tabs = document.querySelectorAll('.tab-content');
+    tabs.forEach(function(tab) {
+      tab.classList.remove('active');
+    });
     
-    // Hide all sections
-    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    // Deactivate all buttons
+    var btns = document.querySelectorAll('.tab-button');
+    btns.forEach(function(btn) {
+      btn.classList.remove('active');
+    });
     
-    // Show selected section
+    // Show selected tab
     document.getElementById(tabName).classList.add('active');
-    this.classList.add('active');
+    
+    // Activate clicked button
+    event.target.classList.add('active');
     
     // Load data if needed
-    if (tabName === 'usage') loadUsageTrends();
-    if (tabName === 'export') loadExportUI();
-  });
-});
-
-// Search button
-document.getElementById('search-btn').addEventListener('click', searchConversations);
-
-// Allow Enter key in search
-document.getElementById('search-query').addEventListener('keypress', function(e) {
-  if (e.key === 'Enter') searchConversations();
-});
-
-async function loadDashboard() {
-  try {
-    const res = await fetch('/api/analytics/dashboard');
-    const data = await res.json();
-    document.getElementById('total-chats').textContent = data.dashboard.total_conversations;
-    document.getElementById('total-messages').textContent = data.dashboard.total_messages_sent;
-    document.getElementById('total-folders').textContent = Object.keys(data.dashboard.folders_breakdown).length;
-    document.getElementById('this-week').textContent = data.dashboard.usage_this_week.total_requests;
-
-    const filterFolders = document.getElementById('filter-folder');
-    Object.keys(data.dashboard.folders_breakdown).forEach(f => {
-      const opt = document.createElement('option');
-      opt.value = f;
-      opt.textContent = f + ' (' + data.dashboard.folders_breakdown[f] + ')';
-      filterFolders.appendChild(opt);
-    });
-  } catch (e) {
-    console.error('Failed to load dashboard:', e);
+    if (tabName === 'trends') {
+      loadTrends();
+    }
+    if (tabName === 'export') {
+      loadExportList();
+    }
   }
-}
 
-async function searchConversations() {
-  const query = document.getElementById('search-query').value;
-  const filters = {
-    start_date: document.getElementById('filter-start').value || null,
-    end_date: document.getElementById('filter-end').value || null,
-    folder: document.getElementById('filter-folder').value || null
-  };
-  
-  const resultsEl = document.getElementById('search-results');
-  resultsEl.innerHTML = '<div class="loading">Searching...</div>';
-  
-  try {
-    const res = await fetch('/api/analytics/search', {
+  // Load initial dashboard
+  function loadDashboard() {
+    fetch('/api/analytics/dashboard')
+      .then(r => r.json())
+      .then(data => {
+        document.getElementById('metric-chats').textContent = data.dashboard.total_conversations;
+        document.getElementById('metric-messages').textContent = data.dashboard.total_messages_sent;
+        document.getElementById('metric-folders').textContent = Object.keys(data.dashboard.folders_breakdown).length;
+        document.getElementById('metric-week').textContent = data.dashboard.usage_this_week.total_requests;
+        
+        // Fill folder dropdown
+        var folderSelect = document.getElementById('search-folder');
+        Object.keys(data.dashboard.folders_breakdown).forEach(function(folder) {
+          var opt = document.createElement('option');
+          opt.value = folder;
+          opt.textContent = folder + ' (' + data.dashboard.folders_breakdown[folder] + ')';
+          folderSelect.appendChild(opt);
+        });
+      })
+      .catch(function(err) {
+        console.error('Failed to load dashboard:', err);
+      });
+  }
+
+  // Search conversations
+  function performSearch() {
+    var query = document.getElementById('search-query').value;
+    var startDate = document.getElementById('search-start').value;
+    var endDate = document.getElementById('search-end').value;
+    var folder = document.getElementById('search-folder').value;
+    
+    var resultsDiv = document.getElementById('search-results');
+    resultsDiv.innerHTML = '<div class="loading">Searching...</div>';
+    
+    var filters = {};
+    if (startDate) filters.start_date = startDate;
+    if (endDate) filters.end_date = endDate;
+    if (folder) filters.folder = folder;
+    
+    fetch('/api/analytics/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, filters })
-    });
-    const data = await res.json();
-    
-    if (data.found === 0) {
-      resultsEl.innerHTML = '<div class="loading">No conversations found</div>';
-      return;
-    }
-    
-    resultsEl.innerHTML = data.conversations.map(c => `
-      <div class="result-item" onclick="exportOne('${c.id}')">
-        <div class="result-title">${(c.title || 'Untitled').substring(0, 50)}</div>
-        <div class="result-meta">${c.messages?.length || 0} messages • ${c.folder || 'Uncategorized'}</div>
-      </div>
-    `).join('');
-  } catch (e) {
-    resultsEl.innerHTML = '<div class="error">Failed to search: ' + e.message + '</div>';
+      body: JSON.stringify({ query: query, filters: filters })
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.found === 0) {
+          resultsDiv.innerHTML = '<div class="loading">No results found</div>';
+          return;
+        }
+        
+        var html = '';
+        data.conversations.forEach(function(conv) {
+          html += '<div class="result" onclick="exportConv(\'' + conv.id + '\')">';
+          html += '<div class="result-title">' + (conv.title || 'Untitled').substring(0, 50) + '</div>';
+          html += '<div class="result-meta">' + (conv.messages ? conv.messages.length : 0) + ' messages</div>';
+          html += '</div>';
+        });
+        resultsDiv.innerHTML = html;
+      })
+      .catch(function(err) {
+        resultsDiv.innerHTML = '<div class="error">Error: ' + err.message + '</div>';
+      });
   }
-}
 
-async function loadExportUI() {
-  try {
-    const res = await fetch('/api/analytics/dashboard');
-    const data = await res.json();
-    const grid = document.getElementById('export-grid');
+  // Load export list
+  function loadExportList() {
+    var listDiv = document.getElementById('export-list');
+    listDiv.innerHTML = '<div class="loading">Loading conversations...</div>';
     
-    if (!data.dashboard.recent_conversations || data.dashboard.recent_conversations.length === 0) {
-      grid.innerHTML = '<div class="loading">No conversations to export</div>';
-      return;
-    }
-    
-    grid.innerHTML = data.dashboard.recent_conversations.map(c => `
-      <div class="export-btn" onclick="exportOne('${c.id}')">
-        ${(c.title || 'Untitled').substring(0, 20)}
-      </div>
-    `).join('');
-  } catch (e) {
-    document.getElementById('export-grid').innerHTML = '<div class="error">Failed to load conversations</div>';
+    fetch('/api/analytics/dashboard')
+      .then(r => r.json())
+      .then(data => {
+        var convs = data.dashboard.recent_conversations || [];
+        if (convs.length === 0) {
+          listDiv.innerHTML = '<div class="loading">No conversations</div>';
+          return;
+        }
+        
+        var html = '';
+        convs.forEach(function(conv) {
+          html += '<div class="export-item" onclick="exportConv(\'' + conv.id + '\')">';
+          html += (conv.title || 'Untitled').substring(0, 20);
+          html += '</div>';
+        });
+        listDiv.innerHTML = html;
+      })
+      .catch(function(err) {
+        listDiv.innerHTML = '<div class="error">Error: ' + err.message + '</div>';
+      });
   }
-}
 
-function exportOne(convId) {
-  const format = document.getElementById('export-format').value;
-  const url = '/api/conversations/' + encodeURIComponent(convId) + '/export?format=' + format;
-  window.location.href = url;
-}
-
-async function loadUsageTrends() {
-  try {
-    const res = await fetch('/api/analytics/trend?days=30');
-    const data = await res.json();
-    const tbody = document.getElementById('trend-tbody');
-    
-    if (!data.trend || data.trend.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="4" class="loading">No trend data available yet</td></tr>';
-      return;
-    }
-    
-    tbody.innerHTML = data.trend.map(t => `
-      <tr>
-        <td>${t.date}</td>
-        <td>${t.requests}</td>
-        <td>${t.tokens}</td>
-        <td>${t.unique_users}</td>
-      </tr>
-    `).join('');
-  } catch (e) {
-    document.getElementById('trend-tbody').innerHTML = '<tr><td colspan="4" class="error">Failed to load trends: ' + e.message + '</td></tr>';
+  // Export a conversation
+  function exportConv(convId) {
+    var format = document.getElementById('export-format').value;
+    var url = '/api/conversations/' + encodeURIComponent(convId) + '/export?format=' + format;
+    window.location.href = url;
   }
-}
 
-// Load dashboard on startup
-loadDashboard();
+  // Load trends
+  function loadTrends() {
+    var tbody = document.getElementById('trends-table');
+    tbody.innerHTML = '<tr><td colspan="4" class="loading">Loading trends...</td></tr>';
+    
+    fetch('/api/analytics/trend?days=30')
+      .then(r => r.json())
+      .then(data => {
+        if (!data.trend || data.trend.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="4" class="loading">No trend data</td></tr>';
+          return;
+        }
+        
+        var html = '';
+        data.trend.forEach(function(row) {
+          html += '<tr>';
+          html += '<td>' + row.date + '</td>';
+          html += '<td>' + row.requests + '</td>';
+          html += '<td>' + row.tokens + '</td>';
+          html += '<td>' + row.unique_users + '</td>';
+          html += '</tr>';
+        });
+        tbody.innerHTML = html;
+      })
+      .catch(function(err) {
+        tbody.innerHTML = '<tr><td colspan="4" class="error">Error: ' + err.message + '</td></tr>';
+      });
+  }
+
+  // Allow Enter in search
+  document.addEventListener('DOMContentLoaded', function() {
+    var searchInput = document.getElementById('search-query');
+    if (searchInput) {
+      searchInput.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') {
+          performSearch();
+        }
+      });
+    }
+  });
+
+  // Load on startup
+  loadDashboard();
 </script>
-</body></html>"""
+
+</body>
+</html>"""
     return Response(html, mimetype="text/html; charset=utf-8")
+
+
 
 
 
