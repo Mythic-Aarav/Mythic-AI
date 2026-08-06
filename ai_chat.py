@@ -8427,9 +8427,17 @@ def api_generate_title(conv_id):
         return jsonify({"error": "no text content to summarize"}), 400
 
     title_prompt = [{"role": "user", "parts": [{"text":
-        "Write a short chat title (max 6 words, no quotes, no trailing "
-        "punctuation, plain text only) that summarizes this conversation:\n\n"
-        f"{excerpt}"
+        "Below is a snippet of a chat conversation. Write ONE short, specific "
+        "title (1-3 words) describing what the conversation is actually "
+        "ABOUT — not a description of your task, not the words 'chat', "
+        "'title', or 'conversation' themselves. No quotes, no punctuation "
+        "at the end, plain text only. Prefer a simple category-style label "
+        "when that fits.\n\n"
+        "Examples:\n"
+        "- If the user says 'hi' and gets a greeting back → 'Greeting'\n"
+        "- If they ask about Python loops → 'Python Loops'\n"
+        "- If they discuss weekend plans → 'Weekend Plans'\n\n"
+        f"Conversation:\n{excerpt}\n\nTitle:"
     }]}]
     data = request.get_json(silent=True) or {}
     user_groq_key = (data.get("groq_api_key") or "").strip()
@@ -8448,6 +8456,23 @@ def api_generate_title(conv_id):
     # commentary despite instructions — truncate rather than reject outright,
     # so a slightly-verbose reply still produces a usable title.
     raw_title = raw_title.split("\n")[0].strip()
+    raw_title = re.sub(r'^Title:\s*', '', raw_title, flags=re.IGNORECASE).strip()
+
+    # Safety filter: reject titles that describe the TASK instead of the
+    # conversation's actual content (the model sometimes echoes back
+    # phrases like "Generating Chat Titles" or "Chat Title" for very short/
+    # generic exchanges like a bare "hi"). Fall back to a sensible default
+    # derived from the first user message instead of saving junk.
+    _meta_phrases = ("generating chat title", "chat title", "conversation title",
+                      "title generation", "generate title", "untitled")
+    if not raw_title or any(p in raw_title.lower() for p in _meta_phrases):
+        first_user_text = ""
+        for m in messages:
+            if m.get("role") == "user":
+                first_user_text = "".join(p.get("text", "") for p in m.get("parts", []) if "text" in p)
+                break
+        raw_title = (first_user_text[:40].strip() or "New chat")
+
     if not raw_title:
         return jsonify({"status": "unchanged", "title": conv.get("title", "New chat")})
 
@@ -8685,9 +8710,12 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
         return "New chat"
 
     prompt = (
-        "Generate a short, natural chat title (3-6 words, no quotes, no punctuation "
-        "at the end, no emoji, title case) that summarizes what this conversation is "
-        "about. Reply with ONLY the title text, nothing else.\n\n"
+        "Generate a short, natural chat title (1-4 words, no quotes, no punctuation "
+        "at the end, no emoji, title case) that summarizes what this SPECIFIC "
+        "conversation is about. Do NOT describe the task of generating a title — "
+        "write about the actual topic discussed. Prefer a simple category-style "
+        "label when that fits — for a simple greeting like 'hi'/'hello', use "
+        "'Greeting'. Reply with ONLY the title text, nothing else.\n\n"
         f"User: {user_msg[:400]}\n"
         f"Assistant: {ai_reply[:400]}"
     )
@@ -8702,10 +8730,13 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
         title = title.split("\n")[0].strip()
         title = re.sub(r'^\[.*?\]\s*', '', title).strip()  # strip any leaked [Instructions: ...] / bracketed prefix
         title = re.sub(r'[.!?]+$', '', title).strip()
+        _meta_phrases = ("generating chat title", "chat title", "conversation title",
+                          "title generation", "generate title", "untitled")
         looks_bad = (
             len(title) < 3 or
             any(ch in title for ch in '[]"“”') or
-            title.lower().startswith(('based on', 'here is', 'here\'s', 'sure,', 'title:'))
+            title.lower().startswith(('based on', 'here is', 'here\'s', 'sure,', 'title:')) or
+            any(p in title.lower() for p in _meta_phrases)
         )
         if title and not looks_bad:
             return title[:60]
