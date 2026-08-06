@@ -818,83 +818,6 @@ def get_or_create_owner_id(preferred_id=None):
             print(f"[owner] could not persist owner id to disk: {e}")
         return oid
 
-
-# --- Per-account unique links (one distinct URL per visitor's own account) --
-# The /invite/<code> link above intentionally sends EVERY visitor into one
-# shared "owner" account/history — useful if you want a single conversation
-# thread anyone can add to. This is the opposite: each browser/account gets
-# its OWN permanent, unique URL (…/a/<token>) that always logs back into
-# THAT SPECIFIC account's private chats — nobody else's. Bookmarking or
-# sharing that link only ever opens the same one account, not a fresh one.
-_ACCOUNT_TOKENS_FILE = _os.path.join(_DATA_DIR, "account_tokens.json")
-_account_tokens_lock = threading.Lock()
-
-
-def _load_account_tokens():
-    if _os.path.exists(_ACCOUNT_TOKENS_FILE):
-        try:
-            with open(_ACCOUNT_TOKENS_FILE, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def _save_account_tokens(data):
-    try:
-        with open(_ACCOUNT_TOKENS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-    except Exception as e:
-        print(f"[account-token] could not persist tokens to disk: {e}")
-
-
-def get_or_create_account_token(user_id):
-    """Returns this account's permanent unique token, creating one on first
-    call. Same token forever for the same user_id — the URL never changes
-    on redeploy/restart, since it's persisted to disk/Supabase like the
-    invite code and owner id above."""
-    if SUPABASE_URL:
-        try:
-            r = requests.get(sb(f"account_tokens?user_id=eq.{user_id}&select=token"),
-                              headers=sb_headers(), timeout=10)
-            if r.status_code == 200 and r.json():
-                return r.json()[0]["token"]
-        except Exception as e:
-            print(f"[account-token] Supabase read failed: {e} — falling back to local file.")
-
-    with _account_tokens_lock:
-        tokens = _load_account_tokens()
-        # tokens maps token -> user_id; do a reverse lookup for existing token
-        for tok, uid in tokens.items():
-            if uid == user_id:
-                return tok
-        new_token = uuid.uuid4().hex[:16]
-        tokens[new_token] = user_id
-        _save_account_tokens(tokens)
-
-    if SUPABASE_URL:
-        try:
-            requests.post(sb("account_tokens"), headers=sb_headers(),
-                          json={"token": new_token, "user_id": user_id}, timeout=10)
-        except Exception as e:
-            print(f"[account-token] Supabase write failed: {e} — token still works via local file.")
-
-    return new_token
-
-
-def resolve_account_token(token):
-    """Returns the user_id this token belongs to, or None if unknown."""
-    if SUPABASE_URL:
-        try:
-            r = requests.get(sb(f"account_tokens?token=eq.{token}&select=user_id"),
-                              headers=sb_headers(), timeout=10)
-            if r.status_code == 200 and r.json():
-                return r.json()[0]["user_id"]
-        except Exception as e:
-            print(f"[account-token] Supabase resolve failed: {e} — falling back to local file.")
-    tokens = _load_account_tokens()
-    return tokens.get(token)
-
 # --- Public API keys ("aarav-...") --------------------------------------------
 # Lets other apps/people call YOUR Mythic AI like a hosted API (OpenAI-style),
 # authenticated with a personal key instead of the free chat UI. Keys are
@@ -2868,8 +2791,8 @@ PAGE = r"""<!DOCTYPE html>
 
 <div id="share-modal-overlay">
   <div id="share-modal">
-    <h3>🔗 Your account link</h3>
-    <p class="sub">A permanent, unique link for THIS account — nobody else's. Bookmark it to always get back to these exact chats from any device, or share it with someone you want to give access to this specific account.</p>
+    <h3>🔗 Invite link</h3>
+    <p class="sub">One permanent link for the whole app — not tied to any single chat. Share it with anyone; each person who opens it gets their own private conversation with Mythic AI, no login required.</p>
     <div id="share-link-row">
       <input type="text" id="share-link-input" readonly>
       <button id="share-open-btn" type="button" title="Open in a new tab">↗</button>
@@ -3346,10 +3269,6 @@ window.addEventListener('orientationchange', () => setTimeout(_setAppHeight, 100
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', _setAppHeight);
 }
-
-// ─── Declare all key global variables at the top to avoid TDZ errors ─────
-const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-const modeTabs = document.querySelectorAll('.mode-tab[data-mode]');
 
 const messagesWrap = document.getElementById('messages-wrap');
 const messagesEl   = document.getElementById('messages');
@@ -3918,19 +3837,11 @@ function startNewChat(opts) {
   activeConvId = null;
   messagesEl.innerHTML = '';
   showEmptyState();
+  loadConversationList();
   refreshShareBtnState();
   if (!opts || opts.updateUrl !== false) {
     try { history.pushState({}, '', location.pathname); } catch {}
   }
-  // Create the conversation on the server right away so it shows up in the
-  // sidebar immediately, instead of only appearing after the first message.
-  fetch('/api/conversations', { method: 'POST' })
-    .then(r => r.json())
-    .then(d => {
-      if (d.id) activeConvId = d.id;
-      loadConversationList();
-    })
-    .catch(() => { loadConversationList(); }); // still refresh list even if this failed
 }
 
 // Keep the address bar in sync with Back/Forward navigation between chats.
@@ -4240,7 +4151,7 @@ function closeShareModal() { shareModalOverlay.classList.remove('show'); }
 function openInviteModal() {
   shareLinkInput.value = '';
   shareLinkInput.title = '';
-  shareStatusEl.textContent = 'Loading your account link…';
+  shareStatusEl.textContent = 'Loading your invite link…';
   shareModalOverlay.classList.add('show');
   shareBtn.classList.add('active');
   if (shareRevokeBtn) shareRevokeBtn.style.display = 'none';  // nothing to revoke — it's a static link
@@ -4248,13 +4159,13 @@ function openInviteModal() {
     const link = d.invite_url || (location.origin + '/');
     shareLinkInput.value = link;
     shareLinkInput.title = link;
-    shareStatusEl.textContent = 'This link is unique to THIS account — opening it always ' +
-      'comes back to these exact chats, on any device. It does not open a fresh/different account.';
+    shareStatusEl.textContent = 'Anyone who opens this link can chat with Mythic AI right away — ' +
+      'no login needed. Each person gets their own private conversation history; nobody sees yours.';
     requestAnimationFrame(() => { shareLinkInput.focus(); shareLinkInput.select(); });
     renderInviteQrCode(link);
   }).catch(() => {
     shareLinkInput.value = location.origin + '/';
-    shareStatusEl.textContent = 'Could not generate your account link, showing the site link instead.';
+    shareStatusEl.textContent = 'Could not generate a custom link, showing the site link instead.';
     renderInviteQrCode(location.origin + '/');
   });
 }
@@ -4625,36 +4536,8 @@ if (apiUsageCreateConfirmBtn) apiUsageCreateConfirmBtn.addEventListener('click',
     const data = await res.json();
     if (data.api_key) {
       apiUsageNewKeyResultEl.innerHTML =
-        '<div style="background:#0f1115;border:1px solid #1a9e5c;border-radius:8px;padding:12px;margin-bottom:14px;">' +
-          '<div style="display:flex;gap:8px;align-items:center;">' +
-            '<input type="text" id="api-usage-new-key-input" readonly value="' + data.api_key.replace(/"/g, '&quot;') + '" ' +
-              'style="flex:1;background:#0f1115;border:1px solid #1a9e5c;border-radius:6px;padding:8px;font-family:monospace;font-size:12px;color:#7be3ab;box-sizing:border-box;min-width:0;">' +
-            '<button type="button" id="api-usage-new-key-copy-btn" ' +
-              'style="background:#1a9e5c;color:#04140b;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;white-space:nowrap;">Copy</button>' +
-          '</div>' +
-        '</div>' +
-        '<div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again. (Double-clicking to select may only grab part of the key due to the hyphens — use the Copy button instead.)</div>';
-      const newKeyCopyBtn = document.getElementById('api-usage-new-key-copy-btn');
-      if (newKeyCopyBtn) {
-        newKeyCopyBtn.addEventListener('click', async () => {
-          const keyInput = document.getElementById('api-usage-new-key-input');
-          if (!keyInput) return;
-          try {
-            keyInput.select();
-            document.execCommand('copy');
-            newKeyCopyBtn.textContent = '✓ Copied!';
-            setTimeout(() => { newKeyCopyBtn.textContent = 'Copy'; }, 2500);
-          } catch (e) {
-            try {
-              await navigator.clipboard.writeText(keyInput.value);
-              newKeyCopyBtn.textContent = '✓ Copied!';
-              setTimeout(() => { newKeyCopyBtn.textContent = 'Copy'; }, 2500);
-            } catch (e2) {
-              alert('Copy failed. Try selecting the whole box manually (click once, then Ctrl+A, Ctrl+C).');
-            }
-          }
-        });
-      }
+        '<div style="background:#0f1115;border:1px solid #1a9e5c;border-radius:8px;padding:12px;margin-bottom:14px;font-family:monospace;font-size:13px;word-break:break-all;color:#7be3ab;">' + data.api_key + '</div>' +
+        '<div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again.</div>';
       refreshApiUsageOverlay();
       loadApiUsageSummary();
     } else if (data.error) {
@@ -4712,6 +4595,7 @@ if (apiKeyCreateBtn) {
     }
   }
 }
+}
 
 const apiKeyCopyBtn = document.getElementById('api-key-copy-btn');
 if (apiKeyCopyBtn) {
@@ -4765,9 +4649,6 @@ const apiKeysShortcutBtn = document.getElementById('api-keys-shortcut-btn');
 if (apiKeysShortcutBtn) apiKeysShortcutBtn.addEventListener('click', () => {
   openApiUsageOverlay();
 });
-
-// ─── Analytics removed - use Stats button in chat instead ─────────────────
-
 settingsCloseBtn.addEventListener('click', () => { saveSettings(); settingsModalOverlay.style.display = 'none'; });
 settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsModalOverlay) { saveSettings(); settingsModalOverlay.style.display = 'none'; } });
 
@@ -5327,7 +5208,9 @@ async function _doSubscribe(reg) {
   } catch (err) { console.warn('[Push] subscribe error:', err); }
 }
 
-// Detect if running on iPhone/iOS — moved to top-level scope
+// Detect if running on iPhone/iOS
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
 if ('serviceWorker' in navigator && !isIOS) {
   // Service workers are unreliable on iOS, skip on iPhone
   navigator.serviceWorker.register('/sw.js', { scope: '/' })
@@ -6223,7 +6106,7 @@ function requirePassword(action) {
 // selected. If VIP isn't unlocked yet, switching to it goes through the
 // existing VIP password modal exactly once (via showVipModal / vipUnlocked) —
 // after that, no repeated password prompts, just the model requirement.
-// modeTabs now declared at top-level scope
+const modeTabs = document.querySelectorAll('.mode-tab[data-mode]');
 function setActiveModeTab(mode) {
   currentMode = mode;
   modeTabs.forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
@@ -6616,15 +6499,15 @@ async function runCoworkTask(task) {
   }
 }
 
-// ─── Starred view toggle (no VIP required) ───────────────────────────────────
+// ─── Starred view toggle ─────────────────────────────────────────────────────
 const archivedToggleBtn = document.getElementById('archived-toggle-btn');
-if (archivedToggleBtn) archivedToggleBtn.addEventListener('click', () => {
+if (archivedToggleBtn) archivedToggleBtn.addEventListener('click', () => requirePassword(() => {
   showingStarredOnly = !showingStarredOnly;
   archivedToggleBtn.textContent = showingStarredOnly ? '💬 All Chats' : '⭐ Starred';
   archivedToggleBtn.style.color = showingStarredOnly ? 'var(--accent)' : '';
   archivedToggleBtn.style.borderColor = showingStarredOnly ? 'var(--accent)' : 'var(--border)';
   loadConversationList();
-});
+}));
 
 // ─── Message bookmarks (stored per-conversation in localStorage) ──────────────
 function getBookmarks() {
@@ -6674,7 +6557,7 @@ function showBookmarksModal() {
   overlay.querySelector('#bm-close').addEventListener('click', () => overlay.remove());
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 }
-if (bookmarksBtn) bookmarksBtn.addEventListener('click', showBookmarksModal);
+if (bookmarksBtn) bookmarksBtn.addEventListener('click', () => requirePassword(showBookmarksModal));
 
 // ─── Chat statistics ────────────────────────────────────────────────────────
 const statsBtn = document.getElementById('stats-btn');
@@ -6714,7 +6597,7 @@ async function showStatsModal() {
   overlay.querySelector('#stats-close').addEventListener('click', () => overlay.remove());
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 }
-if (statsBtn) statsBtn.addEventListener('click', showStatsModal);
+if (statsBtn) statsBtn.addEventListener('click', () => requirePassword(showStatsModal));
 
 // ─── Bookmark button on AI/user messages ───────────────────────────────────
 let _msgIndexCounter = 0;
@@ -7234,35 +7117,23 @@ def index():
 @app.route("/api/invite-link", methods=["GET"])
 @login_required
 def api_invite_link():
-    # Each account gets its OWN unique, permanent link (…/a/<token>) that
-    # always logs back into THIS SPECIFIC account's private chats — not a
-    # single link shared by everyone. Same token every time for the same
-    # account (persisted — see get_or_create_account_token), so it never
-    # changes across reloads/redeploys.
-    token = get_or_create_account_token(current_username())
-    return jsonify({"invite_url": request.host_url.rstrip("/") + "/a/" + token})
-
-
-@app.route("/a/<token>")
-def account_link_landing(token):
-    # Opens the ONE specific account this token belongs to — created the
-    # first time that account visited /api/invite-link. Unknown/invalid
-    # tokens just fall through to a normal fresh anonymous session rather
-    # than erroring, so a broken/copied-wrong link still lands somewhere
-    # usable instead of a dead page.
-    user_id = resolve_account_token(token)
-    if user_id:
-        session["user_id"] = user_id
-        session.permanent = True
-    return Response(PAGE, mimetype="text/html; charset=utf-8")
+    code = get_or_create_invite_code()
+    # Adopt the caller's own existing user_id as the "owner" account the
+    # first time this is ever called, so it's YOUR real chat history that
+    # gets shared via the link — not a fresh empty account.
+    get_or_create_owner_id(preferred_id=current_username())
+    return jsonify({"invite_url": request.host_url.rstrip("/") + "/invite/" + code})
 
 
 @app.route("/invite/<code>")
 def invite_landing(code):
-    # Legacy shared-account link (everyone who opens it lands in the SAME
-    # owner account) — kept working for any old links already handed out,
-    # but no longer surfaced anywhere in the UI. The 🔗 button now issues
-    # the per-account /a/<token> links above instead.
+    # Anyone opening this link gets logged into the OWNER's account, so they
+    # see and can add to the same chat history — this is an intentional
+    # shared-account link, not a per-visitor anonymous session like the bare
+    # domain gives. The code itself isn't checked against anything (there's
+    # no per-invite access control here) — treat this link as equivalent to
+    # sharing your password, and only send it to people you trust with full
+    # access to your chats.
     session["user_id"] = get_or_create_owner_id()
     session.permanent = True
     return Response(PAGE, mimetype="text/html; charset=utf-8")
@@ -7315,6 +7186,18 @@ def claim_owner(secret):
 @login_required
 def api_keys_list():
     return jsonify({"keys": list_api_keys(current_username())})
+
+@app.route("/api/keys", methods=["POST"])
+@login_required
+def api_keys_create():
+    data = request.get_json(silent=True) or {}
+    label = (data.get("label") or "").strip()
+    try:
+        raw_key, record = create_api_key(label=label, username=current_username())
+        return jsonify({"api_key": raw_key})
+    except Exception as e:
+        print(f"[api_keys] create failed: {e}")
+        return jsonify({"error": "Could not create key. Check server logs for details."}), 500
 
 def _fmt_dt(iso_str):
     if not iso_str:
@@ -7459,7 +7342,7 @@ async function loadKeys() {
       <td class="calls-cell">${k.request_count || 0}</td>
       <td><span class="state-pill ${k.active ? 'state-active' : 'state-revoked'}">${k.active ? 'ACTIVE' : 'REVOKED'}</span></td>
       <td><div class="options-cell">
-        <button class="rename-btn" onclick="renameKey('${k.id}', ${JSON.stringify(k.label || '')})">✎ Rename</button>
+        <button class="rename-btn" onclick="renameKey('${k.id}', '${(k.label || '').replace(/'/g, "&apos;").replace(/"/g, "&quot;")}')">✎ Rename</button>
         ${k.active ? `<button class="revoke-btn" onclick="revokeKey('${k.id}')">Revoke</button>` : ''}
       </div></td>
     </tr>`).join('');
@@ -7516,34 +7399,7 @@ async function doCreateKey() {
     const data = await res.json();
     if (data.api_key) {
       document.getElementById('new-key-result').innerHTML =
-        '<div class="new-key-box" style="display:flex;gap:8px;align-items:center;">' +
-          '<input type="text" id="standalone-new-key-input" readonly value="' + data.api_key.replace(/"/g, '&quot;') + '" ' +
-            'style="flex:1;background:transparent;border:none;color:#7be3ab;font-family:monospace;font-size:13px;min-width:0;">' +
-          '<button type="button" id="standalone-new-key-copy-btn" ' +
-            'style="background:#1a9e5c;color:#04140b;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;white-space:nowrap;">Copy</button>' +
-        '</div>' +
-        '<div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again. (Use the Copy button — double-clicking to select may only grab part of the key due to the hyphens.)</div>';
-      const stCopyBtn = document.getElementById('standalone-new-key-copy-btn');
-      if (stCopyBtn) {
-        stCopyBtn.addEventListener('click', async () => {
-          const keyInput = document.getElementById('standalone-new-key-input');
-          if (!keyInput) return;
-          try {
-            keyInput.select();
-            document.execCommand('copy');
-            stCopyBtn.textContent = '✓ Copied!';
-            setTimeout(() => { stCopyBtn.textContent = 'Copy'; }, 2500);
-          } catch (e) {
-            try {
-              await navigator.clipboard.writeText(keyInput.value);
-              stCopyBtn.textContent = '✓ Copied!';
-              setTimeout(() => { stCopyBtn.textContent = 'Copy'; }, 2500);
-            } catch (e2) {
-              alert('Copy failed. Click once inside the box, then Ctrl+A, Ctrl+C.');
-            }
-          }
-        });
-      }
+        '<div class="new-key-box">' + data.api_key + '</div><div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again.</div>';
       loadKeys();
     } else if (data.error) {
       alert(data.error);
@@ -7566,433 +7422,214 @@ loadKeys();
 def analytics_dashboard():
     """Comprehensive analytics dashboard for viewing usage stats, trends, and exporting conversations."""
     html = """<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Analytics Dashboard · Mythic AI</title>
-  <style>
-    * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; }
-    body { 
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #0f1115;
-      color: #f2f2f2;
-      padding: 32px 20px;
-    }
-    .wrap { max-width: 1200px; margin: 0 auto; }
-    h1 { font-size: 28px; margin: 0 0 8px; font-weight: 700; }
-    .subtitle { color: #9a9ea6; font-size: 14px; margin-bottom: 30px; }
-    
-    .metrics {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 16px;
-      margin-bottom: 40px;
-    }
-    .metric {
-      background: #1a1d24;
-      border: 1px solid #2a2e37;
-      border-radius: 12px;
-      padding: 20px;
-    }
-    .metric-value { font-size: 32px; font-weight: 800; margin-bottom: 6px; }
-    .metric-label { font-size: 11px; color: #9a9ea6; text-transform: uppercase; }
-    
-    .tabs {
-      display: flex;
-      gap: 0;
-      border-bottom: 1px solid #2a2e37;
-      margin-bottom: 20px;
-    }
-    .tab-button {
-      padding: 12px 18px;
-      background: none;
-      border: none;
-      color: #9a9ea6;
-      font-weight: 600;
-      font-size: 14px;
-      cursor: pointer;
-      border-bottom: 2px solid transparent;
-      transition: all 0.2s;
-    }
-    .tab-button:hover { color: #fff; }
-    .tab-button.active { color: #fff; border-bottom-color: #e8532a; }
-    
-    .tab-content { display: none; }
-    .tab-content.active { display: block; }
-    
-    .card {
-      background: #1a1d24;
-      border: 1px solid #2a2e37;
-      border-radius: 12px;
-      padding: 24px;
-      margin-bottom: 16px;
-    }
-    
-    .search-row {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      margin-bottom: 20px;
-    }
-    .search-row input,
-    .search-row select {
-      padding: 10px 14px;
-      border: 1px solid #3a3e47;
-      background: #0f1115;
-      color: #fff;
-      border-radius: 8px;
-      font-size: 13px;
-      font-family: inherit;
-    }
-    .search-row button {
-      padding: 10px 24px;
-      background: #e8532a;
-      color: #fff;
-      border: none;
-      border-radius: 8px;
-      cursor: pointer;
-      font-weight: 700;
-      font-size: 13px;
-      transition: all 0.2s;
-    }
-    .search-row button:hover { background: #d1471f; }
-    
-    .results {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      max-height: 500px;
-      overflow-y: auto;
-    }
-    .result {
-      background: #0f1115;
-      border: 1px solid #2a2e37;
-      border-radius: 8px;
-      padding: 12px 14px;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .result:hover { border-color: #e8532a; background: #1a1d24; }
-    .result-title { font-weight: 700; margin-bottom: 4px; }
-    .result-meta { font-size: 12px; color: #9a9ea6; }
-    
-    .export-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-      gap: 12px;
-    }
-    .export-item {
-      background: #1a1d24;
-      border: 1px solid #2a2e37;
-      border-radius: 8px;
-      padding: 12px;
-      text-align: center;
-      cursor: pointer;
-      font-weight: 700;
-      font-size: 13px;
-      transition: all 0.2s;
-    }
-    .export-item:hover { border-color: #e8532a; color: #e8532a; }
-    
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-    }
-    thead { background: #0f1115; }
-    th {
-      text-align: left;
-      padding: 12px;
-      font-size: 11px;
-      color: #9a9ea6;
-      text-transform: uppercase;
-      font-weight: 600;
-      border-bottom: 1px solid #2a2e37;
-    }
-    td { padding: 12px; border-bottom: 1px solid #2a2e37; }
-    tr:hover { background: #1a1d24; }
-    
-    .loading { text-align: center; color: #9a9ea6; padding: 40px 20px; }
-    .error { color: #ef4444; padding: 12px; background: #2a1515; border-radius: 8px; }
-    
-    .format-select {
-      padding: 10px 14px;
-      border: 1px solid #3a3e47;
-      background: #0f1115;
-      color: #fff;
-      border-radius: 8px;
-      font-size: 13px;
-      font-family: inherit;
-      width: 200px;
-      margin-bottom: 20px;
-    }
-  </style>
-</head>
-<body>
-
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analytics Dashboard · Mythic AI</title>
+<style>
+  * { box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#0f1115;
+         color:#f2f2f2; margin:0; padding:32px 24px 60px; }
+  .wrap { max-width:1400px; margin:0 auto; }
+  h1 { font-size:28px; margin:0 0 8px; font-weight:700; }
+  .subtitle { color:#9a9ea6; font-size:15px; margin-bottom:30px; }
+  .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-bottom:40px; }
+  .metric { background:#1a1d24; border:1px solid #2a2e37; border-radius:12px; padding:20px; }
+  .metric-value { font-size:32px; font-weight:800; line-height:1.1; margin-bottom:8px; }
+  .metric-label { font-size:12px; color:#9a9ea6; text-transform:uppercase; letter-spacing:.3px; }
+  .section { margin-bottom:40px; }
+  .section-title { font-size:18px; font-weight:700; margin-bottom:16px; }
+  .card { background:#1a1d24; border:1px solid #2a2e37; border-radius:12px; padding:24px; margin-bottom:16px; }
+  .search-box { display:flex; gap:10px; margin-bottom:20px; flex-wrap:wrap; }
+  .search-box input, .search-box select { padding:10px 14px; border:1px solid #3a3e47; background:#0f1115;
+                                           color:#fff; border-radius:8px; font-size:14px; min-width:200px; }
+  .search-box button { padding:10px 20px; background:#e8532a; color:#fff; border:none; border-radius:8px;
+                       cursor:pointer; font-weight:700; font-size:13px; }
+  .search-box button:hover { background:#d1471f; }
+  .results-list { display:flex; flex-direction:column; gap:12px; }
+  .result-item { background:#0f1115; border:1px solid #2a2e37; border-radius:8px; padding:14px 16px;
+                 cursor:pointer; transition:all .2s; }
+  .result-item:hover { border-color:#e8532a; background:#1a1d24; }
+  .result-title { font-weight:700; margin-bottom:4px; }
+  .result-meta { font-size:12px; color:#9a9ea6; }
+  .export-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  .export-btn { padding:12px; background:#1a1d24; border:1px solid #2a2e37; border-radius:8px;
+                text-align:center; cursor:pointer; font-weight:700; font-size:13px; transition:all .2s; }
+  .export-btn:hover { border-color:#e8532a; color:#e8532a; }
+  table { width:100%; border-collapse:collapse; }
+  thead { background:#0f1115; }
+  th { text-align:left; padding:12px; font-size:12px; color:#9a9ea6; text-transform:uppercase;
+       letter-spacing:.3px; border-bottom:1px solid #2a2e37; font-weight:600; }
+  td { padding:12px; border-bottom:1px solid #2a2e37; font-size:14px; }
+  tr:hover { background:#1a1d24; }
+  .chart { height:300px; background:#0f1115; border-radius:8px; padding:16px; margin:20px 0; }
+  .loading { color:#9a9ea6; text-align:center; padding:40px; }
+  .error { color:#c0392b; padding:16px; background:#2a1515; border-radius:8px; margin-bottom:20px; }
+  .success { color:#1a9e5c; padding:16px; background:#152a1a; border-radius:8px; margin-bottom:20px; }
+  .tabs { display:flex; gap:0; border-bottom:1px solid #2a2e37; margin-bottom:20px; }
+  .tab { padding:12px 16px; cursor:pointer; border-bottom:2px solid transparent; color:#9a9ea6; font-weight:600; }
+  .tab.active { color:#fff; border-bottom-color:#e8532a; }
+</style>
+</head><body>
 <div class="wrap">
   <h1>📊 Analytics Dashboard</h1>
   <p class="subtitle">View usage statistics, search conversations, and export your data</p>
 
-  <div class="metrics">
-    <div class="metric">
-      <div class="metric-value" id="metric-chats">-</div>
-      <div class="metric-label">Total Chats</div>
-    </div>
-    <div class="metric">
-      <div class="metric-value" id="metric-messages">-</div>
-      <div class="metric-label">Total Messages</div>
-    </div>
-    <div class="metric">
-      <div class="metric-value" id="metric-folders">-</div>
-      <div class="metric-label">Folders</div>
-    </div>
-    <div class="metric">
-      <div class="metric-value" id="metric-week">-</div>
-      <div class="metric-label">This Week</div>
-    </div>
+  <div class="metrics" id="metrics-container">
+    <div class="metric"><div class="metric-value" id="total-chats">-</div><div class="metric-label">Total Chats</div></div>
+    <div class="metric"><div class="metric-value" id="total-messages">-</div><div class="metric-label">Total Messages</div></div>
+    <div class="metric"><div class="metric-value" id="total-folders">-</div><div class="metric-label">Folders</div></div>
+    <div class="metric"><div class="metric-value" id="this-week">-</div><div class="metric-label">This Week</div></div>
   </div>
 
   <div class="tabs">
-    <button class="tab-button active" onclick="showTab('search')">🔎 Search</button>
-    <button class="tab-button" onclick="showTab('export')">📥 Export</button>
-    <button class="tab-button" onclick="showTab('trends')">📈 Trends</button>
+    <div class="tab active" onclick="switchTab('search')">🔎 Search & Filter</div>
+    <div class="tab" onclick="switchTab('export')">📥 Export</div>
+    <div class="tab" onclick="switchTab('usage')">📈 Usage Trends</div>
   </div>
 
-  <!-- SEARCH TAB -->
-  <div id="search" class="tab-content active">
+  <div id="search-tab" class="section">
     <div class="card">
-      <h2 style="margin-top: 0;">Search Conversations</h2>
-      <div class="search-row">
-        <input type="text" id="search-query" placeholder="Search..." />
-        <input type="date" id="search-start" />
-        <input type="date" id="search-end" />
-        <select id="search-folder">
+      <div class="section-title">Search Conversations</div>
+      <div class="search-box">
+        <input type="text" id="search-query" placeholder="Search by title or content..." />
+        <input type="date" id="filter-start" />
+        <input type="date" id="filter-end" />
+        <select id="filter-folder">
           <option value="">All Folders</option>
         </select>
-        <button onclick="performSearch()">Search</button>
+        <button onclick="searchConversations()">Search</button>
       </div>
-      <div id="search-results" class="results"></div>
+      <div id="search-results" class="results-list"></div>
     </div>
   </div>
 
-  <!-- EXPORT TAB -->
-  <div id="export" class="tab-content">
+  <div id="export-tab" class="section" style="display:none;">
     <div class="card">
-      <h2 style="margin-top: 0;">Export Conversations</h2>
-      <label style="display: block; margin-bottom: 8px; font-weight: 700;">Format:</label>
-      <select id="export-format" class="format-select">
-        <option value="json">JSON</option>
-        <option value="html">HTML</option>
-        <option value="csv">CSV</option>
-      </select>
-      <div id="export-list" class="export-grid"></div>
+      <div class="section-title">Export Conversations</div>
+      <p style="color:#9a9ea6;margin-bottom:20px;">Select format and export your conversations</p>
+      <div style="margin-bottom:20px;">
+        <label style="display:block;margin-bottom:8px;font-weight:700;">Export Format:</label>
+        <select id="export-format" style="width:200px;">
+          <option value="json">JSON (Machine-readable)</option>
+          <option value="html">HTML (Readable web page)</option>
+          <option value="csv">CSV (Spreadsheet)</option>
+        </select>
+      </div>
+      <div class="export-grid" id="export-grid"></div>
     </div>
   </div>
 
-  <!-- TRENDS TAB -->
-  <div id="trends" class="tab-content">
+  <div id="usage-tab" class="section" style="display:none;">
     <div class="card">
-      <h2 style="margin-top: 0;">Usage Trends (Last 30 Days)</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Requests</th>
-            <th>Tokens</th>
-            <th>Users</th>
-          </tr>
-        </thead>
-        <tbody id="trends-table"></tbody>
+      <div class="section-title">Usage Trends (Last 30 Days)</div>
+      <div class="chart" id="trend-chart">
+        <div class="loading">Loading trend data...</div>
+      </div>
+      <table id="trend-table">
+        <thead><tr><th>Date</th><th>Requests</th><th>Tokens</th><th>Active Users</th></tr></thead>
+        <tbody id="trend-tbody"></tbody>
       </table>
     </div>
   </div>
-
 </div>
 
 <script>
-  // Show/hide tabs
-  function showTab(tabName) {
-    // Hide all tabs
-    var tabs = document.querySelectorAll('.tab-content');
-    tabs.forEach(function(tab) {
-      tab.classList.remove('active');
-    });
-    
-    // Deactivate all buttons
-    var btns = document.querySelectorAll('.tab-button');
-    btns.forEach(function(btn) {
-      btn.classList.remove('active');
-    });
-    
-    // Show selected tab
-    document.getElementById(tabName).classList.add('active');
-    
-    // Activate clicked button
-    event.target.classList.add('active');
-    
-    // Load data if needed
-    if (tabName === 'trends') {
-      loadTrends();
-    }
-    if (tabName === 'export') {
-      loadExportList();
-    }
-  }
-
-  // Load initial dashboard
-  function loadDashboard() {
-    fetch('/api/analytics/dashboard')
-      .then(r => r.json())
-      .then(data => {
-        document.getElementById('metric-chats').textContent = data.dashboard.total_conversations;
-        document.getElementById('metric-messages').textContent = data.dashboard.total_messages_sent;
-        document.getElementById('metric-folders').textContent = Object.keys(data.dashboard.folders_breakdown).length;
-        document.getElementById('metric-week').textContent = data.dashboard.usage_this_week.total_requests;
-        
-        // Fill folder dropdown
-        var folderSelect = document.getElementById('search-folder');
-        Object.keys(data.dashboard.folders_breakdown).forEach(function(folder) {
-          var opt = document.createElement('option');
-          opt.value = folder;
-          opt.textContent = folder + ' (' + data.dashboard.folders_breakdown[folder] + ')';
-          folderSelect.appendChild(opt);
-        });
-      })
-      .catch(function(err) {
-        console.error('Failed to load dashboard:', err);
-      });
-  }
-
-  // Search conversations
-  function performSearch() {
-    var query = document.getElementById('search-query').value;
-    var startDate = document.getElementById('search-start').value;
-    var endDate = document.getElementById('search-end').value;
-    var folder = document.getElementById('search-folder').value;
-    
-    var resultsDiv = document.getElementById('search-results');
-    resultsDiv.innerHTML = '<div class="loading">Searching...</div>';
-    
-    var filters = {};
-    if (startDate) filters.start_date = startDate;
-    if (endDate) filters.end_date = endDate;
-    if (folder) filters.folder = folder;
-    
-    fetch('/api/analytics/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: query, filters: filters })
-    })
-      .then(r => r.json())
-      .then(data => {
-        if (data.found === 0) {
-          resultsDiv.innerHTML = '<div class="loading">No results found</div>';
-          return;
-        }
-        
-        var html = '';
-        data.conversations.forEach(function(conv) {
-          html += '<div class="result" onclick="exportConv(\'' + conv.id + '\')">';
-          html += '<div class="result-title">' + (conv.title || 'Untitled').substring(0, 50) + '</div>';
-          html += '<div class="result-meta">' + (conv.messages ? conv.messages.length : 0) + ' messages</div>';
-          html += '</div>';
-        });
-        resultsDiv.innerHTML = html;
-      })
-      .catch(function(err) {
-        resultsDiv.innerHTML = '<div class="error">Error: ' + err.message + '</div>';
-      });
-  }
-
-  // Load export list
-  function loadExportList() {
-    var listDiv = document.getElementById('export-list');
-    listDiv.innerHTML = '<div class="loading">Loading conversations...</div>';
-    
-    fetch('/api/analytics/dashboard')
-      .then(r => r.json())
-      .then(data => {
-        var convs = data.dashboard.recent_conversations || [];
-        if (convs.length === 0) {
-          listDiv.innerHTML = '<div class="loading">No conversations</div>';
-          return;
-        }
-        
-        var html = '';
-        convs.forEach(function(conv) {
-          html += '<div class="export-item" onclick="exportConv(\'' + conv.id + '\')">';
-          html += (conv.title || 'Untitled').substring(0, 20);
-          html += '</div>';
-        });
-        listDiv.innerHTML = html;
-      })
-      .catch(function(err) {
-        listDiv.innerHTML = '<div class="error">Error: ' + err.message + '</div>';
-      });
-  }
-
-  // Export a conversation
-  function exportConv(convId) {
-    var format = document.getElementById('export-format').value;
-    var url = '/api/conversations/' + encodeURIComponent(convId) + '/export?format=' + format;
-    window.location.href = url;
-  }
-
-  // Load trends
-  function loadTrends() {
-    var tbody = document.getElementById('trends-table');
-    tbody.innerHTML = '<tr><td colspan="4" class="loading">Loading trends...</td></tr>';
-    
-    fetch('/api/analytics/trend?days=30')
-      .then(r => r.json())
-      .then(data => {
-        if (!data.trend || data.trend.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="4" class="loading">No trend data</td></tr>';
-          return;
-        }
-        
-        var html = '';
-        data.trend.forEach(function(row) {
-          html += '<tr>';
-          html += '<td>' + row.date + '</td>';
-          html += '<td>' + row.requests + '</td>';
-          html += '<td>' + row.tokens + '</td>';
-          html += '<td>' + row.unique_users + '</td>';
-          html += '</tr>';
-        });
-        tbody.innerHTML = html;
-      })
-      .catch(function(err) {
-        tbody.innerHTML = '<tr><td colspan="4" class="error">Error: ' + err.message + '</td></tr>';
-      });
-  }
-
-  // Allow Enter in search
-  document.addEventListener('DOMContentLoaded', function() {
-    var searchInput = document.getElementById('search-query');
-    if (searchInput) {
-      searchInput.addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') {
-          performSearch();
-        }
-      });
-    }
+function switchTab(tab) {
+  ['search', 'export', 'usage'].forEach(t => {
+    document.getElementById(t + '-tab').style.display = t === tab ? 'block' : 'none';
   });
+  document.querySelectorAll('.tab').forEach((el, idx) => {
+    const tabNames = ['search', 'export', 'usage'];
+    el.classList.toggle('active', tabNames[idx] === tab);
+  });
+  if (tab === 'usage') loadUsageTrends();
+  if (tab === 'export') loadExportUI();
+}
 
-  // Load on startup
-  loadDashboard();
+async function loadDashboard() {
+  try {
+    const res = await fetch('/api/analytics/dashboard');
+    const data = await res.json();
+    document.getElementById('total-chats').textContent = data.dashboard.total_conversations;
+    document.getElementById('total-messages').textContent = data.dashboard.total_messages_sent;
+    document.getElementById('total-folders').textContent = Object.keys(data.dashboard.folders_breakdown).length;
+    document.getElementById('this-week').textContent = data.dashboard.usage_this_week.total_requests;
+
+    const filterFolders = document.getElementById('filter-folder');
+    Object.keys(data.dashboard.folders_breakdown).forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f;
+      opt.textContent = f + ' (' + data.dashboard.folders_breakdown[f] + ')';
+      filterFolders.appendChild(opt);
+    });
+  } catch (e) {
+    console.error('Failed to load dashboard:', e);
+  }
+}
+
+async function searchConversations() {
+  const query = document.getElementById('search-query').value;
+  const filters = {
+    start_date: document.getElementById('filter-start').value,
+    end_date: document.getElementById('filter-end').value,
+    folder: document.getElementById('filter-folder').value || null
+  };
+  const res = await fetch('/api/analytics/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, filters })
+  });
+  const data = await res.json();
+  const container = document.getElementById('search-results');
+  if (data.found === 0) {
+    container.innerHTML = '<div class="loading">No conversations found</div>';
+    return;
+  }
+  container.innerHTML = data.conversations.map(c => `
+    <div class="result-item" onclick="exportOne('${c.id}', 'json')">
+      <div class="result-title">${c.title || 'Untitled'}</div>
+      <div class="result-meta">${c.messages?.length || 0} messages • ${c.folder || 'Uncategorized'}</div>
+    </div>
+  `).join('');
+}
+
+async function loadExportUI() {
+  const res = await fetch('/api/analytics/dashboard');
+  const data = await res.json();
+  const grid = document.getElementById('export-grid');
+  grid.innerHTML = data.dashboard.recent_conversations.map(c => `
+    <div class="export-btn" onclick="exportOne('${c.id}', document.getElementById('export-format').value)">
+      ${c.title?.substring(0, 15) || 'Untitled'}
+    </div>
+  `).join('');
+}
+
+async function exportOne(convId, format) {
+  const url = '/api/conversations/' + convId + '/export?format=' + format;
+  window.location.href = url;
+}
+
+async function loadUsageTrends() {
+  try {
+    const res = await fetch('/api/analytics/trend?days=30');
+    const data = await res.json();
+    const tbody = document.getElementById('trend-tbody');
+    tbody.innerHTML = data.trend.map(t => `
+      <tr>
+        <td>${t.date}</td>
+        <td>${t.requests}</td>
+        <td>${t.tokens}</td>
+        <td>${t.unique_users}</td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    console.error('Failed to load trends:', e);
+  }
+}
+
+loadDashboard();
 </script>
-
-</body>
-</html>"""
+</body></html>"""
     return Response(html, mimetype="text/html; charset=utf-8")
-
-
-
-
 
 
 @login_required
@@ -8317,19 +7954,6 @@ def api_list_conversations():
     return jsonify({"conversations": convs})
 
 
-@app.route("/api/conversations", methods=["POST"])
-@login_required
-def api_create_conversation():
-    """Creates an empty 'New chat' conversation immediately, so it shows up
-    in the sidebar right away instead of only appearing after the first
-    message is sent. The conversation carries no messages yet — sending the
-    first message into it works exactly the same as any other conversation."""
-    username = current_username()
-    conv_id = str(uuid.uuid4())
-    save_conversation(username, conv_id, {"title": "New chat", "messages": []})
-    return jsonify({"id": conv_id, "title": "New chat"})
-
-
 # Patterns that identify a conversation as internal-tooling leakage rather
 # than a real chat — e.g. old follow-up-suggestion or tone/length-prefix
 # requests saved before the ephemeral-request fix existed. Matched against
@@ -8597,17 +8221,9 @@ def api_generate_title(conv_id):
         return jsonify({"error": "no text content to summarize"}), 400
 
     title_prompt = [{"role": "user", "parts": [{"text":
-        "Below is a snippet of a chat conversation. Write ONE short, specific "
-        "title (1-3 words) describing what the conversation is actually "
-        "ABOUT — not a description of your task, not the words 'chat', "
-        "'title', or 'conversation' themselves. No quotes, no punctuation "
-        "at the end, plain text only. Prefer a simple category-style label "
-        "when that fits.\n\n"
-        "Examples:\n"
-        "- If the user says 'hi' and gets a greeting back → 'Greeting'\n"
-        "- If they ask about Python loops → 'Python Loops'\n"
-        "- If they discuss weekend plans → 'Weekend Plans'\n\n"
-        f"Conversation:\n{excerpt}\n\nTitle:"
+        "Write a short chat title (max 6 words, no quotes, no trailing "
+        "punctuation, plain text only) that summarizes this conversation:\n\n"
+        f"{excerpt}"
     }]}]
     data = request.get_json(silent=True) or {}
     user_groq_key = (data.get("groq_api_key") or "").strip()
@@ -8626,23 +8242,6 @@ def api_generate_title(conv_id):
     # commentary despite instructions — truncate rather than reject outright,
     # so a slightly-verbose reply still produces a usable title.
     raw_title = raw_title.split("\n")[0].strip()
-    raw_title = re.sub(r'^Title:\s*', '', raw_title, flags=re.IGNORECASE).strip()
-
-    # Safety filter: reject titles that describe the TASK instead of the
-    # conversation's actual content (the model sometimes echoes back
-    # phrases like "Generating Chat Titles" or "Chat Title" for very short/
-    # generic exchanges like a bare "hi"). Fall back to a sensible default
-    # derived from the first user message instead of saving junk.
-    _meta_phrases = ("generating chat title", "chat title", "conversation title",
-                      "title generation", "generate title", "untitled")
-    if not raw_title or any(p in raw_title.lower() for p in _meta_phrases):
-        first_user_text = ""
-        for m in messages:
-            if m.get("role") == "user":
-                first_user_text = "".join(p.get("text", "") for p in m.get("parts", []) if "text" in p)
-                break
-        raw_title = (first_user_text[:40].strip() or "New chat")
-
     if not raw_title:
         return jsonify({"status": "unchanged", "title": conv.get("title", "New chat")})
 
@@ -8880,12 +8479,9 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
         return "New chat"
 
     prompt = (
-        "Generate a short, natural chat title (1-4 words, no quotes, no punctuation "
-        "at the end, no emoji, title case) that summarizes what this SPECIFIC "
-        "conversation is about. Do NOT describe the task of generating a title — "
-        "write about the actual topic discussed. Prefer a simple category-style "
-        "label when that fits — for a simple greeting like 'hi'/'hello', use "
-        "'Greeting'. Reply with ONLY the title text, nothing else.\n\n"
+        "Generate a short, natural chat title (3-6 words, no quotes, no punctuation "
+        "at the end, no emoji, title case) that summarizes what this conversation is "
+        "about. Reply with ONLY the title text, nothing else.\n\n"
         f"User: {user_msg[:400]}\n"
         f"Assistant: {ai_reply[:400]}"
     )
@@ -8900,13 +8496,10 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
         title = title.split("\n")[0].strip()
         title = re.sub(r'^\[.*?\]\s*', '', title).strip()  # strip any leaked [Instructions: ...] / bracketed prefix
         title = re.sub(r'[.!?]+$', '', title).strip()
-        _meta_phrases = ("generating chat title", "chat title", "conversation title",
-                          "title generation", "generate title", "untitled")
         looks_bad = (
             len(title) < 3 or
             any(ch in title for ch in '[]"“”') or
-            title.lower().startswith(('based on', 'here is', 'here\'s', 'sure,', 'title:')) or
-            any(p in title.lower() for p in _meta_phrases)
+            title.lower().startswith(('based on', 'here is', 'here\'s', 'sure,', 'title:'))
         )
         if title and not looks_bad:
             return title[:60]
