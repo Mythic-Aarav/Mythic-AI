@@ -4817,32 +4817,49 @@ if (analyticsCloseBtn) analyticsCloseBtn.addEventListener('click', closeAnalytic
 
 async function loadAnalyticsDashboard() {
   try {
-    const res = await fetch('/api/analytics-dashboard');
-    if (!res.ok) {
-      analyticsTotalsEl.innerHTML = '<div style="color:#e0806b;font-size:14px;padding:20px;text-align:center;">Could not load analytics</div>';
-      return;
-    }
-    const data = await res.json();
-    const dash = data.dashboard || {};
+    // Fetch conversations and stats data
+    const [convsRes, statsRes] = await Promise.all([
+      fetch('/api/conversations'),
+      fetch('/api/streak')
+    ]);
+    
+    const convs = convsRes.ok ? (await convsRes.json()).conversations || [] : [];
+    const streak = statsRes.ok ? (await statsRes.json()).streak || 0 : 0;
+
+    // Calculate totals
+    let totalMsgs = 0;
+    const recentConvs = [...convs].sort((a, b) => {
+      const aDate = new Date(a.updated_at || 0).getTime();
+      const bDate = new Date(b.updated_at || 0).getTime();
+      return bDate - aDate;
+    }).slice(0, 10);
+    
+    recentConvs.forEach(c => { totalMsgs += (c.messages || []).length; });
+
+    // Folder breakdown
+    const folders = {};
+    convs.forEach(c => {
+      const folder = c.folder || 'Uncategorized';
+      folders[folder] = (folders[folder] || 0) + 1;
+    });
 
     // Totals
     analyticsTotalsEl.innerHTML = `
       <div style="flex:1;min-width:150px;background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:18px;text-align:center;">
-        <div style="font-size:40px;font-weight:800;line-height:1.1;">${dash.total_conversations || 0}</div>
-        <div style="font-size:12px;color:#9a9ea6;margin-top:6px;letter-spacing:.3px;text-transform:uppercase;">Conversations</div>
+        <div style="font-size:40px;font-weight:800;line-height:1.1;">${convs.length}</div>
+        <div style="font-size:12px;color:#9a9ea6;margin-top:6px;letter-spacing:.3px;text-transform:uppercase;">Total Conversations</div>
       </div>
       <div style="flex:1;min-width:150px;background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:18px;text-align:center;">
-        <div style="font-size:40px;font-weight:800;line-height:1.1;">${dash.total_messages_sent || 0}</div>
-        <div style="font-size:12px;color:#9a9ea6;margin-top:6px;letter-spacing:.3px;text-transform:uppercase;">Messages Sent</div>
+        <div style="font-size:40px;font-weight:800;line-height:1.1;">${totalMsgs}</div>
+        <div style="font-size:12px;color:#9a9ea6;margin-top:6px;letter-spacing:.3px;text-transform:uppercase;">Total Messages</div>
       </div>
       <div style="flex:1;min-width:150px;background:#1a1d24;border:1px solid #2a2e37;border-radius:14px;padding:18px;text-align:center;">
-        <div style="font-size:40px;font-weight:800;line-height:1.1;">${(dash.usage_this_week?.total_requests || 0)}</div>
-        <div style="font-size:12px;color:#9a9ea6;margin-top:6px;letter-spacing:.3px;text-transform:uppercase;">Requests (7d)</div>
+        <div style="font-size:40px;font-weight:800;line-height:1.1;">${streak}</div>
+        <div style="font-size:12px;color:#9a9ea6;margin-top:6px;letter-spacing:.3px;text-transform:uppercase;">Day Streak</div>
       </div>`;
 
     // Recent conversations
-    const recent = dash.recent_conversations || [];
-    analyticsRecentEl.innerHTML = recent.length ? recent.map((c, i) => {
+    analyticsRecentEl.innerHTML = recentConvs.length ? recentConvs.map((c, i) => {
       const title = c.title || '(Untitled)';
       const msgCount = (c.messages || []).length;
       const updated = c.updated_at ? new Date(c.updated_at).toLocaleDateString() : 'unknown';
@@ -4853,7 +4870,6 @@ async function loadAnalyticsDashboard() {
     }).join('') : '<div style="color:#9a9ea6;font-size:13px;padding:10px;">No conversations yet</div>';
 
     // Folders
-    const folders = dash.folders_breakdown || {};
     analyticsFoldersEl.innerHTML = Object.entries(folders).length ? Object.entries(folders).map(([folder, count]) => {
       return `<div style="display:flex;justify-content:space-between;padding:10px;background:#0f1115;border-radius:8px;border:1px solid #2a2e37;font-size:13px;">
         <span style="font-weight:600;color:#d9a441;">${folder}</span>
@@ -4861,21 +4877,22 @@ async function loadAnalyticsDashboard() {
       </div>`;
     }).join('') : '<div style="color:#9a9ea6;font-size:13px;padding:10px;">No folders yet</div>';
 
-    // Usage breakdown
-    const usage = dash.usage_this_week || {};
-    const byModel = usage.by_model || {};
-    analyticsUsageEl.innerHTML = Object.entries(byModel).length ? Object.entries(byModel).map(([model, stats]) => {
-      const requests = stats.requests || 0;
-      const tokens = stats.tokens || 0;
-      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f1115;border-radius:8px;border:1px solid #2a2e37;font-size:13px;">
-        <span style="font-weight:600;color:#d9a441;text-transform:capitalize;">${model}</span>
-        <span style="color:#9a9ea6;">${requests} req • ${tokens.toLocaleString()} tokens</span>
+    // Usage summary (conversations per day estimate)
+    const today = new Date().toISOString().split('T')[0];
+    const todayConvs = convs.filter(c => c.created_at && c.created_at.startsWith(today)).length;
+    analyticsUsageEl.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f1115;border-radius:8px;border:1px solid #2a2e37;font-size:13px;">
+        <span style="font-weight:600;color:#d9a441;">Today</span>
+        <span style="color:#9a9ea6;">${todayConvs} new conversation${todayConvs!==1?'s':''}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f1115;border-radius:8px;border:1px solid #2a2e37;font-size:13px;">
+        <span style="font-weight:600;color:#d9a441;">All Time</span>
+        <span style="color:#9a9ea6;">${convs.length} conversations • ${totalMsgs} messages</span>
       </div>`;
-    }).join('') : '<div style="color:#9a9ea6;font-size:13px;padding:10px;">No usage data</div>';
 
   } catch (e) {
-    console.warn('Could not load analytics:', e);
-    analyticsTotalsEl.innerHTML = '<div style="color:#e0806b;font-size:14px;padding:20px;text-align:center;">Error loading analytics</div>';
+    console.warn('Could not load stats:', e);
+    analyticsTotalsEl.innerHTML = '<div style="color:#e0806b;font-size:14px;padding:20px;text-align:center;">Error loading stats</div>';
   }
 }
 
