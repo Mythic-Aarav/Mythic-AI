@@ -4595,7 +4595,6 @@ if (apiKeyCreateBtn) {
     }
   }
 }
-}
 
 const apiKeyCopyBtn = document.getElementById('api-key-copy-btn');
 if (apiKeyCopyBtn) {
