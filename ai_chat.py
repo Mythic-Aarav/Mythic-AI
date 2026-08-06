@@ -8767,6 +8767,18 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
     if not user_msg and not ai_reply:
         return "New chat"
 
+    # Short greetings ("hi", "hello", "hey", etc.) are common and the model
+    # sometimes mishandles them at low token budgets — it can echo the
+    # "User: ... / Assistant: ..." prompt scaffold back verbatim instead of
+    # writing a real title. Handle these directly instead of guessing with
+    # an AI call, so greetings always get a clean, predictable title.
+    _GREETING_RE = re.compile(
+        r'^(hi+|hello+|hey+|yo|sup|namaste|hola|salaam|hii+|helo+|good\s?morning|'
+        r'good\s?afternoon|good\s?evening)[\s!.,?]*$', re.IGNORECASE
+    )
+    if _GREETING_RE.match(user_msg):
+        return "Greeting"
+
     prompt = (
         "Generate a short, natural chat title (3-6 words, no quotes, no punctuation "
         "at the end, no emoji, title case) that summarizes what this conversation is "
@@ -8788,7 +8800,11 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
         looks_bad = (
             len(title) < 3 or
             any(ch in title for ch in '[]"“”') or
-            title.lower().startswith(('based on', 'here is', 'here\'s', 'sure,', 'title:'))
+            title.lower().startswith(('based on', 'here is', 'here\'s', 'sure,', 'title:')) or
+            # Model echoed the "User: .../ Assistant: ..." prompt scaffold
+            # back instead of writing an actual title (the exact bug that
+            # produced literal "User: hi" as a title).
+            re.match(r'^(user|assistant)\s*:', title, re.IGNORECASE) is not None
         )
         if title and not looks_bad:
             return title[:60]
