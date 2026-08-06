@@ -3347,6 +3347,10 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', _setAppHeight);
 }
 
+// ─── Declare all key global variables at the top to avoid TDZ errors ─────
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+const modeTabs = document.querySelectorAll('.mode-tab[data-mode]');
+
 const messagesWrap = document.getElementById('messages-wrap');
 const messagesEl   = document.getElementById('messages');
 const form         = document.getElementById('chat-form');
@@ -5320,9 +5324,7 @@ async function _doSubscribe(reg) {
   } catch (err) { console.warn('[Push] subscribe error:', err); }
 }
 
-// Detect if running on iPhone/iOS
-const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-
+// Detect if running on iPhone/iOS — moved to top-level scope
 if ('serviceWorker' in navigator && !isIOS) {
   // Service workers are unreliable on iOS, skip on iPhone
   navigator.serviceWorker.register('/sw.js', { scope: '/' })
@@ -6218,7 +6220,7 @@ function requirePassword(action) {
 // selected. If VIP isn't unlocked yet, switching to it goes through the
 // existing VIP password modal exactly once (via showVipModal / vipUnlocked) —
 // after that, no repeated password prompts, just the model requirement.
-const modeTabs = document.querySelectorAll('.mode-tab[data-mode]');
+// modeTabs now declared at top-level scope
 function setActiveModeTab(mode) {
   currentMode = mode;
   modeTabs.forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
