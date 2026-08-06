@@ -7422,7 +7422,34 @@ async function doCreateKey() {
     const data = await res.json();
     if (data.api_key) {
       document.getElementById('new-key-result').innerHTML =
-        '<div class="new-key-box">' + data.api_key + '</div><div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again.</div>';
+        '<div class="new-key-box" style="display:flex;gap:8px;align-items:center;">' +
+          '<input type="text" id="standalone-new-key-input" readonly value="' + data.api_key.replace(/"/g, '&quot;') + '" ' +
+            'style="flex:1;background:transparent;border:none;color:#7be3ab;font-family:monospace;font-size:13px;min-width:0;">' +
+          '<button type="button" id="standalone-new-key-copy-btn" ' +
+            'style="background:#1a9e5c;color:#04140b;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;white-space:nowrap;">Copy</button>' +
+        '</div>' +
+        '<div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again. (Use the Copy button — double-clicking to select may only grab part of the key due to the hyphens.)</div>';
+      const stCopyBtn = document.getElementById('standalone-new-key-copy-btn');
+      if (stCopyBtn) {
+        stCopyBtn.addEventListener('click', async () => {
+          const keyInput = document.getElementById('standalone-new-key-input');
+          if (!keyInput) return;
+          try {
+            keyInput.select();
+            document.execCommand('copy');
+            stCopyBtn.textContent = '✓ Copied!';
+            setTimeout(() => { stCopyBtn.textContent = 'Copy'; }, 2500);
+          } catch (e) {
+            try {
+              await navigator.clipboard.writeText(keyInput.value);
+              stCopyBtn.textContent = '✓ Copied!';
+              setTimeout(() => { stCopyBtn.textContent = 'Copy'; }, 2500);
+            } catch (e2) {
+              alert('Copy failed. Click once inside the box, then Ctrl+A, Ctrl+C.');
+            }
+          }
+        });
+      }
       loadKeys();
     } else if (data.error) {
       alert(data.error);
