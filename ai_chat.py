@@ -3227,6 +3227,13 @@ button {
 </div>
 
 <script>
+// Declared early (before any usage) to avoid a temporal-dead-zone
+// ReferenceError — this const used to be declared much further down,
+// but code earlier in the script referenced it synchronously before
+// that point was ever reached, which crashed the entire script and
+// silently broke every button on the page.
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
 // ─── Resilient identity: keep a copy of our anonymous id outside the cookie ──
 // If the session cookie ever fails to persist in a given browser (blocked,
 // stripped by a proxy, cleared, etc.), this localStorage id lets the server
@@ -5207,8 +5214,7 @@ async function _doSubscribe(reg) {
   } catch (err) { console.warn('[Push] subscribe error:', err); }
 }
 
-// Detect if running on iPhone/iOS
-const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+// (isIOS already declared near the top of this script, to avoid a TDZ crash)
 
 if ('serviceWorker' in navigator && !isIOS) {
   // Service workers are unreliable on iOS, skip on iPhone
