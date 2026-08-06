@@ -818,6 +818,83 @@ def get_or_create_owner_id(preferred_id=None):
             print(f"[owner] could not persist owner id to disk: {e}")
         return oid
 
+
+# --- Per-account unique links (one distinct URL per visitor's own account) --
+# The /invite/<code> link above intentionally sends EVERY visitor into one
+# shared "owner" account/history — useful if you want a single conversation
+# thread anyone can add to. This is the opposite: each browser/account gets
+# its OWN permanent, unique URL (…/a/<token>) that always logs back into
+# THAT SPECIFIC account's private chats — nobody else's. Bookmarking or
+# sharing that link only ever opens the same one account, not a fresh one.
+_ACCOUNT_TOKENS_FILE = _os.path.join(_DATA_DIR, "account_tokens.json")
+_account_tokens_lock = threading.Lock()
+
+
+def _load_account_tokens():
+    if _os.path.exists(_ACCOUNT_TOKENS_FILE):
+        try:
+            with open(_ACCOUNT_TOKENS_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_account_tokens(data):
+    try:
+        with open(_ACCOUNT_TOKENS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"[account-token] could not persist tokens to disk: {e}")
+
+
+def get_or_create_account_token(user_id):
+    """Returns this account's permanent unique token, creating one on first
+    call. Same token forever for the same user_id — the URL never changes
+    on redeploy/restart, since it's persisted to disk/Supabase like the
+    invite code and owner id above."""
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"account_tokens?user_id=eq.{user_id}&select=token"),
+                              headers=sb_headers(), timeout=10)
+            if r.status_code == 200 and r.json():
+                return r.json()[0]["token"]
+        except Exception as e:
+            print(f"[account-token] Supabase read failed: {e} — falling back to local file.")
+
+    with _account_tokens_lock:
+        tokens = _load_account_tokens()
+        # tokens maps token -> user_id; do a reverse lookup for existing token
+        for tok, uid in tokens.items():
+            if uid == user_id:
+                return tok
+        new_token = uuid.uuid4().hex[:16]
+        tokens[new_token] = user_id
+        _save_account_tokens(tokens)
+
+    if SUPABASE_URL:
+        try:
+            requests.post(sb("account_tokens"), headers=sb_headers(),
+                          json={"token": new_token, "user_id": user_id}, timeout=10)
+        except Exception as e:
+            print(f"[account-token] Supabase write failed: {e} — token still works via local file.")
+
+    return new_token
+
+
+def resolve_account_token(token):
+    """Returns the user_id this token belongs to, or None if unknown."""
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"account_tokens?token=eq.{token}&select=user_id"),
+                              headers=sb_headers(), timeout=10)
+            if r.status_code == 200 and r.json():
+                return r.json()[0]["user_id"]
+        except Exception as e:
+            print(f"[account-token] Supabase resolve failed: {e} — falling back to local file.")
+    tokens = _load_account_tokens()
+    return tokens.get(token)
+
 # --- Public API keys ("aarav-...") --------------------------------------------
 # Lets other apps/people call YOUR Mythic AI like a hosted API (OpenAI-style),
 # authenticated with a personal key instead of the free chat UI. Keys are
@@ -2791,8 +2868,8 @@ PAGE = r"""<!DOCTYPE html>
 
 <div id="share-modal-overlay">
   <div id="share-modal">
-    <h3>🔗 Invite link</h3>
-    <p class="sub">One permanent link for the whole app — not tied to any single chat. Share it with anyone; each person who opens it gets their own private conversation with Mythic AI, no login required.</p>
+    <h3>🔗 Your account link</h3>
+    <p class="sub">A permanent, unique link for THIS account — nobody else's. Bookmark it to always get back to these exact chats from any device, or share it with someone you want to give access to this specific account.</p>
     <div id="share-link-row">
       <input type="text" id="share-link-input" readonly>
       <button id="share-open-btn" type="button" title="Open in a new tab">↗</button>
@@ -4159,7 +4236,7 @@ function closeShareModal() { shareModalOverlay.classList.remove('show'); }
 function openInviteModal() {
   shareLinkInput.value = '';
   shareLinkInput.title = '';
-  shareStatusEl.textContent = 'Loading your invite link…';
+  shareStatusEl.textContent = 'Loading your account link…';
   shareModalOverlay.classList.add('show');
   shareBtn.classList.add('active');
   if (shareRevokeBtn) shareRevokeBtn.style.display = 'none';  // nothing to revoke — it's a static link
@@ -4167,13 +4244,13 @@ function openInviteModal() {
     const link = d.invite_url || (location.origin + '/');
     shareLinkInput.value = link;
     shareLinkInput.title = link;
-    shareStatusEl.textContent = 'Anyone who opens this link can chat with Mythic AI right away — ' +
-      'no login needed. Each person gets their own private conversation history; nobody sees yours.';
+    shareStatusEl.textContent = 'This link is unique to THIS account — opening it always ' +
+      'comes back to these exact chats, on any device. It does not open a fresh/different account.';
     requestAnimationFrame(() => { shareLinkInput.focus(); shareLinkInput.select(); });
     renderInviteQrCode(link);
   }).catch(() => {
     shareLinkInput.value = location.origin + '/';
-    shareStatusEl.textContent = 'Could not generate a custom link, showing the site link instead.';
+    shareStatusEl.textContent = 'Could not generate your account link, showing the site link instead.';
     renderInviteQrCode(location.origin + '/');
   });
 }
@@ -7152,23 +7229,35 @@ def index():
 @app.route("/api/invite-link", methods=["GET"])
 @login_required
 def api_invite_link():
-    code = get_or_create_invite_code()
-    # Adopt the caller's own existing user_id as the "owner" account the
-    # first time this is ever called, so it's YOUR real chat history that
-    # gets shared via the link — not a fresh empty account.
-    get_or_create_owner_id(preferred_id=current_username())
-    return jsonify({"invite_url": request.host_url.rstrip("/") + "/invite/" + code})
+    # Each account gets its OWN unique, permanent link (…/a/<token>) that
+    # always logs back into THIS SPECIFIC account's private chats — not a
+    # single link shared by everyone. Same token every time for the same
+    # account (persisted — see get_or_create_account_token), so it never
+    # changes across reloads/redeploys.
+    token = get_or_create_account_token(current_username())
+    return jsonify({"invite_url": request.host_url.rstrip("/") + "/a/" + token})
+
+
+@app.route("/a/<token>")
+def account_link_landing(token):
+    # Opens the ONE specific account this token belongs to — created the
+    # first time that account visited /api/invite-link. Unknown/invalid
+    # tokens just fall through to a normal fresh anonymous session rather
+    # than erroring, so a broken/copied-wrong link still lands somewhere
+    # usable instead of a dead page.
+    user_id = resolve_account_token(token)
+    if user_id:
+        session["user_id"] = user_id
+        session.permanent = True
+    return Response(PAGE, mimetype="text/html; charset=utf-8")
 
 
 @app.route("/invite/<code>")
 def invite_landing(code):
-    # Anyone opening this link gets logged into the OWNER's account, so they
-    # see and can add to the same chat history — this is an intentional
-    # shared-account link, not a per-visitor anonymous session like the bare
-    # domain gives. The code itself isn't checked against anything (there's
-    # no per-invite access control here) — treat this link as equivalent to
-    # sharing your password, and only send it to people you trust with full
-    # access to your chats.
+    # Legacy shared-account link (everyone who opens it lands in the SAME
+    # owner account) — kept working for any old links already handed out,
+    # but no longer surfaced anywhere in the UI. The 🔗 button now issues
+    # the per-account /a/<token> links above instead.
     session["user_id"] = get_or_create_owner_id()
     session.permanent = True
     return Response(PAGE, mimetype="text/html; charset=utf-8")
