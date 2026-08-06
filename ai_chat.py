@@ -3307,6 +3307,15 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', _setAppHeight);
 }
 
+// Declared early — referenced by code that runs during initial page load,
+// before the original later declaration would have executed (which caused
+// "Cannot access 'isIOS' before initialization" errors).
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
+// Same reasoning as isIOS above — moved up because syncModeTabLocks() can
+// run during initial page load, before the old declaration point.
+const modeTabs = document.querySelectorAll('.mode-tab[data-mode]');
+
 const messagesWrap = document.getElementById('messages-wrap');
 const messagesEl   = document.getElementById('messages');
 const form         = document.getElementById('chat-form');
@@ -5244,8 +5253,7 @@ async function _doSubscribe(reg) {
   } catch (err) { console.warn('[Push] subscribe error:', err); }
 }
 
-// Detect if running on iPhone/iOS
-const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+// isIOS is declared near the top of this script now — see there.
 
 if ('serviceWorker' in navigator && !isIOS) {
   // Service workers are unreliable on iOS, skip on iPhone
@@ -6142,7 +6150,7 @@ function requirePassword(action) {
 // selected. If VIP isn't unlocked yet, switching to it goes through the
 // existing VIP password modal exactly once (via showVipModal / vipUnlocked) —
 // after that, no repeated password prompts, just the model requirement.
-const modeTabs = document.querySelectorAll('.mode-tab[data-mode]');
+// modeTabs is declared near the top of this script now — see there.
 function setActiveModeTab(mode) {
   currentMode = mode;
   modeTabs.forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
