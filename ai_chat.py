@@ -7945,8 +7945,15 @@ def v1_code_execute():
         return jsonify({"error": {"message": "Invalid or missing API key.",
                                    "type": "invalid_request_error"}}), 401
     
-    # Reuse the existing /api/execute-code logic
+    # Reuse the existing /api/execute-code logic. Possessing a valid API key
+    # is itself the authorization check here — api_execute_code() additionally
+    # requires session['vip_unlocked'], which this path never used to set,
+    # so every API-key code-execution request was silently rejected with
+    # "Unlock VIP mode first to run code." regardless of the key. Set it
+    # explicitly since verify_api_key() above already confirmed the caller
+    # is authorized.
     session["user_id"] = get_or_create_owner_id(preferred_id=raw_key)
+    session["vip_unlocked"] = True
     return api_execute_code()
 
 
