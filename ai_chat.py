@@ -823,7 +823,7 @@ def get_or_create_owner_id(preferred_id=None):
 # The /invite/<code> link above intentionally sends EVERY visitor into one
 # shared "owner" account/history — useful if you want a single conversation
 # thread anyone can add to. This is the opposite: each browser/account gets
-# its OWN permanent, unique URL (…/a/<token>) that always logs back into
+# its OWN permanent, unique URL (…/invite/<token>) that always logs back into
 # THAT SPECIFIC account's private chats — nobody else's. Bookmarking or
 # sharing that link only ever opens the same one account, not a fresh one.
 _ACCOUNT_TOKENS_FILE = _os.path.join(_DATA_DIR, "account_tokens.json")
@@ -7234,16 +7234,16 @@ def index():
 @app.route("/api/invite-link", methods=["GET"])
 @login_required
 def api_invite_link():
-    # Each account gets its OWN unique, permanent link (…/a/<token>) that
+    # Each account gets its OWN unique, permanent link (…/invite/<token>) that
     # always logs back into THIS SPECIFIC account's private chats — not a
     # single link shared by everyone. Same token every time for the same
     # account (persisted — see get_or_create_account_token), so it never
     # changes across reloads/redeploys.
     token = get_or_create_account_token(current_username())
-    return jsonify({"invite_url": request.host_url.rstrip("/") + "/a/" + token})
+    return jsonify({"invite_url": request.host_url.rstrip("/") + "/invite/" + token})
 
 
-@app.route("/a/<token>")
+@app.route("/invite/<token>")
 def account_link_landing(token):
     # Opens the ONE specific account this token belongs to — created the
     # first time that account visited /api/invite-link. Unknown/invalid
@@ -7257,12 +7257,12 @@ def account_link_landing(token):
     return Response(PAGE, mimetype="text/html; charset=utf-8")
 
 
-@app.route("/invite/<code>")
+@app.route("/legacy-invite/<code>")
 def invite_landing(code):
     # Legacy shared-account link (everyone who opens it lands in the SAME
     # owner account) — kept working for any old links already handed out,
     # but no longer surfaced anywhere in the UI. The 🔗 button now issues
-    # the per-account /a/<token> links above instead.
+    # the per-account /invite/<token> links above instead.
     session["user_id"] = get_or_create_owner_id()
     session.permanent = True
     return Response(PAGE, mimetype="text/html; charset=utf-8")
