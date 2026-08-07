@@ -5444,7 +5444,26 @@ function _showIOSInstallModal() {
 
 if (installBtn) {
   installBtn.addEventListener('click', async () => {
+    const isAndroid = /Android/i.test(navigator.userAgent);
+    const isRunningAsInstalledApp = window.matchMedia('(display-mode: standalone)').matches
+      || window.navigator.standalone
+      || /wv\)/i.test(navigator.userAgent); // Android WebView (i.e. already inside the installed APK)
+
+    if (isAndroid && !isRunningAsInstalledApp) {
+      // On Android browsers, skip the PWA install prompt entirely and
+      // download the real native APK instead.
+      const a = document.createElement('a');
+      a.href = '/download/mythic-ai.apk';
+      a.download = 'Mythic-AI.apk';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      return;
+    }
+
     if (_deferredInstallPrompt) {
+      // Windows/desktop and other non-Android browsers keep the normal
+      // PWA install-prompt flow, unchanged.
       _deferredInstallPrompt.prompt();
       const { outcome } = await _deferredInstallPrompt.userChoice;
       if (outcome === 'accepted') {
@@ -5453,14 +5472,13 @@ if (installBtn) {
       }
     } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
       _showIOSInstallModal();
-    } else if (window.matchMedia('(display-mode: standalone)').matches) {
+    } else if (isRunningAsInstalledApp) {
       _hideInstallBtn();
     } else {
       alert(
         'Install Mythic AI as an app:\n\n' +
-        '• Chrome / Edge: Click ⋮ menu → "Install app" (or the ⊕ icon in the address bar)\n' +
-        '• Samsung Browser: Tap ⋮ → "Add page to"\n' +
-        '• Firefox: Tap ⋮ → "Install"\n' +
+        '• Windows (Chrome / Edge): Click ⋮ menu → "Install app" (or the ⊕ icon in the address bar)\n' +
+        '• Android: Tap Install to download the app directly (.apk)\n' +
         '• Safari (iOS): Tap Share ⬆ → "Add to Home Screen"'
       );
     }
@@ -7255,6 +7273,32 @@ def health_check():
     etc.) to hit every 10-14 minutes, keeping a Render free-tier instance
     from spinning down. Does no real work — just confirms the process is alive."""
     return jsonify({"status": "ok", "time": time.time()})
+
+
+# ── Native Android APK download ───────────────────────────────────────────
+# Serves the real, signed/debug .apk file for direct download on Android,
+# used instead of the PWA install prompt there (see the "Install" button
+# logic in the frontend). Put the built app-debug.apk file at
+# downloads/mythic-ai.apk relative to this script (create the "downloads"
+# folder and commit the .apk into your repo so it's part of the deploy —
+# Render serves whatever files are in the repo, this doesn't need any
+# runtime file writes).
+_APK_DOWNLOAD_PATH = _os.path.join(_BASE_DIR, "downloads", "mythic-ai.apk")
+
+@app.route("/download/mythic-ai.apk")
+def download_apk():
+    if not _os.path.exists(_APK_DOWNLOAD_PATH):
+        return jsonify({
+            "error": "APK not found on server. Place your built app-debug.apk "
+                     "at downloads/mythic-ai.apk in the project and redeploy."
+        }), 404
+    from flask import send_file
+    return send_file(
+        _APK_DOWNLOAD_PATH,
+        mimetype="application/vnd.android.package-archive",
+        as_attachment=True,
+        download_name="Mythic-AI.apk",
+    )
 
 
 @app.route("/manifest.json")
