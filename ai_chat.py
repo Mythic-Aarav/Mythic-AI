@@ -3996,15 +3996,11 @@ function startNewChat(opts) {
   if (!opts || opts.updateUrl !== false) {
     try { history.pushState({}, '', location.pathname); } catch {}
   }
-  // Create the conversation on the server right away so it shows up in the
-  // sidebar immediately, instead of only appearing after the first message.
-  fetch('/api/conversations', { method: 'POST' })
-    .then(r => r.json())
-    .then(d => {
-      if (d.id) activeConvId = d.id;
-      loadConversationList();
-    })
-    .catch(() => { loadConversationList(); }); // still refresh list even if this failed
+  // No conversation is created on the server here anymore — it now only
+  // gets created once the first real message is sent (see streamReply()),
+  // so an empty "New chat" entry never shows up in the sidebar before the
+  // person has actually typed anything.
+  loadConversationList();
 }
 
 // Keep the address bar in sync with Back/Forward navigation between chats.
