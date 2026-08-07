@@ -2449,6 +2449,10 @@ PAGE = r"""<!DOCTYPE html>
     color:var(--text); border-radius:8px; padding:10px; font-size:13px; cursor:pointer;
     font-family:inherit; margin-bottom:8px; }
   #share-native-btn:hover { border-color:var(--accent); color:var(--accent); }
+  #share-qr-image-btn, #download-qr-btn { background:var(--panel); border:1px solid var(--border);
+    color:var(--text); border-radius:8px; padding:10px; font-size:12.5px; cursor:pointer;
+    font-family:inherit; margin-bottom:8px; }
+  #share-qr-image-btn:hover, #download-qr-btn:hover { border-color:var(--accent); color:var(--accent); }
   #share-revoke-btn { width:100%; background:none; border:1px solid var(--border);
     color:#ef4444; border-radius:8px; padding:10px; font-size:12.5px; cursor:pointer;
     font-family:inherit; margin-bottom:8px; }
@@ -2886,6 +2890,10 @@ PAGE = r"""<!DOCTYPE html>
       </div>
     </div>
     <button id="share-native-btn" type="button">📤 Share via…</button>
+    <div style="display:flex;gap:8px;">
+      <button id="share-qr-image-btn" type="button" style="flex:1;">🖼 Share QR Code</button>
+      <button id="download-qr-btn" type="button" style="flex:1;">⬇ Download QR</button>
+    </div>
     <button id="share-revoke-btn" type="button">Stop sharing</button>
     <button id="share-close-btn" type="button">Close</button>
     <div id="share-status"></div>
@@ -4303,6 +4311,117 @@ if (shareNativeBtn) shareNativeBtn.addEventListener('click', async () => {
     catch (e) { if (e && e.name === 'AbortError') return; }
   }
   shareCopyBtn.click();
+});
+
+// Builds a single flattened PNG of the QR box (white background + QR +
+// centered logo) by compositing onto an offscreen canvas — this is what
+// both "Share QR Code" and "Download QR" actually send/save, so what you
+// see in the modal is exactly what gets shared.
+async function buildQrImageBlob() {
+  const qrBox = document.getElementById('share-qr-box');
+  const qrCanvasEl = document.querySelector('#share-qr-canvas canvas') ||
+                      document.querySelector('#share-qr-canvas img');
+  if (!qrBox || !qrCanvasEl) return null;
+
+  const size = 320; // export at higher res than the on-screen 220px box
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, size, size);
+
+  const pad = Math.round(size * 12 / 220);
+  const qrSize = size - pad * 2;
+  const qrSource = qrCanvasEl.tagName === 'CANVAS' ? qrCanvasEl : qrCanvasEl;
+  await new Promise((resolve) => {
+    if (qrCanvasEl.tagName === 'CANVAS') { ctx.drawImage(qrCanvasEl, pad, pad, qrSize, qrSize); resolve(); }
+    else {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => { ctx.drawImage(img, pad, pad, qrSize, qrSize); resolve(); };
+      img.onerror = resolve;
+      img.src = qrCanvasEl.src;
+    }
+  });
+
+  // Composite the center logo (white rounded square + icon), matching the
+  // on-screen #share-qr-logo overlay.
+  const logoSize = Math.round(size * 52 / 220);
+  const logoX = (size - logoSize) / 2, logoY = (size - logoSize) / 2;
+  const logoImg = document.querySelector('#share-qr-logo img');
+  await new Promise((resolve) => {
+    ctx.fillStyle = '#ffffff';
+    const r = 10;
+    ctx.beginPath();
+    ctx.moveTo(logoX + r, logoY);
+    ctx.arcTo(logoX + logoSize, logoY, logoX + logoSize, logoY + logoSize, r);
+    ctx.arcTo(logoX + logoSize, logoY + logoSize, logoX, logoY + logoSize, r);
+    ctx.arcTo(logoX, logoY + logoSize, logoX, logoY, r);
+    ctx.arcTo(logoX, logoY, logoX + logoSize, logoY, r);
+    ctx.closePath();
+    ctx.fill();
+    if (!logoImg) { resolve(); return; }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const inset = Math.round(logoSize * 0.12);
+      ctx.drawImage(img, logoX + inset, logoY + inset, logoSize - inset * 2, logoSize - inset * 2);
+      resolve();
+    };
+    img.onerror = resolve;
+    img.src = logoImg.src;
+  });
+
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+}
+
+const shareQrImageBtn = document.getElementById('share-qr-image-btn');
+const downloadQrBtn   = document.getElementById('download-qr-btn');
+
+if (shareQrImageBtn) shareQrImageBtn.addEventListener('click', async () => {
+  const orig = shareQrImageBtn.textContent;
+  shareQrImageBtn.textContent = 'Preparing…';
+  try {
+    const blob = await buildQrImageBlob();
+    if (!blob) { shareQrImageBtn.textContent = orig; return; }
+    const file = new File([blob], 'mythic-ai-qr.png', { type: 'image/png' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: 'Mythic AI — scan to open my chat' });
+    } else if (navigator.share) {
+      // Some browsers support navigator.share but not file sharing —
+      // fall back to sharing the link instead of failing silently.
+      await navigator.share({ title: 'Mythic AI chat', url: shareLinkInput.value });
+    } else {
+      // No native share support at all (most desktop browsers) — download instead.
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'mythic-ai-qr.png';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    }
+  } catch (e) {
+    if (!(e && e.name === 'AbortError')) console.warn('QR share failed:', e);
+  } finally {
+    shareQrImageBtn.textContent = orig;
+  }
+});
+
+if (downloadQrBtn) downloadQrBtn.addEventListener('click', async () => {
+  const orig = downloadQrBtn.textContent;
+  downloadQrBtn.textContent = 'Preparing…';
+  try {
+    const blob = await buildQrImageBlob();
+    if (!blob) { downloadQrBtn.textContent = orig; return; }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'mythic-ai-qr.png';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.warn('QR download failed:', e);
+  } finally {
+    downloadQrBtn.textContent = orig;
+  }
 });
 
 // shareRevokeBtn is hidden in openInviteModal() — the invite link is static
