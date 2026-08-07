@@ -818,6 +818,83 @@ def get_or_create_owner_id(preferred_id=None):
             print(f"[owner] could not persist owner id to disk: {e}")
         return oid
 
+
+# --- Per-account unique links (one distinct URL per visitor's own account) --
+# The /invite/<code> link above intentionally sends EVERY visitor into one
+# shared "owner" account/history — useful if you want a single conversation
+# thread anyone can add to. This is the opposite: each browser/account gets
+# its OWN permanent, unique URL (…/a/<token>) that always logs back into
+# THAT SPECIFIC account's private chats — nobody else's. Bookmarking or
+# sharing that link only ever opens the same one account, not a fresh one.
+_ACCOUNT_TOKENS_FILE = _os.path.join(_DATA_DIR, "account_tokens.json")
+_account_tokens_lock = threading.Lock()
+
+
+def _load_account_tokens():
+    if _os.path.exists(_ACCOUNT_TOKENS_FILE):
+        try:
+            with open(_ACCOUNT_TOKENS_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_account_tokens(data):
+    try:
+        with open(_ACCOUNT_TOKENS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"[account-token] could not persist tokens to disk: {e}")
+
+
+def get_or_create_account_token(user_id):
+    """Returns this account's permanent unique token, creating one on first
+    call. Same token forever for the same user_id — the URL never changes
+    on redeploy/restart, since it's persisted to disk/Supabase like the
+    invite code and owner id above."""
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"account_tokens?user_id=eq.{user_id}&select=token"),
+                              headers=sb_headers(), timeout=10)
+            if r.status_code == 200 and r.json():
+                return r.json()[0]["token"]
+        except Exception as e:
+            print(f"[account-token] Supabase read failed: {e} — falling back to local file.")
+
+    with _account_tokens_lock:
+        tokens = _load_account_tokens()
+        # tokens maps token -> user_id; do a reverse lookup for existing token
+        for tok, uid in tokens.items():
+            if uid == user_id:
+                return tok
+        new_token = uuid.uuid4().hex[:16]
+        tokens[new_token] = user_id
+        _save_account_tokens(tokens)
+
+    if SUPABASE_URL:
+        try:
+            requests.post(sb("account_tokens"), headers=sb_headers(),
+                          json={"token": new_token, "user_id": user_id}, timeout=10)
+        except Exception as e:
+            print(f"[account-token] Supabase write failed: {e} — token still works via local file.")
+
+    return new_token
+
+
+def resolve_account_token(token):
+    """Returns the user_id this token belongs to, or None if unknown."""
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"account_tokens?token=eq.{token}&select=user_id"),
+                              headers=sb_headers(), timeout=10)
+            if r.status_code == 200 and r.json():
+                return r.json()[0]["user_id"]
+        except Exception as e:
+            print(f"[account-token] Supabase resolve failed: {e} — falling back to local file.")
+    tokens = _load_account_tokens()
+    return tokens.get(token)
+
 # --- Public API keys ("aarav-...") --------------------------------------------
 # Lets other apps/people call YOUR Mythic AI like a hosted API (OpenAI-style),
 # authenticated with a personal key instead of the free chat UI. Keys are
@@ -2263,44 +2340,7 @@ PAGE = r"""<!DOCTYPE html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Mythic AI">
-
-<!-- SEO -->
-<title>Mythic AI — Free AI Chat Assistant by Aarav Singh</title>
-<meta name="description" content="Mythic AI is a free AI chatbot for asking questions, generating images, writing code, studying, and getting instant answers — no signup required.">
-<meta name="keywords" content="Mythic AI, AI chatbot, free AI chat, AI assistant, chat with AI, image generation, AI homework help, AI code assistant">
-<meta name="author" content="Aarav Singh">
-<link rel="canonical" href="{{CANONICAL_URL}}">
-<meta name="robots" content="index, follow">
-
-<!-- Open Graph (Facebook, LinkedIn, WhatsApp previews) -->
-<meta property="og:type" content="website">
-<meta property="og:title" content="Mythic AI — Free AI Chat Assistant">
-<meta property="og:description" content="Ask anything, generate images, get homework help, or just chat — free, no signup required.">
-<meta property="og:image" content="{{CANONICAL_URL}}icon-512.png">
-<meta property="og:url" content="{{CANONICAL_URL}}">
-<meta property="og:site_name" content="Mythic AI">
-
-<!-- Twitter Card -->
-<meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Mythic AI — Free AI Chat Assistant">
-<meta name="twitter:description" content="Ask anything, generate images, get homework help, or just chat — free, no signup required.">
-<meta name="twitter:image" content="{{CANONICAL_URL}}icon-512.png">
-
-<!-- Structured data so Google understands what this site is -->
-<script type="application/ld+json">
-{
-  "@context": "https://schema.org",
-  "@type": "WebApplication",
-  "name": "Mythic AI",
-  "url": "{{CANONICAL_URL}}",
-  "applicationCategory": "Chatbot",
-  "operatingSystem": "Any",
-  "description": "Mythic AI is a free AI chatbot for asking questions, generating images, writing code, studying, and getting instant answers.",
-  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-  "author": { "@type": "Person", "name": "Aarav Singh" }
-}
-</script>
-
+<meta name="description" content="Mythic AI - Smart AI assistant by Aarav Singh">
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" type="image/png" sizes="192x192" href="/icon.png">
 <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
@@ -2309,9 +2349,9 @@ PAGE = r"""<!DOCTYPE html>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&family=Noto+Sans+Devanagari:wght@400;600&display=swap" rel="stylesheet">
+<title>Mythic AI</title>
 <style>
   :root {
-
     --bg:#1a1a1a; --panel:#2a2a2a; --border:#3a3a3a;
     --text:#ececec; --muted:#8e8ea0; --accent:#10a37f;
     --accent-dim:#1a3a30; --user-bubble:#2a2a2a; --user-text:#ececec;
@@ -2828,8 +2868,8 @@ PAGE = r"""<!DOCTYPE html>
 
 <div id="share-modal-overlay">
   <div id="share-modal">
-    <h3>🔗 Invite link</h3>
-    <p class="sub">One permanent link for the whole app — not tied to any single chat. Share it with anyone; each person who opens it gets their own private conversation with Mythic AI, no login required.</p>
+    <h3>🔗 Your account link</h3>
+    <p class="sub">A permanent, unique link for THIS account — nobody else's. Bookmark it to always get back to these exact chats from any device, or share it with someone you want to give access to this specific account.</p>
     <div id="share-link-row">
       <input type="text" id="share-link-input" readonly>
       <button id="share-open-btn" type="button" title="Open in a new tab">↗</button>
@@ -3307,13 +3347,8 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', _setAppHeight);
 }
 
-// Declared early — referenced by code that runs during initial page load,
-// before the original later declaration would have executed (which caused
-// "Cannot access 'isIOS' before initialization" errors).
+// ─── Declare all key global variables at the top to avoid TDZ errors ─────
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-
-// Same reasoning as isIOS above — moved up because syncModeTabLocks() can
-// run during initial page load, before the old declaration point.
 const modeTabs = document.querySelectorAll('.mode-tab[data-mode]');
 
 const messagesWrap = document.getElementById('messages-wrap');
@@ -3883,11 +3918,19 @@ function startNewChat(opts) {
   activeConvId = null;
   messagesEl.innerHTML = '';
   showEmptyState();
-  loadConversationList();
   refreshShareBtnState();
   if (!opts || opts.updateUrl !== false) {
     try { history.pushState({}, '', location.pathname); } catch {}
   }
+  // Create the conversation on the server right away so it shows up in the
+  // sidebar immediately, instead of only appearing after the first message.
+  fetch('/api/conversations', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      if (d.id) activeConvId = d.id;
+      loadConversationList();
+    })
+    .catch(() => { loadConversationList(); }); // still refresh list even if this failed
 }
 
 // Keep the address bar in sync with Back/Forward navigation between chats.
@@ -4197,7 +4240,7 @@ function closeShareModal() { shareModalOverlay.classList.remove('show'); }
 function openInviteModal() {
   shareLinkInput.value = '';
   shareLinkInput.title = '';
-  shareStatusEl.textContent = 'Loading your invite link…';
+  shareStatusEl.textContent = 'Loading your account link…';
   shareModalOverlay.classList.add('show');
   shareBtn.classList.add('active');
   if (shareRevokeBtn) shareRevokeBtn.style.display = 'none';  // nothing to revoke — it's a static link
@@ -4205,13 +4248,13 @@ function openInviteModal() {
     const link = d.invite_url || (location.origin + '/');
     shareLinkInput.value = link;
     shareLinkInput.title = link;
-    shareStatusEl.textContent = 'Anyone who opens this link can chat with Mythic AI right away — ' +
-      'no login needed. Each person gets their own private conversation history; nobody sees yours.';
+    shareStatusEl.textContent = 'This link is unique to THIS account — opening it always ' +
+      'comes back to these exact chats, on any device. It does not open a fresh/different account.';
     requestAnimationFrame(() => { shareLinkInput.focus(); shareLinkInput.select(); });
     renderInviteQrCode(link);
   }).catch(() => {
     shareLinkInput.value = location.origin + '/';
-    shareStatusEl.textContent = 'Could not generate a custom link, showing the site link instead.';
+    shareStatusEl.textContent = 'Could not generate your account link, showing the site link instead.';
     renderInviteQrCode(location.origin + '/');
   });
 }
@@ -4582,8 +4625,36 @@ if (apiUsageCreateConfirmBtn) apiUsageCreateConfirmBtn.addEventListener('click',
     const data = await res.json();
     if (data.api_key) {
       apiUsageNewKeyResultEl.innerHTML =
-        '<div style="background:#0f1115;border:1px solid #1a9e5c;border-radius:8px;padding:12px;margin-bottom:14px;font-family:monospace;font-size:13px;word-break:break-all;color:#7be3ab;">' + data.api_key + '</div>' +
-        '<div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again.</div>';
+        '<div style="background:#0f1115;border:1px solid #1a9e5c;border-radius:8px;padding:12px;margin-bottom:14px;">' +
+          '<div style="display:flex;gap:8px;align-items:center;">' +
+            '<input type="text" id="api-usage-new-key-input" readonly value="' + data.api_key.replace(/"/g, '&quot;') + '" ' +
+              'style="flex:1;background:#0f1115;border:1px solid #1a9e5c;border-radius:6px;padding:8px;font-family:monospace;font-size:12px;color:#7be3ab;box-sizing:border-box;min-width:0;">' +
+            '<button type="button" id="api-usage-new-key-copy-btn" ' +
+              'style="background:#1a9e5c;color:#04140b;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;white-space:nowrap;">Copy</button>' +
+          '</div>' +
+        '</div>' +
+        '<div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again. (Double-clicking to select may only grab part of the key due to the hyphens — use the Copy button instead.)</div>';
+      const newKeyCopyBtn = document.getElementById('api-usage-new-key-copy-btn');
+      if (newKeyCopyBtn) {
+        newKeyCopyBtn.addEventListener('click', async () => {
+          const keyInput = document.getElementById('api-usage-new-key-input');
+          if (!keyInput) return;
+          try {
+            keyInput.select();
+            document.execCommand('copy');
+            newKeyCopyBtn.textContent = '✓ Copied!';
+            setTimeout(() => { newKeyCopyBtn.textContent = 'Copy'; }, 2500);
+          } catch (e) {
+            try {
+              await navigator.clipboard.writeText(keyInput.value);
+              newKeyCopyBtn.textContent = '✓ Copied!';
+              setTimeout(() => { newKeyCopyBtn.textContent = 'Copy'; }, 2500);
+            } catch (e2) {
+              alert('Copy failed. Try selecting the whole box manually (click once, then Ctrl+A, Ctrl+C).');
+            }
+          }
+        });
+      }
       refreshApiUsageOverlay();
       loadApiUsageSummary();
     } else if (data.error) {
@@ -4694,6 +4765,9 @@ const apiKeysShortcutBtn = document.getElementById('api-keys-shortcut-btn');
 if (apiKeysShortcutBtn) apiKeysShortcutBtn.addEventListener('click', () => {
   openApiUsageOverlay();
 });
+
+// ─── Analytics removed - use Stats button in chat instead ─────────────────
+
 settingsCloseBtn.addEventListener('click', () => { saveSettings(); settingsModalOverlay.style.display = 'none'; });
 settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsModalOverlay) { saveSettings(); settingsModalOverlay.style.display = 'none'; } });
 
@@ -5253,8 +5327,7 @@ async function _doSubscribe(reg) {
   } catch (err) { console.warn('[Push] subscribe error:', err); }
 }
 
-// isIOS is declared near the top of this script now — see there.
-
+// Detect if running on iPhone/iOS — moved to top-level scope
 if ('serviceWorker' in navigator && !isIOS) {
   // Service workers are unreliable on iOS, skip on iPhone
   navigator.serviceWorker.register('/sw.js', { scope: '/' })
@@ -6150,7 +6223,7 @@ function requirePassword(action) {
 // selected. If VIP isn't unlocked yet, switching to it goes through the
 // existing VIP password modal exactly once (via showVipModal / vipUnlocked) —
 // after that, no repeated password prompts, just the model requirement.
-// modeTabs is declared near the top of this script now — see there.
+// modeTabs now declared at top-level scope
 function setActiveModeTab(mode) {
   currentMode = mode;
   modeTabs.forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
@@ -6543,15 +6616,15 @@ async function runCoworkTask(task) {
   }
 }
 
-// ─── Starred view toggle ─────────────────────────────────────────────────────
+// ─── Starred view toggle (no VIP required) ───────────────────────────────────
 const archivedToggleBtn = document.getElementById('archived-toggle-btn');
-if (archivedToggleBtn) archivedToggleBtn.addEventListener('click', () => requirePassword(() => {
+if (archivedToggleBtn) archivedToggleBtn.addEventListener('click', () => {
   showingStarredOnly = !showingStarredOnly;
   archivedToggleBtn.textContent = showingStarredOnly ? '💬 All Chats' : '⭐ Starred';
   archivedToggleBtn.style.color = showingStarredOnly ? 'var(--accent)' : '';
   archivedToggleBtn.style.borderColor = showingStarredOnly ? 'var(--accent)' : 'var(--border)';
   loadConversationList();
-}));
+});
 
 // ─── Message bookmarks (stored per-conversation in localStorage) ──────────────
 function getBookmarks() {
@@ -6601,7 +6674,7 @@ function showBookmarksModal() {
   overlay.querySelector('#bm-close').addEventListener('click', () => overlay.remove());
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 }
-if (bookmarksBtn) bookmarksBtn.addEventListener('click', () => requirePassword(showBookmarksModal));
+if (bookmarksBtn) bookmarksBtn.addEventListener('click', showBookmarksModal);
 
 // ─── Chat statistics ────────────────────────────────────────────────────────
 const statsBtn = document.getElementById('stats-btn');
@@ -6641,7 +6714,7 @@ async function showStatsModal() {
   overlay.querySelector('#stats-close').addEventListener('click', () => overlay.remove());
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 }
-if (statsBtn) statsBtn.addEventListener('click', () => requirePassword(showStatsModal));
+if (statsBtn) statsBtn.addEventListener('click', showStatsModal);
 
 // ─── Bookmark button on AI/user messages ───────────────────────────────────
 let _msgIndexCounter = 0;
@@ -7003,43 +7076,6 @@ def health_check():
     return jsonify({"status": "ok", "time": time.time()})
 
 
-@app.route("/robots.txt")
-def robots_txt():
-    """Tells search engine crawlers what they're allowed to index. Without
-    this file, some crawlers are cautious about indexing the site at all.
-    Private/API/user-data routes are excluded on purpose — only the public
-    landing page and shared-chat pages should ever show up in search results."""
-    lines = [
-        "User-agent: *",
-        "Allow: /$",
-        "Allow: /share/",
-        "Disallow: /api/",
-        "Disallow: /v1/",
-        "Disallow: /invite/",
-        "Disallow: /analytics",
-        "Disallow: /api-usage",
-        f"Sitemap: {request.host_url}sitemap.xml",
-    ]
-    return Response("\n".join(lines), mimetype="text/plain")
-
-
-@app.route("/sitemap.xml")
-def sitemap_xml():
-    """A minimal sitemap listing the pages that are actually meant to be
-    public and indexable. Submit this URL in Google Search Console
-    (https://search.google.com/search-console) — that's the step that
-    actually gets a site crawled and considered for ranking; this file
-    alone doesn't guarantee inclusion or any particular ranking."""
-    base = request.host_url.rstrip("/")
-    urls = [base + "/"]
-    xml = ['<?xml version="1.0" encoding="UTF-8"?>',
-           '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
-    for u in urls:
-        xml.append(f"  <url><loc>{u}</loc></url>")
-    xml.append("</urlset>")
-    return Response("\n".join(xml), mimetype="application/xml")
-
-
 @app.route("/manifest.json")
 def pwa_manifest():
     manifest = {
@@ -7192,30 +7228,41 @@ def favicon():
 @app.route("/")
 @login_required
 def index():
-    canonical = request.host_url  # e.g. https://your-app.onrender.com/
-    return Response(PAGE.replace("{{CANONICAL_URL}}", canonical), mimetype="text/html; charset=utf-8")
+    return Response(PAGE, mimetype="text/html; charset=utf-8")
 
 
 @app.route("/api/invite-link", methods=["GET"])
 @login_required
 def api_invite_link():
-    code = get_or_create_invite_code()
-    # Adopt the caller's own existing user_id as the "owner" account the
-    # first time this is ever called, so it's YOUR real chat history that
-    # gets shared via the link — not a fresh empty account.
-    get_or_create_owner_id(preferred_id=current_username())
-    return jsonify({"invite_url": request.host_url.rstrip("/") + "/invite/" + code})
+    # Each account gets its OWN unique, permanent link (…/a/<token>) that
+    # always logs back into THIS SPECIFIC account's private chats — not a
+    # single link shared by everyone. Same token every time for the same
+    # account (persisted — see get_or_create_account_token), so it never
+    # changes across reloads/redeploys.
+    token = get_or_create_account_token(current_username())
+    return jsonify({"invite_url": request.host_url.rstrip("/") + "/a/" + token})
+
+
+@app.route("/a/<token>")
+def account_link_landing(token):
+    # Opens the ONE specific account this token belongs to — created the
+    # first time that account visited /api/invite-link. Unknown/invalid
+    # tokens just fall through to a normal fresh anonymous session rather
+    # than erroring, so a broken/copied-wrong link still lands somewhere
+    # usable instead of a dead page.
+    user_id = resolve_account_token(token)
+    if user_id:
+        session["user_id"] = user_id
+        session.permanent = True
+    return Response(PAGE, mimetype="text/html; charset=utf-8")
 
 
 @app.route("/invite/<code>")
 def invite_landing(code):
-    # Anyone opening this link gets logged into the OWNER's account, so they
-    # see and can add to the same chat history — this is an intentional
-    # shared-account link, not a per-visitor anonymous session like the bare
-    # domain gives. The code itself isn't checked against anything (there's
-    # no per-invite access control here) — treat this link as equivalent to
-    # sharing your password, and only send it to people you trust with full
-    # access to your chats.
+    # Legacy shared-account link (everyone who opens it lands in the SAME
+    # owner account) — kept working for any old links already handed out,
+    # but no longer surfaced anywhere in the UI. The 🔗 button now issues
+    # the per-account /a/<token> links above instead.
     session["user_id"] = get_or_create_owner_id()
     session.permanent = True
     return Response(PAGE, mimetype="text/html; charset=utf-8")
@@ -7469,7 +7516,34 @@ async function doCreateKey() {
     const data = await res.json();
     if (data.api_key) {
       document.getElementById('new-key-result').innerHTML =
-        '<div class="new-key-box">' + data.api_key + '</div><div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again.</div>';
+        '<div class="new-key-box" style="display:flex;gap:8px;align-items:center;">' +
+          '<input type="text" id="standalone-new-key-input" readonly value="' + data.api_key.replace(/"/g, '&quot;') + '" ' +
+            'style="flex:1;background:transparent;border:none;color:#7be3ab;font-family:monospace;font-size:13px;min-width:0;">' +
+          '<button type="button" id="standalone-new-key-copy-btn" ' +
+            'style="background:#1a9e5c;color:#04140b;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;white-space:nowrap;">Copy</button>' +
+        '</div>' +
+        '<div style="font-size:12px;color:#9a9ea6;margin-bottom:10px;">Copy this now — it will not be shown again. (Use the Copy button — double-clicking to select may only grab part of the key due to the hyphens.)</div>';
+      const stCopyBtn = document.getElementById('standalone-new-key-copy-btn');
+      if (stCopyBtn) {
+        stCopyBtn.addEventListener('click', async () => {
+          const keyInput = document.getElementById('standalone-new-key-input');
+          if (!keyInput) return;
+          try {
+            keyInput.select();
+            document.execCommand('copy');
+            stCopyBtn.textContent = '✓ Copied!';
+            setTimeout(() => { stCopyBtn.textContent = 'Copy'; }, 2500);
+          } catch (e) {
+            try {
+              await navigator.clipboard.writeText(keyInput.value);
+              stCopyBtn.textContent = '✓ Copied!';
+              setTimeout(() => { stCopyBtn.textContent = 'Copy'; }, 2500);
+            } catch (e2) {
+              alert('Copy failed. Click once inside the box, then Ctrl+A, Ctrl+C.');
+            }
+          }
+        });
+      }
       loadKeys();
     } else if (data.error) {
       alert(data.error);
@@ -8243,6 +8317,19 @@ def api_list_conversations():
     return jsonify({"conversations": convs})
 
 
+@app.route("/api/conversations", methods=["POST"])
+@login_required
+def api_create_conversation():
+    """Creates an empty 'New chat' conversation immediately, so it shows up
+    in the sidebar right away instead of only appearing after the first
+    message is sent. The conversation carries no messages yet — sending the
+    first message into it works exactly the same as any other conversation."""
+    username = current_username()
+    conv_id = str(uuid.uuid4())
+    save_conversation(username, conv_id, {"title": "New chat", "messages": []})
+    return jsonify({"id": conv_id, "title": "New chat"})
+
+
 # Patterns that identify a conversation as internal-tooling leakage rather
 # than a real chat — e.g. old follow-up-suggestion or tone/length-prefix
 # requests saved before the ephemeral-request fix existed. Matched against
@@ -8510,9 +8597,17 @@ def api_generate_title(conv_id):
         return jsonify({"error": "no text content to summarize"}), 400
 
     title_prompt = [{"role": "user", "parts": [{"text":
-        "Write a short chat title (max 6 words, no quotes, no trailing "
-        "punctuation, plain text only) that summarizes this conversation:\n\n"
-        f"{excerpt}"
+        "Below is a snippet of a chat conversation. Write ONE short, specific "
+        "title (1-3 words) describing what the conversation is actually "
+        "ABOUT — not a description of your task, not the words 'chat', "
+        "'title', or 'conversation' themselves. No quotes, no punctuation "
+        "at the end, plain text only. Prefer a simple category-style label "
+        "when that fits.\n\n"
+        "Examples:\n"
+        "- If the user says 'hi' and gets a greeting back → 'Greeting'\n"
+        "- If they ask about Python loops → 'Python Loops'\n"
+        "- If they discuss weekend plans → 'Weekend Plans'\n\n"
+        f"Conversation:\n{excerpt}\n\nTitle:"
     }]}]
     data = request.get_json(silent=True) or {}
     user_groq_key = (data.get("groq_api_key") or "").strip()
@@ -8531,6 +8626,23 @@ def api_generate_title(conv_id):
     # commentary despite instructions — truncate rather than reject outright,
     # so a slightly-verbose reply still produces a usable title.
     raw_title = raw_title.split("\n")[0].strip()
+    raw_title = re.sub(r'^Title:\s*', '', raw_title, flags=re.IGNORECASE).strip()
+
+    # Safety filter: reject titles that describe the TASK instead of the
+    # conversation's actual content (the model sometimes echoes back
+    # phrases like "Generating Chat Titles" or "Chat Title" for very short/
+    # generic exchanges like a bare "hi"). Fall back to a sensible default
+    # derived from the first user message instead of saving junk.
+    _meta_phrases = ("generating chat title", "chat title", "conversation title",
+                      "title generation", "generate title", "untitled")
+    if not raw_title or any(p in raw_title.lower() for p in _meta_phrases):
+        first_user_text = ""
+        for m in messages:
+            if m.get("role") == "user":
+                first_user_text = "".join(p.get("text", "") for p in m.get("parts", []) if "text" in p)
+                break
+        raw_title = (first_user_text[:40].strip() or "New chat")
+
     if not raw_title:
         return jsonify({"status": "unchanged", "title": conv.get("title", "New chat")})
 
@@ -8767,22 +8879,25 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
     if not user_msg and not ai_reply:
         return "New chat"
 
-    # Short greetings ("hi", "hello", "hey", etc.) are common and the model
-    # sometimes mishandles them at low token budgets — it can echo the
-    # "User: ... / Assistant: ..." prompt scaffold back verbatim instead of
-    # writing a real title. Handle these directly instead of guessing with
-    # an AI call, so greetings always get a clean, predictable title.
-    _GREETING_RE = re.compile(
-        r'^(hi+|hello+|hey+|yo|sup|namaste|hola|salaam|hii+|helo+|good\s?morning|'
-        r'good\s?afternoon|good\s?evening)[\s!.,?]*$', re.IGNORECASE
-    )
-    if _GREETING_RE.match(user_msg):
+    # Deterministic check for simple greetings — guarantees the title is
+    # always exactly "Greeting" for these, instead of trusting the AI to
+    # follow that instruction (which can occasionally hallucinate an
+    # unrelated title instead).
+    greeting_only = re.sub(r'[^a-z]', '', user_msg.lower())
+    _GREETING_WORDS = {
+        "hi", "hii", "hiii", "hello", "hellooo", "hey", "heyy", "heyyy",
+        "yo", "sup", "hola", "namaste", "hii there", "helloo",
+    }
+    if greeting_only in _GREETING_WORDS:
         return "Greeting"
 
     prompt = (
-        "Generate a short, natural chat title (3-6 words, no quotes, no punctuation "
-        "at the end, no emoji, title case) that summarizes what this conversation is "
-        "about. Reply with ONLY the title text, nothing else.\n\n"
+        "Generate a short, natural chat title (1-4 words, no quotes, no punctuation "
+        "at the end, no emoji, title case) that summarizes what this SPECIFIC "
+        "conversation is about. Do NOT describe the task of generating a title — "
+        "write about the actual topic discussed. Prefer a simple category-style "
+        "label when that fits — for a simple greeting like 'hi'/'hello', use "
+        "'Greeting'. Reply with ONLY the title text, nothing else.\n\n"
         f"User: {user_msg[:400]}\n"
         f"Assistant: {ai_reply[:400]}"
     )
@@ -8797,14 +8912,13 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
         title = title.split("\n")[0].strip()
         title = re.sub(r'^\[.*?\]\s*', '', title).strip()  # strip any leaked [Instructions: ...] / bracketed prefix
         title = re.sub(r'[.!?]+$', '', title).strip()
+        _meta_phrases = ("generating chat title", "chat title", "conversation title",
+                          "title generation", "generate title", "untitled")
         looks_bad = (
             len(title) < 3 or
             any(ch in title for ch in '[]"“”') or
             title.lower().startswith(('based on', 'here is', 'here\'s', 'sure,', 'title:')) or
-            # Model echoed the "User: .../ Assistant: ..." prompt scaffold
-            # back instead of writing an actual title (the exact bug that
-            # produced literal "User: hi" as a title).
-            re.match(r'^(user|assistant)\s*:', title, re.IGNORECASE) is not None
+            any(p in title.lower() for p in _meta_phrases)
         )
         if title and not looks_bad:
             return title[:60]
