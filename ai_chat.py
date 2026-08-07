@@ -334,6 +334,22 @@ app.config.update(
 )
 
 
+def get_public_origin():
+    """Returns the public-facing origin (scheme + host), forced to https for
+    any real domain. Render/Vercel/most hosts terminate HTTPS at their own
+    proxy in front of this app, so Flask's own request.url_root/host_url
+    reports plain http:// even though the site is actually only ever
+    reachable over https — that mismatch is what causes sitemap.xml,
+    robots.txt, canonical/OG tags, and invite/share links to show http://
+    instead of https://. Only localhost/127.0.0.1 (local dev) keeps http."""
+    origin = request.host_url.rstrip("/")
+    host = request.host.split(":")[0]
+    if origin.startswith("http://") and host not in ("localhost", "127.0.0.1"):
+        origin = "https://" + origin[len("http://"):]
+    return origin
+
+
+
 # ── Reasoning/task modes — pure prompt-engineering, no extra APIs needed ────
 # Selected client-side and sent as `mode` with each /api/chat call; appended
 # to the system prompt for that request only.
@@ -7278,7 +7294,7 @@ def robots_txt():
     per-account invite links, and internal admin/dashboard pages are
     disallowed since they're either private (unique to one account) or not
     meaningful search results — only the public home page should be indexed."""
-    origin = request.host_url.rstrip("/")
+    origin = get_public_origin()
     lines = [
         "User-agent: *",
         "Allow: /$",
@@ -7302,7 +7318,7 @@ def sitemap_xml():
     session, so there's really only one meaningful public URL (the home
     page) worth listing for crawlers. lastmod is set to "today" on every
     request since the app's content is dynamic/always current."""
-    origin = request.host_url.rstrip("/")
+    origin = get_public_origin()
     lastmod = datetime.date.today().isoformat()
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -7441,7 +7457,7 @@ def render_page():
     current request's host — shared by every route that returns the main
     app shell (/, /invite/<token>, /legacy-invite/<code>) so SEO tags never
     leak the literal __CANONICAL_URL__ placeholder text."""
-    origin = request.host_url.rstrip("/")
+    origin = get_public_origin()
     html = PAGE.replace("__CANONICAL_URL__", origin + "/").replace("__CANONICAL_ORIGIN__", origin)
     return Response(html, mimetype="text/html; charset=utf-8")
 
@@ -7461,7 +7477,7 @@ def api_invite_link():
     # account (persisted — see get_or_create_account_token), so it never
     # changes across reloads/redeploys.
     token = get_or_create_account_token(current_username())
-    return jsonify({"invite_url": request.host_url.rstrip("/") + "/invite/" + token})
+    return jsonify({"invite_url": get_public_origin() + "/invite/" + token})
 
 
 @app.route("/invite/<token>")
@@ -8685,7 +8701,7 @@ def api_duplicate_conversation(conv_id):
 
 
 def _share_url_for(share_id):
-    return request.host_url.rstrip("/") + "/share/" + share_id
+    return get_public_origin() + "/share/" + share_id
 
 
 @app.route("/api/conversations/<conv_id>/share", methods=["GET"])
@@ -10209,7 +10225,7 @@ def generate_image():
                     if len(raw) > MAX_UPLOAD_BYTES:
                         return jsonify({"error": "image too large (max 8MB)"}), 400
                     img_id = _store_temp_image(raw, mime_type)
-                    base_url = request.host_url.rstrip('/')
+                    base_url = get_public_origin()
                     image_urls = [f"{base_url}/api/temp-image/{img_id}"]
                 except Exception:
                     pass
