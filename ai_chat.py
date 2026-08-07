@@ -2340,7 +2340,56 @@ PAGE = r"""<!DOCTYPE html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Mythic AI">
-<meta name="description" content="Mythic AI - Smart AI assistant by Aarav Singh">
+
+<!-- Primary SEO -->
+<title>Mythic AI — Free Smart AI Chat Assistant</title>
+<meta name="description" content="Mythic AI is a free, smart AI chat assistant for questions, writing, coding, image generation, homework help, and more — built by Aarav Singh.">
+<meta name="keywords" content="Mythic AI, AI chat assistant, free AI chatbot, AI assistant, Aarav Singh AI, AI image generator, AI homework helper, AI coding assistant">
+<meta name="author" content="Aarav Singh">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="__CANONICAL_URL__">
+
+<!-- Open Graph / Facebook / WhatsApp / LinkedIn -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Mythic AI">
+<meta property="og:title" content="Mythic AI — Free Smart AI Chat Assistant">
+<meta property="og:description" content="Chat, ask questions, generate images, get homework help, and more with Mythic AI — a free, smart AI assistant built by Aarav Singh.">
+<meta property="og:url" content="__CANONICAL_URL__">
+<meta property="og:image" content="__CANONICAL_ORIGIN__/icon-512.png">
+<meta property="og:image:width" content="512">
+<meta property="og:image:height" content="512">
+<meta property="og:locale" content="en_US">
+
+<!-- Twitter Card -->
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Mythic AI — Free Smart AI Chat Assistant">
+<meta name="twitter:description" content="Chat, ask questions, generate images, get homework help, and more with Mythic AI — a free, smart AI assistant.">
+<meta name="twitter:image" content="__CANONICAL_ORIGIN__/icon-512.png">
+
+<!-- Schema.org structured data — tells Google exactly what this site is -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "Mythic AI",
+  "alternateName": "Mythic AI Chat",
+  "url": "__CANONICAL_ORIGIN__/",
+  "description": "Mythic AI is a free, smart AI chat assistant for questions, writing, coding, image generation, and homework help.",
+  "applicationCategory": "Chatbot, Productivity",
+  "operatingSystem": "Any",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  },
+  "creator": {
+    "@type": "Person",
+    "name": "Aarav Singh"
+  },
+  "image": "__CANONICAL_ORIGIN__/icon-512.png"
+}
+</script>
+
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" type="image/png" sizes="192x192" href="/icon.png">
 <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
@@ -2349,7 +2398,6 @@ PAGE = r"""<!DOCTYPE html>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&family=Noto+Sans+Devanagari:wght@400;600&display=swap" rel="stylesheet">
-<title>Mythic AI</title>
 <style>
   :root {
     --bg:#1a1a1a; --panel:#2a2a2a; --border:#3a3a3a;
@@ -7224,6 +7272,50 @@ def pwa_manifest():
     )
 
 
+@app.route("/robots.txt")
+def robots_txt():
+    """Tells search engine crawlers what to index. Everything under /api/,
+    per-account invite links, and internal admin/dashboard pages are
+    disallowed since they're either private (unique to one account) or not
+    meaningful search results — only the public home page should be indexed."""
+    origin = request.host_url.rstrip("/")
+    lines = [
+        "User-agent: *",
+        "Allow: /$",
+        "Disallow: /api/",
+        "Disallow: /invite/",
+        "Disallow: /legacy-invite/",
+        "Disallow: /a/",
+        "Disallow: /share/",
+        "Disallow: /api-usage",
+        "Disallow: /analytics",
+        "Disallow: /claim-owner/",
+        "",
+        f"Sitemap: {origin}/sitemap.xml",
+    ]
+    return Response("\n".join(lines), mimetype="text/plain; charset=utf-8")
+
+
+@app.route("/sitemap.xml")
+def sitemap_xml():
+    """Minimal sitemap — this is a single-page chat app behind an anonymous
+    session, so there's really only one meaningful public URL (the home
+    page) worth listing for crawlers. lastmod is set to "today" on every
+    request since the app's content is dynamic/always current."""
+    origin = request.host_url.rstrip("/")
+    lastmod = datetime.date.today().isoformat()
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>{origin}/</loc>
+    <lastmod>{lastmod}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>"""
+    return Response(xml, mimetype="application/xml; charset=utf-8")
+
+
 def _make_mythic_icon_png(size=192):
     """Generate a real PNG icon for Mythic AI programmatically using only stdlib.
     Draws the teal rounded-rect background + white M-shape — no Pillow needed."""
@@ -7344,10 +7436,20 @@ def favicon():
                     headers={"Cache-Control": "public, max-age=604800"})
 
 
+def render_page():
+    """Serves PAGE with the canonical-URL placeholders filled in from the
+    current request's host — shared by every route that returns the main
+    app shell (/, /invite/<token>, /legacy-invite/<code>) so SEO tags never
+    leak the literal __CANONICAL_URL__ placeholder text."""
+    origin = request.host_url.rstrip("/")
+    html = PAGE.replace("__CANONICAL_URL__", origin + "/").replace("__CANONICAL_ORIGIN__", origin)
+    return Response(html, mimetype="text/html; charset=utf-8")
+
+
 @app.route("/")
 @login_required
 def index():
-    return Response(PAGE, mimetype="text/html; charset=utf-8")
+    return render_page()
 
 
 @app.route("/api/invite-link", methods=["GET"])
@@ -7373,7 +7475,7 @@ def account_link_landing(token):
     if user_id:
         session["user_id"] = user_id
         session.permanent = True
-    return Response(PAGE, mimetype="text/html; charset=utf-8")
+    return render_page()
 
 
 @app.route("/legacy-invite/<code>")
@@ -7384,7 +7486,7 @@ def invite_landing(code):
     # the per-account /invite/<token> links above instead.
     session["user_id"] = get_or_create_owner_id()
     session.permanent = True
-    return Response(PAGE, mimetype="text/html; charset=utf-8")
+    return render_page()
 
 
 # --- Claim owner status (needed on serverless hosts like Vercel) -------------
