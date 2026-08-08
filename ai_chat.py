@@ -7375,6 +7375,7 @@ def health_check():
 @app.route("/manifest.json")
 def pwa_manifest():
     manifest = {
+        "id": "/",
         "name": "Mythic AI",
         "short_name": "Mythic AI",
         "description": "Smart AI assistant by Aarav Singh",
@@ -7394,11 +7395,11 @@ def pwa_manifest():
         ],
         "shortcuts": [
             {"name": "New Chat", "short_name": "New Chat", "url": "/?action=new",
-             "description": "Start a new chat", "icons": [{"src": "/icon.png", "sizes": "192x192"}]},
+             "description": "Start a new chat", "icons": [{"src": "/icon-96.png", "sizes": "96x96"}]},
             {"name": "Generate Image", "short_name": "Image", "url": "/?action=image",
-             "description": "Jump straight to image generation", "icons": [{"src": "/icon.png", "sizes": "192x192"}]},
+             "description": "Jump straight to image generation", "icons": [{"src": "/icon-96.png", "sizes": "96x96"}]},
             {"name": "API Keys", "short_name": "API Keys", "url": "/api-usage",
-             "description": "Manage your API keys", "icons": [{"src": "/icon.png", "sizes": "192x192"}]},
+             "description": "Manage your API keys", "icons": [{"src": "/icon-96.png", "sizes": "96x96"}]},
         ],
     }
     return Response(
@@ -7535,24 +7536,22 @@ def _make_mythic_icon_png(size=192):
     return png
 
 
-_ICON_192_PNG = None
-_ICON_512_PNG = None
+_ICON_CACHE = {}
 
 def _get_icon(size):
-    global _ICON_192_PNG, _ICON_512_PNG
-    if size == 192:
-        if _ICON_192_PNG is None:
-            _ICON_192_PNG = _make_mythic_icon_png(192)
-        return _ICON_192_PNG
-    else:
-        if _ICON_512_PNG is None:
-            _ICON_512_PNG = _make_mythic_icon_png(512)
-        return _ICON_512_PNG
+    if size not in _ICON_CACHE:
+        _ICON_CACHE[size] = _make_mythic_icon_png(size)
+    return _ICON_CACHE[size]
 
 
 @app.route("/icon.png")
 def pwa_icon_192():
     return Response(_get_icon(192), mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+@app.route("/icon-96.png")
+def pwa_icon_96():
+    return Response(_get_icon(96), mimetype="image/png",
                     headers={"Cache-Control": "public, max-age=604800"})
 
 @app.route("/icon-512.png")
