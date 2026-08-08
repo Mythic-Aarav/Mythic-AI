@@ -334,39 +334,6 @@ app.config.update(
 )
 
 
-# --- CORS for the public /v1/ API only ----------------------------------------
-# The /v1/... endpoints (chat completions, image generation, code execution)
-# are the public, API-key-authenticated surface meant for OTHER apps to call
-# — including directly from browser JavaScript (e.g. a client-side fetch()
-# from someone else's website). Browsers block cross-origin fetch() calls
-# unless the server explicitly sends back Access-Control-Allow-Origin, which
-# is what was missing and caused "No 'Access-Control-Allow-Origin' header is
-# present on the requested resource" errors for anyone building against this
-# API from client-side JS.
-#
-# This is scoped ONLY to /v1/ on purpose: those routes authenticate via an
-# Authorization: Bearer <api_key> header (no cookies involved), so opening
-# them up to any origin is safe. The rest of the app (the main chat web UI)
-# uses session cookies and is deliberately left alone here — broadening CORS
-# there would risk cross-site request forgery against logged-in sessions.
-@app.after_request
-def _add_cors_headers(response):
-    if request.path.startswith("/v1/"):
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-        response.headers["Access-Control-Max-Age"] = "86400"
-    return response
-
-
-@app.route("/v1/<path:_any>", methods=["OPTIONS"])
-def _v1_cors_preflight(_any):
-    # Browsers send an OPTIONS "preflight" request before the real POST when
-    # a custom header (Authorization) is involved. Without a route to answer
-    # it, the preflight itself fails before your real request is ever sent.
-    return Response(status=204)
-
-
 def get_public_origin():
     """Returns the public-facing origin (scheme + host), forced to https for
     any real domain. Render/Vercel/most hosts terminate HTTPS at their own
@@ -3037,6 +3004,22 @@ PAGE = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<div id="clarify-modal-overlay" style="display:none;position:fixed;inset:0;background:#000000b3;z-index:300;align-items:center;justify-content:center;padding:16px;">
+  <div id="clarify-modal" style="background:#fff;color:#111;border-radius:14px;width:min(92vw,480px);max-height:80vh;overflow-y:auto;box-shadow:0 20px 60px #0006;">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 20px 6px;">
+      <h3 id="clarify-question" style="margin:0;font-size:17px;font-weight:600;">What's wrong right now?</h3>
+      <button id="clarify-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1;padding:4px;">×</button>
+    </div>
+    <div id="clarify-options" style="padding:8px 0 4px;"></div>
+    <div style="padding:12px 20px 18px;border-top:1px solid #eee;display:flex;align-items:center;gap:10px;">
+      <span style="color:#888;font-size:15px;">✎</span>
+      <input id="clarify-custom-input" type="text" placeholder="Something else"
+        style="flex:1;border:none;outline:none;font-size:15px;color:#333;background:transparent;">
+      <button id="clarify-skip-btn" style="border:1px solid #ddd;background:#fff;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;color:#555;">Skip</button>
+    </div>
+  </div>
+</div>
+
 <div id="settings-modal-overlay">
   <div id="settings-modal">
     <h3>Settings</h3>
@@ -4149,6 +4132,16 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
       if (aiTextNode && !aiTextNode.textContent.trim()) aiTextNode.textContent = '[Stopped]';
     } else {
       addMessage('error', 'Network error: ' + err.message);
+      askClarification({
+        question: "What's wrong right now?",
+        options: [
+          "Generation isn't working when I hit Enter",
+          "Replies are too slow",
+          "The reply doesn't match what I asked",
+        ],
+        onPick: (opt) => { streamReply({ message: "Trouble report: " + opt, regenerate: false }); },
+        onCustom: (text) => { streamReply({ message: text, regenerate: false }); },
+      });
     }
   } finally {
     setGenerating(false);
@@ -4525,6 +4518,80 @@ if (downloadQrBtn) downloadQrBtn.addEventListener('click', async () => {
 if (shareRevokeBtn) shareRevokeBtn.addEventListener('click', closeShareModal);
 
 const settingsBtn        = document.getElementById('settings-btn');
+// ─── Reusable "clarification" modal ──────────────────────────────────────────
+// Call askClarification({ question, options, onPick, onCustom, onSkip }) any
+// time the app needs a quick decision from the user instead of guessing.
+// - options: array of short strings, shown numbered (1-9), each also
+//   triggers via that number key
+// - Enter with nothing typed picks option 1 (matches the screenshot's
+//   "highlighted first row + return-arrow icon" behavior)
+// - typing something and pressing Enter (or clicking outside the list)
+//   calls onCustom with that free text instead
+// - Skip/✕/Escape calls onSkip if provided
+let _clarifyKeyHandler = null;
+
+function askClarification({ question, options, onPick, onCustom, onSkip }) {
+  const overlay = document.getElementById('clarify-modal-overlay');
+  const questionEl = document.getElementById('clarify-question');
+  const optionsEl = document.getElementById('clarify-options');
+  const customInput = document.getElementById('clarify-custom-input');
+  const closeBtn = document.getElementById('clarify-close-btn');
+  const skipBtn = document.getElementById('clarify-skip-btn');
+
+  questionEl.textContent = question || "What's wrong right now?";
+  optionsEl.innerHTML = '';
+  customInput.value = '';
+
+  options.forEach((opt, i) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:12px;padding:12px 20px;cursor:pointer;font-size:15px;' +
+      (i === 0 ? 'background:#f2f2f2;' : '');
+    row.innerHTML =
+      '<span style="width:22px;height:22px;border-radius:6px;background:' + (i === 0 ? '#e5e5e5' : 'transparent') +
+      ';display:flex;align-items:center;justify-content:center;font-size:13px;color:#666;flex-shrink:0;">' + (i + 1) + '</span>' +
+      '<span style="flex:1;color:#222;">' + opt.replace(/</g, '&lt;') + '</span>' +
+      (i === 0 ? '<span style="color:#aaa;font-size:16px;">⏎</span>' : '');
+    row.addEventListener('mouseenter', () => { row.style.background = '#f2f2f2'; });
+    row.addEventListener('mouseleave', () => { row.style.background = i === 0 ? '#f2f2f2' : 'transparent'; });
+    row.addEventListener('click', () => { closeClarification(); if (onPick) onPick(opt, i); });
+    optionsEl.appendChild(row);
+  });
+
+  function closeClarification() {
+    overlay.style.display = 'none';
+    if (_clarifyKeyHandler) { document.removeEventListener('keydown', _clarifyKeyHandler); _clarifyKeyHandler = null; }
+  }
+
+  closeBtn.onclick = () => { closeClarification(); if (onSkip) onSkip(); };
+  skipBtn.onclick = () => { closeClarification(); if (onSkip) onSkip(); };
+
+  customInput.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      const val = customInput.value.trim();
+      closeClarification();
+      if (val && onCustom) onCustom(val);
+      else if (!val && onPick) onPick(options[0], 0);  // bare Enter = first option
+    }
+  };
+
+  _clarifyKeyHandler = (e) => {
+    if (e.key === 'Escape') { closeClarification(); if (onSkip) onSkip(); return; }
+    if (document.activeElement === customInput) return;  // let typing work normally
+    const n = parseInt(e.key, 10);
+    if (n >= 1 && n <= options.length) {
+      closeClarification();
+      if (onPick) onPick(options[n - 1], n - 1);
+    } else if (e.key === 'Enter') {
+      closeClarification();
+      if (onPick) onPick(options[0], 0);
+    }
+  };
+  document.addEventListener('keydown', _clarifyKeyHandler);
+
+  overlay.style.display = 'flex';
+  setTimeout(() => customInput.focus(), 50);
+}
+
 const settingsModalOverlay=document.getElementById('settings-modal-overlay');
 const settingsCloseBtn   = document.getElementById('settings-close-btn');
 const accentColorInput   = document.getElementById('accent-color-input');
@@ -5699,12 +5766,24 @@ form.addEventListener('submit', async () => {
   // the same chat instead of always landing on a blank screen.
   const params = new URLSearchParams(location.search);
   const openId = params.get('open') || params.get('c');
+  const action = params.get('action');
   if (openId) {
     // Normalize the URL to ?c=<id> and open without pushing a duplicate
     // history entry (replaceState keeps Back from bouncing between the
     // raw ?open= link and the normalized ?c= one).
     history.replaceState({ conv: openId }, '', '?c=' + encodeURIComponent(openId));
     await openConversation(openId, { updateUrl: false });
+  } else if (action === 'new') {
+    // Opened via the "New Chat" home-screen long-press shortcut.
+    history.replaceState({}, '', location.pathname);
+    startNewChat();
+  } else if (action === 'image') {
+    // Opened via the "Generate Image" home-screen long-press shortcut —
+    // jump straight into image mode instead of the plain chat screen.
+    history.replaceState({}, '', location.pathname);
+    showEmptyState();
+    const imgBtn = document.getElementById('img-gen-btn');
+    if (imgBtn) imgBtn.click();
   } else {
     // Always start on a fresh New Chat screen otherwise, rather than
     // auto-reopening the last conversation — the sidebar list is still
@@ -7018,6 +7097,8 @@ document.addEventListener('keydown', e => {
   if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); showCommandPalette(); return; }
   if (mod && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); startNewChat(); return; }
   if (mod && e.key.toLowerCase() === 'b') { e.preventDefault(); sidebarToggle.click(); return; }
+  // Alt+M: jump straight to the message box from anywhere on the page
+  if (e.altKey && !mod && e.key.toLowerCase() === 'm') { e.preventDefault(); input.focus(); return; }
   // "/" focuses the message input, unless already typing somewhere
   if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
     e.preventDefault(); input.focus();
@@ -7306,11 +7387,18 @@ def pwa_manifest():
         "lang": "en",
         "categories": ["productivity", "utilities"],
         "icons": [
-            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
         ],
         "shortcuts": [
-            {"name": "New Chat", "url": "/", "description": "Start a new chat"},
+            {"name": "New Chat", "short_name": "New Chat", "url": "/?action=new",
+             "description": "Start a new chat", "icons": [{"src": "/icon.png", "sizes": "192x192"}]},
+            {"name": "Generate Image", "short_name": "Image", "url": "/?action=image",
+             "description": "Jump straight to image generation", "icons": [{"src": "/icon.png", "sizes": "192x192"}]},
+            {"name": "API Keys", "short_name": "API Keys", "url": "/api-usage",
+             "description": "Manage your API keys", "icons": [{"src": "/icon.png", "sizes": "192x192"}]},
         ],
     }
     return Response(
