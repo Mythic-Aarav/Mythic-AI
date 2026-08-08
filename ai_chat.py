@@ -7405,7 +7405,7 @@ def pwa_manifest():
     return Response(
         json.dumps(manifest),
         mimetype="application/manifest+json",
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "public, max-age=300, must-revalidate"},
     )
 
 
