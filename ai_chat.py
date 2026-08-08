@@ -5444,26 +5444,7 @@ function _showIOSInstallModal() {
 
 if (installBtn) {
   installBtn.addEventListener('click', async () => {
-    const isAndroid = /Android/i.test(navigator.userAgent);
-    const isRunningAsInstalledApp = window.matchMedia('(display-mode: standalone)').matches
-      || window.navigator.standalone
-      || /wv\)/i.test(navigator.userAgent); // Android WebView (i.e. already inside the installed APK)
-
-    if (isAndroid && !isRunningAsInstalledApp) {
-      // On Android browsers, skip the PWA install prompt entirely and
-      // download the real native APK instead.
-      const a = document.createElement('a');
-      a.href = '/download/mythic-ai.apk';
-      a.download = 'Mythic-AI.apk';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      return;
-    }
-
     if (_deferredInstallPrompt) {
-      // Windows/desktop and other non-Android browsers keep the normal
-      // PWA install-prompt flow, unchanged.
       _deferredInstallPrompt.prompt();
       const { outcome } = await _deferredInstallPrompt.userChoice;
       if (outcome === 'accepted') {
@@ -5472,13 +5453,14 @@ if (installBtn) {
       }
     } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
       _showIOSInstallModal();
-    } else if (isRunningAsInstalledApp) {
+    } else if (window.matchMedia('(display-mode: standalone)').matches) {
       _hideInstallBtn();
     } else {
       alert(
         'Install Mythic AI as an app:\n\n' +
-        '• Windows (Chrome / Edge): Click ⋮ menu → "Install app" (or the ⊕ icon in the address bar)\n' +
-        '• Android: Tap Install to download the app directly (.apk)\n' +
+        '• Chrome / Edge: Click ⋮ menu → "Install app" (or the ⊕ icon in the address bar)\n' +
+        '• Samsung Browser: Tap ⋮ → "Add page to"\n' +
+        '• Firefox: Tap ⋮ → "Install"\n' +
         '• Safari (iOS): Tap Share ⬆ → "Add to Home Screen"'
       );
     }
@@ -6151,6 +6133,7 @@ renderRecentSearches();
 // ─── HOMEWORK & STUDY BOOK MODAL ─────────────────────────────────────────────
 (function() {
   const modal       = document.getElementById('homework-modal-overlay');
+
   const closeBtn     = document.getElementById('hw-close-btn');
   const sendBtn      = document.getElementById('hw-send-btn');
   const questionEl   = document.getElementById('homework-question');
@@ -7275,32 +7258,6 @@ def health_check():
     return jsonify({"status": "ok", "time": time.time()})
 
 
-# ── Native Android APK download ───────────────────────────────────────────
-# Serves the real, signed/debug .apk file for direct download on Android,
-# used instead of the PWA install prompt there (see the "Install" button
-# logic in the frontend). Put the built app-debug.apk file at
-# downloads/mythic-ai.apk relative to this script (create the "downloads"
-# folder and commit the .apk into your repo so it's part of the deploy —
-# Render serves whatever files are in the repo, this doesn't need any
-# runtime file writes).
-_APK_DOWNLOAD_PATH = _os.path.join(_BASE_DIR, "downloads", "mythic-ai.apk")
-
-@app.route("/download/mythic-ai.apk")
-def download_apk():
-    if not _os.path.exists(_APK_DOWNLOAD_PATH):
-        return jsonify({
-            "error": "APK not found on server. Place your built app-debug.apk "
-                     "at downloads/mythic-ai.apk in the project and redeploy."
-        }), 404
-    from flask import send_file
-    return send_file(
-        _APK_DOWNLOAD_PATH,
-        mimetype="application/vnd.android.package-archive",
-        as_attachment=True,
-        download_name="Mythic-AI.apk",
-    )
-
-
 @app.route("/manifest.json")
 def pwa_manifest():
     manifest = {
@@ -8274,6 +8231,7 @@ def analytics_dashboard():
 
 
 
+@app.route("/api/keys", methods=["POST"])
 @login_required
 def api_keys_create():
     data = request.get_json(silent=True) or {}
@@ -9842,6 +9800,119 @@ def api_fetch_url_document():
     return jsonify({"text": text, "note": "Extracted readable text from a webpage.", "filename": f"{title}.txt"})
 
 
+# ── Live news (Google News RSS — free, no API key needed) ───────────────────
+# Groq/Cerebras models have no live web access at all (see SYSTEM_PROMPT),
+# so "tell me today's news" could never be answered with anything real
+# without this. Google News publishes a public RSS feed per search query/
+# topic with no authentication required, which is enough to give the model
+# actual, current headlines to summarize instead of guessing.
+import xml.etree.ElementTree as _ET
+
+_NEWS_TOPIC_QUERIES = {
+    "top": "when:1d",
+    "world": "world news when:1d",
+    "india": "India news when:1d",
+    "business": "business news when:1d",
+    "technology": "technology news when:1d",
+    "sports": "sports news when:1d",
+    "entertainment": "entertainment news when:1d",
+    "science": "science news when:1d",
+    "health": "health news when:1d",
+}
+
+
+def fetch_google_news(query, max_items=8):
+    """Returns (list_of_items, error). Each item: {title, source, link,
+    published}. Uses Google News' public RSS search endpoint — no API key,
+    no rate-limit key required for light use."""
+    try:
+        params = {"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}
+        url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(params)
+        resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        root = _ET.fromstring(resp.content)
+        items = []
+        for item in root.findall(".//item")[:max_items]:
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            pub_date = (item.findtext("pubDate") or "").strip()
+            source_el = item.find("source")
+            source = (source_el.text or "").strip() if source_el is not None else ""
+            # Google News RSS titles are usually "Headline - Source" — strip
+            # the trailing " - Source" if we already have it separately, to
+            # avoid showing the source name twice.
+            if source and title.endswith(" - " + source):
+                title = title[: -(len(source) + 3)].strip()
+            if title:
+                items.append({"title": title, "source": source, "link": link, "published": pub_date})
+        return items, None
+    except requests.RequestException as e:
+        return [], f"Could not reach the news service: {e}"
+    except _ET.ParseError as e:
+        return [], f"Could not read the news feed: {e}"
+
+
+@app.route("/api/news", methods=["POST"])
+@login_required
+def api_news():
+    data = request.get_json(force=True) or {}
+    topic = (data.get("topic") or "").strip().lower()
+    query = (data.get("query") or "").strip()
+
+    if query:
+        search_q = query
+        heading = f'News about "{query}"'
+    elif topic and topic in _NEWS_TOPIC_QUERIES:
+        search_q = _NEWS_TOPIC_QUERIES[topic]
+        heading = topic.capitalize() + " News"
+    else:
+        search_q = _NEWS_TOPIC_QUERIES["top"]
+        heading = "Top Stories"
+
+    items, error = fetch_google_news(search_q, max_items=10)
+    if error and not items:
+        return jsonify({"error": error}), 502
+    return jsonify({"heading": heading, "items": items})
+
+
+# Detects a message that's actually asking for live news, so /api/chat can
+# transparently fetch real current headlines and hand them to the model as
+# grounding context — instead of the model just guessing or refusing since
+# it has no live web access on its own (see SYSTEM_PROMPT).
+_NEWS_INTENT_RE = re.compile(
+    r"\b(latest|today'?s?|current|breaking|recent)\b.{0,20}\bnews\b"
+    r"|\bnews\b.{0,20}\b(today|now|update|headlines?)\b"
+    r"|\bwhat'?s\s+(happening|going on)\b"
+    r"|\btop\s+(headlines?|stories)\b"
+    r"|\bnews\s+about\b",
+    re.IGNORECASE,
+)
+
+
+def _maybe_fetch_news_context(user_message):
+    """If the message looks like a news request, fetches real current
+    headlines and returns a context block to prepend to the model's view of
+    the conversation. Returns None if the message isn't news-related, or if
+    the fetch failed (in which case the model just answers normally without
+    pretending to have live data — see SYSTEM_PROMPT's honesty rule)."""
+    if not user_message or not _NEWS_INTENT_RE.search(user_message):
+        return None
+    # Pull out a specific subject after "news about X" / "X news" if present,
+    # otherwise just fetch general top headlines.
+    topic_match = re.search(r"news\s+(?:about|on|regarding)\s+(.+)", user_message, re.IGNORECASE)
+    query = topic_match.group(1).strip(" ?.!") if topic_match else ""
+    search_q = query if query else _NEWS_TOPIC_QUERIES["top"]
+    items, error = fetch_google_news(search_q, max_items=6)
+    if error or not items:
+        return None
+    lines = [f"[Live news results for: {query or 'top stories'} — use these to answer, "
+              f"citing headlines/sources naturally, don't just dump a list:]"]
+    for it in items:
+        src = f" ({it['source']})" if it["source"] else ""
+        lines.append(f"- {it['title']}{src}")
+    return "\n".join(lines)
+
+
 @app.route("/api/weather", methods=["POST"])
 @login_required
 def api_weather():
@@ -10097,6 +10168,22 @@ def chat():
             " The user is on the VIP tier — feel free to go deeper and be more "
             "thorough than usual when it's helpful, without padding for its own sake."
         )
+
+    # Live news grounding — only kicks in when the message actually looks
+    # like a news request (see _NEWS_INTENT_RE). Fetches real current
+    # headlines via Google News RSS and hands them to the model as context,
+    # so "what's today's news" gets a real answer instead of the model
+    # either refusing or guessing (it has no live web access on its own).
+    if not regenerate:
+        news_context = _maybe_fetch_news_context(user_message)
+        if news_context:
+            effective_system_prompt += (
+                "\n\nThe user is asking about current news. Below are REAL, "
+                "just-fetched headlines — use them to answer naturally (mention "
+                "a few relevant headlines and their sources), don't just paste "
+                "the raw list, and don't claim these are your own knowledge:\n\n"
+                + news_context
+            )
 
     is_first_exchange = (not regenerate) and len(messages) == 1  # just the user message so far
 
