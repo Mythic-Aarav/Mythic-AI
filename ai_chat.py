@@ -2788,6 +2788,33 @@ PAGE = r"""<!DOCTYPE html>
       <button id="reminders-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:7px 4px;font-size:12px;cursor:pointer;font-family:inherit;">⏰ Reminders</button>
     </div>
     <div id="conv-list"></div>
+    <div id="sidebar-tools" style="border-top:1px solid var(--border);padding:10px 10px 4px;display:flex;flex-direction:column;gap:4px;">
+      <div style="font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:2px 4px 4px;">Modes</div>
+      <div id="mode-tab-bar" style="display:flex;flex-direction:column;gap:3px;">
+        <button class="mode-tab active" data-mode="chat" title="Regular chat" style="width:100%;justify-content:flex-start;">
+          💬 <span>Chat</span>
+        </button>
+        <button class="mode-tab" data-mode="cowork" title="VIP — multi-step task assistant" style="width:100%;justify-content:flex-start;">
+          🗂 <span>Cowork</span> <span class="mode-tab-lock">🔒</span>
+        </button>
+        <button class="mode-tab" data-mode="code" title="VIP — coding-focused assistant" style="width:100%;justify-content:flex-start;">
+          &lt;/&gt; <span>Code</span> <span class="mode-tab-lock">🔒</span>
+        </button>
+        <button class="mode-tab" id="artifacts-tab-btn" title="VIP — saved code/text snippets from replies" style="width:100%;justify-content:flex-start;">
+          📦 <span>Artifacts</span> <span class="mode-tab-lock">🔒</span>
+        </button>
+      </div>
+      <div style="font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:10px 4px 4px;">Tools</div>
+      <div id="quick-actions" style="display:flex;flex-direction:column;gap:3px;">
+        <button class="quick-btn" id="img-gen-btn" style="width:100%;text-align:left;border-radius:8px;">🎨 Image</button>
+        <button class="quick-btn" id="ghibli-btn" style="width:100%;text-align:left;border-radius:8px;">🌿 Ghibli Me</button>
+        <button class="quick-btn" id="file-gen-btn" style="width:100%;text-align:left;border-radius:8px;">📄 File / PDF</button>
+        <button class="quick-btn" id="homework-btn" style="width:100%;text-align:left;border-radius:8px;">📚 Homework & Study</button>
+        <button class="quick-btn" id="weather-btn" style="width:100%;text-align:left;border-radius:8px;">🌤 Weather</button>
+        <button class="quick-btn" id="search-btn" style="width:100%;text-align:left;border-radius:8px;">🔍 Search</button>
+        <button class="quick-btn" id="code-workspace-btn" style="width:100%;text-align:left;border-radius:8px;">💻 Code</button>
+      </div>
+    </div>
     <div id="sidebar-footer">
       <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
         <button id="archived-toggle-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">⭐ Starred</button>
@@ -2819,21 +2846,6 @@ PAGE = r"""<!DOCTYPE html>
         <button id="clear-btn">Delete chat</button>
       </div>
     </header>
-
-    <div id="mode-tab-bar" style="display:flex;align-items:center;gap:4px;padding:8px 20px;border-bottom:1px solid var(--border);background:var(--bg);flex-shrink:0;overflow-x:auto;">
-      <button class="mode-tab active" data-mode="chat" title="Regular chat">
-        💬 <span>Chat</span>
-      </button>
-      <button class="mode-tab" data-mode="cowork" title="VIP — multi-step task assistant">
-        🗂 <span>Cowork</span> <span class="mode-tab-lock">🔒</span>
-      </button>
-      <button class="mode-tab" data-mode="code" title="VIP — coding-focused assistant">
-        &lt;/&gt; <span>Code</span> <span class="mode-tab-lock">🔒</span>
-      </button>
-      <button class="mode-tab" id="artifacts-tab-btn" title="VIP — saved code/text snippets from replies">
-        📦 <span>Artifacts</span> <span class="mode-tab-lock">🔒</span>
-      </button>
-    </div>
 
     <div id="messages-wrap">
       <div id="messages">
@@ -2883,28 +2895,14 @@ PAGE = r"""<!DOCTYPE html>
       </div>
     </div>
 
-    <div id="quick-actions" style="display:flex;gap:8px;padding:6px 20px 0;max-width:760px;margin:0 auto;width:100%;flex-wrap:wrap;">
-      <button class="quick-btn" id="img-gen-btn">🎨 Image</button>
-      <button class="quick-btn" id="ghibli-btn">🌿 Ghibli Me</button>
-      <button class="quick-btn" id="file-gen-btn">📄 File / PDF</button>
-      <button class="quick-btn" id="homework-btn">📚 Homework & Study</button>
-      <button class="quick-btn" id="weather-btn">🌤 Weather</button>
-      <button class="quick-btn" id="search-btn">🔍 Search</button>
-      <button class="quick-btn" id="code-workspace-btn">💻 Code</button>
-    </div>
       <form id="chat-form">
         <div class="input-row">
           <input type="file" id="file-input" accept="image/*,.txt,.md,.csv,.json,.pdf,.docx" style="display:none">
-          <button class="tool-btn" id="attach-btn" type="button" title="Attach file">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
-            </svg>
-          </button>
           <input type="file" id="camera-input" accept="image/*" capture="environment" style="display:none">
-          <button class="tool-btn" id="camera-btn" type="button" title="Take photo">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-              <circle cx="12" cy="13" r="4"/>
+          <button class="tool-btn" id="plus-btn" type="button" title="Add photo or file">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19"/>
+              <line x1="5" y1="12" x2="19" y2="12"/>
             </svg>
           </button>
           <textarea id="input" rows="1" placeholder="Message Mythic AI..."></textarea>
@@ -3573,9 +3571,8 @@ const nameSaveBtn   = document.getElementById('name-save-btn');
 const exportBtn     = document.getElementById('export-btn');
 const sidebar      = document.getElementById('sidebar');
 const fileInput    = document.getElementById('file-input');
-const attachBtn    = document.getElementById('attach-btn');
 const cameraInput  = document.getElementById('camera-input');
-const cameraBtn    = document.getElementById('camera-btn');
+const plusBtn      = document.getElementById('plus-btn');
 const voiceBtn     = document.getElementById('voice-btn');
 const pendingAttach= document.getElementById('pending-attach');
 const pendingName  = document.getElementById('pending-attach-name');
@@ -3788,8 +3785,42 @@ function handleFileSelect(file) {
   };
   reader.readAsDataURL(file);
 }
-attachBtn.addEventListener('click', () => fileInput.click());
-cameraBtn.addEventListener('click', () => cameraInput.click());
+function closePlusMenu() {
+  const existing = document.querySelector('.plus-menu-dropdown');
+  if (existing) existing.remove();
+}
+plusBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (document.querySelector('.plus-menu-dropdown')) { closePlusMenu(); return; }
+  const menu = document.createElement('div');
+  menu.className = 'plus-menu-dropdown';
+  menu.style.cssText = 'position:fixed;background:var(--panel);border:1px solid var(--border);'
+    + 'border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,.3);z-index:400;min-width:180px;overflow:hidden;';
+  const rect = plusBtn.getBoundingClientRect();
+  // Anchor ABOVE the button since it lives in the bottom input bar.
+  menu.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
+  menu.style.left = rect.left + 'px';
+
+  const items = [
+    { label: '📷 Take Photo', action: () => cameraInput.click() },
+    { label: '📎 Upload File', action: () => fileInput.click() },
+  ];
+  items.forEach(it => {
+    const row = document.createElement('div');
+    row.textContent = it.label;
+    row.style.cssText = 'padding:10px 14px;font-size:13px;cursor:pointer;color:var(--text);white-space:nowrap;';
+    row.addEventListener('mouseenter', () => row.style.background = 'var(--accent-dim)');
+    row.addEventListener('mouseleave', () => row.style.background = '');
+    row.addEventListener('click', () => { it.action(); closePlusMenu(); });
+    menu.appendChild(row);
+  });
+  document.body.appendChild(menu);
+  setTimeout(() => {
+    document.addEventListener('click', function onDocClick(ev) {
+      if (!menu.contains(ev.target)) { closePlusMenu(); document.removeEventListener('click', onDocClick); }
+    });
+  }, 0);
+});
 fileInput.addEventListener('change', () => handleFileSelect(fileInput.files[0]));
 cameraInput.addEventListener('change', () => handleFileSelect(cameraInput.files[0]));
 pendingRemove.addEventListener('click', () => {
@@ -5693,7 +5724,7 @@ if (notifAllowBtn) notifAllowBtn.addEventListener('click', async () => {
       try {
         await _swReg.showNotification('Mythic AI 🔔', {
           body: "Notifications enabled! You'll hear from me when your answer is ready.",
-          icon: '/icon.png', badge: '/icon.png',
+          icon: '/icon.png', badge: '/badge.png',
           tag: 'mythic-notif-confirm', vibrate: [150, 80, 150],
         });
       } catch (e) { console.warn('[Push] confirm notification failed:', e); }
@@ -5732,7 +5763,7 @@ window._notifyAiReply = function(preview) {
   if (_swReg) {
     try {
       _swReg.showNotification('Mythic AI replied 💬', {
-        body, icon: '/icon.png', badge: '/icon.png',
+        body, icon: '/icon.png', badge: '/badge.png',
         tag: 'mythic-ai-reply', renotify: true, vibrate: [200, 100, 200],
         data: { url: '/' },
         actions: [{ action: 'open', title: '💬 Open Chat' }, { action: 'dismiss', title: '✕' }],
@@ -7619,6 +7650,79 @@ def _get_icon(size):
     return _ICON_CACHE[size]
 
 
+def _make_mythic_badge_png(size=96):
+    """Generate the small monochrome 'status bar' badge used by Web Push
+    notifications. This MUST be a white silhouette on a fully transparent
+    background — no colored/opaque backdrop.
+
+    Android reads only the ALPHA channel of the 'badge' image: every pixel
+    with any opacity is treated as "part of the icon" and gets flattened
+    into a solid tinted shape. The old code pointed /badge.png at the same
+    PNG used for the app icon (/icon.png), which has an opaque teal
+    rounded-square background — so Android saw one big solid opaque
+    rectangle and rendered a plain filled box in the status bar instead of
+    the "M" mark. Drawing just the white line-art on a transparent canvas
+    (no fill_rect/circle_aa background pass) fixes that."""
+    import struct, zlib
+
+    W = H = size
+    img = bytearray(W * H * 4)  # fully transparent (all zeros) to start
+
+    def set_pixel(x, y, a=255):
+        if 0 <= x < W and 0 <= y < H:
+            i = (y * W + x) * 4
+            img[i], img[i+1], img[i+2], img[i+3] = 255, 255, 255, a
+
+    s = size / 40
+    pts = [
+        (int(10*s), int(28*s)),
+        (int(10*s), int(12*s)),
+        (int(20*s), int(22*s)),
+        (int(30*s), int(12*s)),
+        (int(30*s), int(28*s)),
+    ]
+    lw = max(2, size // 12)  # slightly thicker than the app icon's mark, reads better at tiny status-bar sizes
+
+    def draw_line(x0, y0, x1, y1):
+        dx, dy = x1-x0, y1-y0
+        steps = max(abs(dx), abs(dy), 1)
+        for i in range(steps+1):
+            x = int(x0 + dx*i/steps)
+            y = int(y0 + dy*i/steps)
+            for ox in range(-lw//2, lw//2+1):
+                for oy in range(-lw//2, lw//2+1):
+                    set_pixel(x+ox, y+oy)
+
+    for i in range(len(pts)-1):
+        draw_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1])
+
+    def png_chunk(name, data):
+        crc = zlib.crc32(name + data) & 0xffffffff
+        return struct.pack('>I', len(data)) + name + data + struct.pack('>I', crc)
+
+    raw_rows = b''
+    for y in range(H):
+        raw_rows += b'\x00'
+        raw_rows += bytes(img[y*W*4:(y+1)*W*4])
+
+    ihdr = struct.pack('>II', W, H) + bytes([8, 6, 0, 0, 0])
+    compressed = zlib.compress(raw_rows, 9)
+
+    png  = b'\x89PNG\r\n\x1a\n'
+    png += png_chunk(b'IHDR', ihdr)
+    png += png_chunk(b'IDAT', compressed)
+    png += png_chunk(b'IEND', b'')
+    return png
+
+
+_BADGE_CACHE = {}
+
+def _get_badge(size):
+    if size not in _BADGE_CACHE:
+        _BADGE_CACHE[size] = _make_mythic_badge_png(size)
+    return _BADGE_CACHE[size]
+
+
 @app.route("/icon.png")
 def pwa_icon_192():
     return Response(_get_icon(192), mimetype="image/png",
@@ -7636,8 +7740,11 @@ def pwa_icon_512():
 
 @app.route("/badge.png")
 def pwa_badge():
-    """Badge icon for push notifications (status bar) — same as regular icon."""
-    return Response(_get_icon(96), mimetype="image/png",
+    """Badge icon for push notifications (status bar). Must be a white-on-
+    transparent silhouette, NOT the colored app icon — see
+    _make_mythic_badge_png() for why reusing /icon.png here caused a plain
+    solid box to show up in notifications instead of the logo."""
+    return Response(_get_badge(96), mimetype="image/png",
                     headers={"Cache-Control": "public, max-age=604800"})
 
 @app.route("/favicon.ico")
