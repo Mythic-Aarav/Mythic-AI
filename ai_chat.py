@@ -2614,8 +2614,11 @@ PAGE = r"""<!DOCTYPE html>
     font-size:var(--msg-font-size); white-space:pre-wrap; word-wrap:break-word; }
   .msg.user { align-self:flex-end; background:var(--user-bubble); color:var(--user-text);
     border-bottom-right-radius:4px; }
-  .msg.ai { align-self:flex-start; background:var(--ai-bubble); color:var(--text);
-    border-bottom-left-radius:4px; }
+  /* AI replies render as plain, open flowing text (no bubble/box), matching
+     how Gemini/ChatGPT show assistant replies — only the user's own messages
+     stay as a boxed bubble. */
+  .msg.ai { align-self:flex-start; background:none; color:var(--text);
+    padding:4px 0; border-radius:0; max-width:100%; }
   .msg.error { align-self:center; background:#fef2f2; border:1px solid #fecaca;
     color:#dc2626; font-size:13px; border-radius:10px; }
   .msg img { max-width:100%; border-radius:10px; display:block; margin-top:8px; }
@@ -2627,7 +2630,7 @@ PAGE = r"""<!DOCTYPE html>
 
   .msg-row { display:flex; flex-direction:column; max-width:80%; }
   .msg-row.user { align-self:flex-end; align-items:flex-end; }
-  .msg-row.ai { align-self:flex-start; align-items:flex-start; }
+  .msg-row.ai { align-self:flex-start; align-items:flex-start; max-width:100%; width:100%; }
   .msg-row.error { align-self:center; align-items:center; max-width:90%; }
   .msg-row .msg { max-width:100%; }
   .msg-actions { display:flex; gap:4px; margin-top:3px; opacity:0; transition:opacity .15s;
@@ -3703,10 +3706,13 @@ function addImageMessage(role, base64, caption) {
   scrollToBottom();
 }
 
-function showTyping() {
+function showTyping(label) {
+  hideTyping();  // avoid stacking duplicates if called twice (e.g. during retry)
   const div = document.createElement('div');
   div.className = 'typing'; div.id = 'typing-indicator';
-  div.innerHTML = '<span></span><span></span><span></span>';
+  div.innerHTML = label
+    ? `<span style="font-size:12.5px;color:var(--muted);white-space:nowrap;">${label.replace(/</g,'&lt;')}</span>`
+    : '<span></span><span></span><span></span>';
   messagesEl.appendChild(div);
   scrollToBottom();
 }
@@ -4066,7 +4072,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
 
   let aiTextNode = null;
   try {
-    const r = await fetch('/api/chat', {
+    const chatPayload = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: currentAbortController.signal,
@@ -4080,7 +4086,22 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
         mode: currentMode === 'chat' ? 'default' : currentMode,
         ...getUserApiKeys(),
       })
-    });
+    };
+
+    // On free-tier hosts (Render, etc.) the server can go to sleep after
+    // inactivity — the very first request after that wakes it up but often
+    // fails or times out while it's cold-starting. Rather than immediately
+    // treating that as a real error (and popping the trouble-report modal),
+    // retry once after a short pause before giving up for real.
+    let r;
+    try {
+      r = await fetch('/api/chat', chatPayload);
+    } catch (firstErr) {
+      if (firstErr.name === 'AbortError') throw firstErr;
+      showTyping('Server is waking up, retrying…');
+      await new Promise(res => setTimeout(res, 3000));
+      r = await fetch('/api/chat', chatPayload);
+    }
     if (!r.ok || !r.body) {
       hideTyping();
       let errMsg = 'Something went wrong. Try again.';
@@ -7287,10 +7308,28 @@ def service_worker_js():
     Blob-URL service workers cannot receive push events — this route is
     required for Web Push to function."""
     sw = r"""
-const CACHE = 'mythic-ai-v3';
+const CACHE = 'mythic-ai-v4';
+// Precache the app shell + icons so the app can still open (with a friendly
+// offline notice for anything dynamic) if the network is unavailable —
+// without this, only the exact URLs someone happened to already visit
+// would ever be served offline.
+const PRECACHE_URLS = ['/', '/manifest.json', '/icon.png', '/icon-96.png', '/icon-512.png'];
+
+const OFFLINE_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Offline — Mythic AI</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1a1a;
+color:#ececec;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;
+text-align:center;padding:24px;}h1{color:#10a37f;font-size:20px;}p{color:#8e8ea0;font-size:14px;}
+button{margin-top:16px;background:#10a37f;color:#fff;border:none;border-radius:8px;padding:10px 20px;
+font-size:14px;cursor:pointer;}</style></head>
+<body><div><h1>You're offline</h1><p>Mythic AI needs a connection to reply. Reconnect and try again.</p>
+<button onclick="location.reload()">Retry</button></div></body></html>`;
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(['/'])));
+  e.waitUntil(
+    caches.open(CACHE).then(c => c.addAll(PRECACHE_URLS)).catch(() => {})
+  );
   self.skipWaiting();
 });
 
@@ -7306,6 +7345,7 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   if (e.request.url.includes('/api/')) return;
+  const isNavigation = e.request.mode === 'navigate';
   e.respondWith(
     fetch(e.request)
       .then(resp => {
@@ -7313,7 +7353,14 @@ self.addEventListener('fetch', e => {
         caches.open(CACHE).then(c => c.put(e.request, clone));
         return resp;
       })
-      .catch(() => caches.match(e.request))
+      .catch(async () => {
+        const cached = await caches.match(e.request);
+        if (cached) return cached;
+        if (isNavigation) {
+          return new Response(OFFLINE_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+        }
+        return Response.error();
+      })
   );
 });
 
