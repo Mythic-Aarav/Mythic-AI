@@ -3795,7 +3795,8 @@ plusBtn.addEventListener('click', (e) => {
   const menu = document.createElement('div');
   menu.className = 'plus-menu-dropdown';
   menu.style.cssText = 'position:fixed;background:var(--panel);border:1px solid var(--border);'
-    + 'border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,.3);z-index:400;min-width:180px;overflow:hidden;';
+    + 'border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,.3);z-index:400;min-width:190px;'
+    + 'max-height:70vh;overflow-y:auto;overflow-x:hidden;';
   const rect = plusBtn.getBoundingClientRect();
   // Anchor ABOVE the button since it lives in the bottom input bar.
   menu.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
@@ -3804,6 +3805,13 @@ plusBtn.addEventListener('click', (e) => {
   const items = [
     { label: '📷 Take Photo', action: () => cameraInput.click() },
     { label: '📎 Upload File', action: () => fileInput.click() },
+    { label: '🎨 Image', action: () => document.getElementById('img-gen-btn')?.click() },
+    { label: '🌿 Ghibli Me', action: () => document.getElementById('ghibli-btn')?.click() },
+    { label: '📄 File / PDF', action: () => document.getElementById('file-gen-btn')?.click() },
+    { label: '📚 Homework & Study', action: () => document.getElementById('homework-btn')?.click() },
+    { label: '🌤 Weather', action: () => document.getElementById('weather-btn')?.click() },
+    { label: '🔍 Search', action: () => document.getElementById('search-btn')?.click() },
+    { label: '💻 Code', action: () => document.getElementById('code-workspace-btn')?.click() },
   ];
   items.forEach(it => {
     const row = document.createElement('div');
