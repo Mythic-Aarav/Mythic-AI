@@ -2608,7 +2608,7 @@ PAGE = r"""<!DOCTYPE html>
   body.bubble-spacious #messages { gap:24px; }
 
   #messages-wrap { flex:1; min-height:0; overflow-y:auto; position:relative; }
-  #messages { padding:24px 20px; display:flex; flex-direction:column; gap:16px;
+  #messages { padding:28px 20px 24px; display:flex; flex-direction:column; gap:22px;
     max-width:760px; margin:0 auto; width:100%; min-height:100%; }
   .msg { max-width:80%; padding:11px 15px; border-radius:18px; line-height:1.6;
     font-size:var(--msg-font-size); white-space:pre-wrap; word-wrap:break-word; }
@@ -2618,7 +2618,7 @@ PAGE = r"""<!DOCTYPE html>
      how Gemini/ChatGPT show assistant replies — only the user's own messages
      stay as a boxed bubble. */
   .msg.ai { align-self:flex-start; background:none; color:var(--text);
-    padding:4px 0; border-radius:0; max-width:100%; }
+    padding:6px 0; border-radius:0; max-width:100%; }
   .msg.error { align-self:center; background:#fef2f2; border:1px solid #fecaca;
     color:#dc2626; font-size:13px; border-radius:10px; }
   .msg img { max-width:100%; border-radius:10px; display:block; margin-top:8px; }
@@ -5563,6 +5563,40 @@ function _showIOSInstallModal() {
   document.getElementById('ios-install-close').addEventListener('click', () => m.remove());
 }
 
+function _showGenericInstallModal() {
+  const existing = document.getElementById('generic-install-modal');
+  if (existing) { existing.style.display = 'flex'; return; }
+  const m = document.createElement('div');
+  m.id = 'generic-install-modal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+  const rows = [
+    ['🌐', 'Chrome / Edge', 'Click the ⋮ menu → "Install app" (or the ⊕ icon in the address bar)'],
+    ['📱', 'Samsung Browser', 'Tap ⋮ → "Add page to" → "Home screen"'],
+    ['🦊', 'Firefox', 'Tap ⋮ → "Install"'],
+    ['🍎', 'Safari (iOS)', 'Tap Share ⬆ → "Add to Home Screen"'],
+  ].map(([icon, name, steps]) => `
+    <div style="display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:20px;flex-shrink:0;">${icon}</span>
+      <div>
+        <div style="font-weight:700;font-size:13.5px;color:var(--text);margin-bottom:2px;">${name}</div>
+        <div style="font-size:12.5px;color:var(--muted);line-height:1.5;">${steps}</div>
+      </div>
+    </div>`).join('');
+  m.innerHTML = `
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:20px;padding:26px 24px;width:100%;max-width:420px;box-shadow:0 4px 40px rgba(0,0,0,.4);">
+      <div style="text-align:center;margin-bottom:6px;">
+        <div style="font-size:38px;margin-bottom:8px;">📲</div>
+        <div style="font-weight:700;font-size:18px;color:var(--text);">Install Mythic AI</div>
+        <div style="color:var(--muted);font-size:12.5px;margin-top:4px;">Choose your browser below</div>
+      </div>
+      <div style="margin:14px 0 4px;">${rows}</div>
+      <button id="generic-install-close" style="margin-top:16px;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
+    </div>`;
+  document.body.appendChild(m);
+  m.addEventListener('click', e => { if (e.target === m) m.remove(); });
+  document.getElementById('generic-install-close').addEventListener('click', () => m.remove());
+}
+
 if (installBtn) {
   installBtn.addEventListener('click', async () => {
     if (_deferredInstallPrompt) {
@@ -5577,13 +5611,7 @@ if (installBtn) {
     } else if (window.matchMedia('(display-mode: standalone)').matches) {
       _hideInstallBtn();
     } else {
-      alert(
-        'Install Mythic AI as an app:\n\n' +
-        '• Chrome / Edge: Click ⋮ menu → "Install app" (or the ⊕ icon in the address bar)\n' +
-        '• Samsung Browser: Tap ⋮ → "Add page to"\n' +
-        '• Firefox: Tap ⋮ → "Install"\n' +
-        '• Safari (iOS): Tap Share ⬆ → "Add to Home Screen"'
-      );
+      _showGenericInstallModal();
     }
   });
 }
