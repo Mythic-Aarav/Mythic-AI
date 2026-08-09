@@ -3795,7 +3795,7 @@ plusBtn.addEventListener('click', (e) => {
   const menu = document.createElement('div');
   menu.className = 'plus-menu-dropdown';
   menu.style.cssText = 'position:fixed;background:var(--panel);border:1px solid var(--border);'
-    + 'border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,.3);z-index:400;min-width:190px;'
+    + 'border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,.3);z-index:400;min-width:200px;'
     + 'max-height:70vh;overflow-y:auto;overflow-x:hidden;';
   const rect = plusBtn.getBoundingClientRect();
   // Anchor ABOVE the button since it lives in the bottom input bar.
@@ -3810,8 +3810,14 @@ plusBtn.addEventListener('click', (e) => {
     { label: '📄 File / PDF', action: () => document.getElementById('file-gen-btn')?.click() },
     { label: '📚 Homework & Study', action: () => document.getElementById('homework-btn')?.click() },
     { label: '🌤 Weather', action: () => document.getElementById('weather-btn')?.click() },
-    { label: '🔍 Search', action: () => document.getElementById('search-btn')?.click() },
+    { label: '🔍 Search Web', action: () => document.getElementById('search-btn')?.click() },
     { label: '💻 Code', action: () => document.getElementById('code-workspace-btn')?.click() },
+    { label: '🔎 Search My Chats', action: () => document.getElementById('search-chats-btn')?.click() },
+    { label: '⏰ Reminders', action: () => document.getElementById('reminders-btn')?.click() },
+    { label: '🔖 Bookmarks', action: () => document.getElementById('bookmarks-btn')?.click() },
+    { label: '📊 Stats', action: () => document.getElementById('stats-btn')?.click() },
+    { label: '📦 Artifacts', action: () => document.getElementById('artifacts-tab-btn')?.click() },
+    { label: '🗂 Cowork Mode', action: () => document.querySelector('.mode-tab[data-mode="cowork"]')?.click() },
   ];
   items.forEach(it => {
     const row = document.createElement('div');
@@ -5563,13 +5569,27 @@ window.addEventListener('beforeinstallprompt', e => {
   e.preventDefault();
   _deferredInstallPrompt = e;
   _showInstallBtn();
+  console.log('[PWA] beforeinstallprompt fired — installable ✅');
 });
 
 window.addEventListener('appinstalled', () => {
   _hideInstallBtn();
   _deferredInstallPrompt = null;
   localStorage.setItem('mythic_pwa_installed', '1');
+  console.log('[PWA] app installed ✅');
 });
+
+// Diagnostic: if this warning appears in the console, open DevTools >
+// Application > Manifest on the deployed HTTPS URL — it names the exact
+// installability blocker (usually: not served over HTTPS, manifest
+// 404/invalid JSON, service worker not registered, or already installed).
+setTimeout(() => {
+  if (!_deferredInstallPrompt
+      && !window.matchMedia('(display-mode: standalone)').matches
+      && !window.navigator.standalone) {
+    console.warn('[PWA] beforeinstallprompt never fired. Check DevTools > Application > Manifest for the reason.');
+  }
+}, 3000);
 
 // Only hide the Install button once we're SURE the app is already running
 // as an installed PWA — otherwise keep it visible (with a generic
@@ -7502,10 +7522,8 @@ def pwa_manifest():
         "lang": "en",
         "categories": ["productivity", "utilities"],
         "icons": [
-            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any"},
-            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
         ],
         # Powers Chrome's "richer" install UI (the bigger preview card instead
         # of a plain confirm dialog). Needs at least one screenshot with
