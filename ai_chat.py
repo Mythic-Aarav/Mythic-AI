@@ -7393,28 +7393,10 @@ def service_worker_js():
     Blob-URL service workers cannot receive push events — this route is
     required for Web Push to function."""
     sw = r"""
-const CACHE = 'mythic-ai-v4';
-// Precache the app shell + icons so the app can still open (with a friendly
-// offline notice for anything dynamic) if the network is unavailable —
-// without this, only the exact URLs someone happened to already visit
-// would ever be served offline.
-const PRECACHE_URLS = ['/', '/manifest.json', '/icon.png', '/icon-96.png', '/icon-512.png'];
-
-const OFFLINE_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Offline — Mythic AI</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1a1a;
-color:#ececec;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;
-text-align:center;padding:24px;}h1{color:#10a37f;font-size:20px;}p{color:#8e8ea0;font-size:14px;}
-button{margin-top:16px;background:#10a37f;color:#fff;border:none;border-radius:8px;padding:10px 20px;
-font-size:14px;cursor:pointer;}</style></head>
-<body><div><h1>You're offline</h1><p>Mythic AI needs a connection to reply. Reconnect and try again.</p>
-<button onclick="location.reload()">Retry</button></div></body></html>`;
+const CACHE = 'mythic-ai-v3';
 
 self.addEventListener('install', e => {
-  e.waitUntil(
-    caches.open(CACHE).then(c => c.addAll(PRECACHE_URLS)).catch(() => {})
-  );
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(['/'])));
   self.skipWaiting();
 });
 
@@ -7430,7 +7412,6 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   if (e.request.url.includes('/api/')) return;
-  const isNavigation = e.request.mode === 'navigate';
   e.respondWith(
     fetch(e.request)
       .then(resp => {
@@ -7438,14 +7419,7 @@ self.addEventListener('fetch', e => {
         caches.open(CACHE).then(c => c.put(e.request, clone));
         return resp;
       })
-      .catch(async () => {
-        const cached = await caches.match(e.request);
-        if (cached) return cached;
-        if (isNavigation) {
-          return new Response(OFFLINE_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-        }
-        return Response.error();
-      })
+      .catch(() => caches.match(e.request))
   );
 });
 
@@ -7507,52 +7481,29 @@ def health_check():
 @app.route("/manifest.json")
 def pwa_manifest():
     manifest = {
-        "id": "/",
         "name": "Mythic AI",
         "short_name": "Mythic AI",
         "description": "Smart AI assistant by Aarav Singh",
         "start_url": "/",
         "display": "standalone",
-        "display_override": ["standalone", "minimal-ui"],
         "background_color": "#1a1a1a",
         "theme_color": "#10a37f",
         "orientation": "any",
         "scope": "/",
         "lang": "en",
-        "prefer_related_applications": False,
         "categories": ["productivity", "utilities"],
-        # Some browsers/validators want "any" and "maskable" as separate icon
-        # entries rather than one combined "any maskable" string — listing
-        # both forms maximizes install-eligibility across engines.
         "icons": [
-            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any"},
-            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
-        ],
-        # Powers Chrome's "richer" install UI (the bigger preview card instead
-        # of a plain confirm dialog). Needs at least one screenshot with
-        # form_factor "wide" (shown on desktop) and at least one WITHOUT
-        # "wide" (shown on mobile) — both are required, one alone isn't enough.
-        "screenshots": [
-            {"src": "/screenshot-wide.png",   "sizes": "1280x800", "type": "image/png",
-             "form_factor": "wide", "label": "Mythic AI chat on desktop"},
-            {"src": "/screenshot-narrow.png", "sizes": "750x1334", "type": "image/png",
-             "form_factor": "narrow", "label": "Mythic AI chat on mobile"},
+            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
         ],
         "shortcuts": [
-            {"name": "New Chat", "short_name": "New Chat", "url": "/?action=new",
-             "description": "Start a new chat", "icons": [{"src": "/icon-96.png", "sizes": "96x96"}]},
-            {"name": "Generate Image", "short_name": "Image", "url": "/?action=image",
-             "description": "Jump straight to image generation", "icons": [{"src": "/icon-96.png", "sizes": "96x96"}]},
-            {"name": "API Keys", "short_name": "API Keys", "url": "/api-usage",
-             "description": "Manage your API keys", "icons": [{"src": "/icon-96.png", "sizes": "96x96"}]},
+            {"name": "New Chat", "url": "/", "description": "Start a new chat"},
         ],
     }
     return Response(
         json.dumps(manifest),
         mimetype="application/manifest+json",
-        headers={"Cache-Control": "public, max-age=300, must-revalidate"},
+        headers={"Cache-Control": "public, max-age=86400"},
     )
 
 
