@@ -5714,9 +5714,13 @@ if (installBtn) {
     } else if (window.matchMedia('(display-mode: standalone)').matches) {
       _hideInstallBtn();
     } else {
-      // No native prompt available (yet, or ever, on this browser) — download
-      // a real launcher file instead of just showing instructions.
-      _downloadAppShortcut();
+      // No native install prompt available on this browser (yet, or ever) —
+      // show real step-by-step instructions instead of faking an install.
+      // (Previously this downloaded a launcher-file "shortcut" — but opening
+      // that file just navigates to the site in a normal browser tab, which
+      // looks like a successful install but isn't actually a standalone app.
+      // Showing honest instructions avoids that confusing false positive.)
+      _showGenericInstallModal();
     }
   });
 }
