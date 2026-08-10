@@ -7513,7 +7513,7 @@ def pwa_manifest():
         "description": "Smart AI assistant by Aarav Singh",
         "start_url": "/",
         "display": "standalone",
-        "display_override": ["standalone", "minimal-ui", "browser"],
+        "display_override": ["standalone", "minimal-ui"],
         "background_color": "#1a1a1a",
         "theme_color": "#10a37f",
         "orientation": "any",
