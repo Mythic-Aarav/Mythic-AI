@@ -5672,7 +5672,7 @@ function _downloadAppShortcut() {
     const urlFileContent =
       '[InternetShortcut]\r\n' +
       'URL=' + origin + '\r\n' +
-      'IconFile=' + window.location.origin + '/icon.png\r\n' +
+      'IconFile=' + window.location.origin + '/icon.ico\r\n' +
       'IconIndex=0\r\n';
     blob = new Blob([urlFileContent], { type: 'application/octet-stream' });
     filename = 'Mythic AI.url';
@@ -8767,6 +8767,43 @@ def pwa_icon_96():
 @app.route("/icon-512.png")
 def pwa_icon_512():
     return Response(_get_icon(512), mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+
+def _make_ico_from_png(png_bytes: bytes, size: int) -> bytes:
+    """Wraps a PNG in a minimal valid .ico container. Since Windows Vista,
+    ICO entries are allowed to hold raw PNG data directly (instead of the
+    old uncompressed BMP format) — this is exactly what real .ico files
+    made by icon editors do for modern sizes, so Explorer/shortcuts render
+    it correctly. Needed because Windows .url shortcuts silently fail to
+    show a custom icon when IconFile points at a plain .png — it wants a
+    real .ico container."""
+    import struct
+    count = 1
+    # ICONDIR: reserved(2)=0, type(2)=1 (icon), count(2)
+    header = struct.pack("<HHH", 0, 1, count)
+    # ICONDIRENTRY: width, height (0 means 256), color count, reserved,
+    # planes, bitcount, bytes in resource, offset of resource data
+    w = size if size < 256 else 0
+    h = size if size < 256 else 0
+    entry = struct.pack("<BBBBHHII", w, h, 0, 0, 1, 32, len(png_bytes), 6 + 16 * count)
+    return header + entry + png_bytes
+
+
+_ICO_CACHE = None
+
+def _get_ico():
+    global _ICO_CACHE
+    if _ICO_CACHE is None:
+        _ICO_CACHE = _make_ico_from_png(_get_icon(256), 256)
+    return _ICO_CACHE
+
+
+@app.route("/icon.ico")
+def pwa_icon_ico():
+    """A real .ico file (not a renamed PNG) for use as a Windows shortcut/
+    .url icon — see _make_ico_from_png for why this is necessary."""
+    return Response(_get_ico(), mimetype="image/x-icon",
                     headers={"Cache-Control": "public, max-age=604800"})
 
 @app.route("/badge.png")
