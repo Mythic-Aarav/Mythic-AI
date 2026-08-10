@@ -2409,7 +2409,8 @@ PAGE = r"""<!DOCTYPE html>
 }
 </script>
 
-<link rel="manifest" href="/manifest.json">
+<!-- manifest removed: PWA install was unreliable across devices, so the
+     Install button now always triggers a direct file download instead. -->
 <link rel="icon" type="image/png" sizes="192x192" href="/icon.png">
 <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
 <link rel="shortcut icon" href="/favicon.ico">
@@ -5654,29 +5655,60 @@ function _showGenericInstallModal() {
   document.getElementById('generic-install-close').addEventListener('click', () => m.remove());
 }
 
+// Real, guaranteed file download — used whenever the native browser install
+// prompt isn't available (unsupported browser, or Chrome just hasn't fired
+// beforeinstallprompt yet). Downloads a small launcher file that opens
+// Mythic AI when double-clicked:
+//   - Windows: a .url internet-shortcut file (native double-click launcher,
+//     can be dragged to the desktop/taskbar/Start menu like any other app)
+//   - Everything else (Mac/Linux/Android/generic): a tiny redirect .html
+//     file that immediately opens the real app when opened
+function _downloadAppShortcut() {
+  const ua = navigator.userAgent;
+  const origin = window.location.origin + '/';
+  const isWindows = /Windows/i.test(ua);
+
+  let blob, filename;
+  if (isWindows) {
+    const urlFileContent =
+      '[InternetShortcut]\r\n' +
+      'URL=' + origin + '\r\n' +
+      'IconFile=' + window.location.origin + '/icon.ico\r\n' +
+      'IconIndex=0\r\n';
+    blob = new Blob([urlFileContent], { type: 'application/octet-stream' });
+    filename = 'Mythic AI.url';
+  } else {
+    const htmlContent =
+      '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<meta http-equiv="refresh" content="0; url=' + origin + '">' +
+      '<title>Mythic AI</title></head><body>' +
+      '<p>Opening Mythic AI… <a href="' + origin + '">click here if nothing happens</a>.</p>' +
+      '<script>location.replace(' + JSON.stringify(origin) + ');<\/script>' +
+      '</body></html>';
+    blob = new Blob([htmlContent], { type: 'text/html' });
+    filename = 'Mythic AI.html';
+  }
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
 if (installBtn) {
-  installBtn.addEventListener('click', async () => {
-    if (_deferredInstallPrompt) {
-      _deferredInstallPrompt.prompt();
-      const { outcome } = await _deferredInstallPrompt.userChoice;
-      if (outcome === 'accepted') {
-        _hideInstallBtn();
-        _deferredInstallPrompt = null;
-      }
-    } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
-      // iOS has no file-download-based shortcut equivalent — "Add to Home
-      // Screen" via the Share sheet is the only real install path there.
+  installBtn.addEventListener('click', () => {
+    // Manifest-based native install was unreliable across devices/browsers,
+    // so this always does a direct, guaranteed file download instead.
+    if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
+      // iOS has no file-download shortcut equivalent — "Add to Home Screen"
+      // via the Share sheet is the only real install path there.
       _showIOSInstallModal();
-    } else if (window.matchMedia('(display-mode: standalone)').matches) {
-      _hideInstallBtn();
     } else {
-      // No native install prompt available on this browser (yet, or ever) —
-      // show real step-by-step instructions instead of faking an install.
-      // (Previously this downloaded a launcher-file "shortcut" — but opening
-      // that file just navigates to the site in a normal browser tab, which
-      // looks like a successful install but isn't actually a standalone app.
-      // Showing honest instructions avoids that confusing false positive.)
-      _showGenericInstallModal();
+      _downloadAppShortcut();
     }
   });
 }
@@ -7489,7 +7521,6 @@ def health_check():
 @app.route("/manifest.json")
 def pwa_manifest():
     manifest = {
-        "id": "/",
         "name": "Mythic AI",
         "short_name": "Mythic AI",
         "description": "Smart AI assistant by Aarav Singh",
@@ -7504,16 +7535,6 @@ def pwa_manifest():
         "icons": [
             {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
             {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
-        ],
-        # Powers Chrome's "richer" install UI (the bigger preview card instead
-        # of a plain confirm dialog). Needs at least one screenshot with
-        # form_factor "wide" (shown on desktop) and at least one WITHOUT
-        # "wide" (shown on mobile) — both are required, one alone isn't enough.
-        "screenshots": [
-            {"src": "/screenshot-wide.png",   "sizes": "1280x800", "type": "image/png",
-             "form_factor": "wide", "label": "Mythic AI chat on desktop"},
-            {"src": "/screenshot-narrow.png", "sizes": "750x1334", "type": "image/png",
-             "form_factor": "narrow", "label": "Mythic AI chat on mobile"},
         ],
         "shortcuts": [
             {"name": "New Chat", "url": "/", "description": "Start a new chat"},
