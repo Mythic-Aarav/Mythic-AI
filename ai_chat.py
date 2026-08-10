@@ -5654,6 +5654,50 @@ function _showGenericInstallModal() {
   document.getElementById('generic-install-close').addEventListener('click', () => m.remove());
 }
 
+// Real, guaranteed file download — used whenever the native browser install
+// prompt isn't available (unsupported browser, or Chrome just hasn't fired
+// beforeinstallprompt yet). Downloads a small launcher file that opens
+// Mythic AI when double-clicked:
+//   - Windows: a .url internet-shortcut file (native double-click launcher,
+//     can be dragged to the desktop/taskbar/Start menu like any other app)
+//   - Everything else (Mac/Linux/Android/generic): a tiny redirect .html
+//     file that immediately opens the real app when opened
+function _downloadAppShortcut() {
+  const ua = navigator.userAgent;
+  const origin = window.location.origin + '/';
+  const isWindows = /Windows/i.test(ua);
+
+  let blob, filename;
+  if (isWindows) {
+    const urlFileContent =
+      '[InternetShortcut]\r\n' +
+      'URL=' + origin + '\r\n' +
+      'IconFile=' + window.location.origin + '/icon.png\r\n' +
+      'IconIndex=0\r\n';
+    blob = new Blob([urlFileContent], { type: 'application/octet-stream' });
+    filename = 'Mythic AI.url';
+  } else {
+    const htmlContent =
+      '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<meta http-equiv="refresh" content="0; url=' + origin + '">' +
+      '<title>Mythic AI</title></head><body>' +
+      '<p>Opening Mythic AI… <a href="' + origin + '">click here if nothing happens</a>.</p>' +
+      '<script>location.replace(' + JSON.stringify(origin) + ');<\/script>' +
+      '</body></html>';
+    blob = new Blob([htmlContent], { type: 'text/html' });
+    filename = 'Mythic AI.html';
+  }
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
 if (installBtn) {
   installBtn.addEventListener('click', async () => {
     if (_deferredInstallPrompt) {
@@ -5664,11 +5708,15 @@ if (installBtn) {
         _deferredInstallPrompt = null;
       }
     } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
+      // iOS has no file-download-based shortcut equivalent — "Add to Home
+      // Screen" via the Share sheet is the only real install path there.
       _showIOSInstallModal();
     } else if (window.matchMedia('(display-mode: standalone)').matches) {
       _hideInstallBtn();
     } else {
-      _showGenericInstallModal();
+      // No native prompt available (yet, or ever, on this browser) — download
+      // a real launcher file instead of just showing instructions.
+      _downloadAppShortcut();
     }
   });
 }
