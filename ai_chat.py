@@ -2788,39 +2788,36 @@ PAGE = r"""<!DOCTYPE html>
       <button id="reminders-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:7px 4px;font-size:12px;cursor:pointer;font-family:inherit;">⏰ Reminders</button>
     </div>
     <div id="conv-list"></div>
-    <div id="sidebar-tools" style="border-top:1px solid var(--border);padding:10px 10px 4px;display:flex;flex-direction:column;gap:4px;">
-      <div style="font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:2px 4px 4px;">Modes</div>
-      <div id="mode-tab-bar" style="display:flex;flex-direction:column;gap:3px;">
-        <button class="mode-tab active" data-mode="chat" title="Regular chat" style="width:100%;justify-content:flex-start;">
+    <div id="sidebar-tools" style="display:none;">
+      <div id="mode-tab-bar">
+        <button class="mode-tab active" data-mode="chat" title="Regular chat">
           💬 <span>Chat</span>
         </button>
-        <button class="mode-tab" data-mode="cowork" title="VIP — multi-step task assistant" style="width:100%;justify-content:flex-start;">
+        <button class="mode-tab" data-mode="cowork" title="VIP — multi-step task assistant">
           🗂 <span>Cowork</span> <span class="mode-tab-lock">🔒</span>
         </button>
-        <button class="mode-tab" data-mode="code" title="VIP — coding-focused assistant" style="width:100%;justify-content:flex-start;">
+        <button class="mode-tab" data-mode="code" title="VIP — coding-focused assistant">
           &lt;/&gt; <span>Code</span> <span class="mode-tab-lock">🔒</span>
         </button>
-        <button class="mode-tab" id="artifacts-tab-btn" title="VIP — saved code/text snippets from replies" style="width:100%;justify-content:flex-start;">
+        <button class="mode-tab" id="artifacts-tab-btn" title="VIP — saved code/text snippets from replies">
           📦 <span>Artifacts</span> <span class="mode-tab-lock">🔒</span>
         </button>
       </div>
-      <div style="font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:10px 4px 4px;">Tools</div>
-      <div id="quick-actions" style="display:flex;flex-direction:column;gap:3px;">
-        <button class="quick-btn" id="img-gen-btn" style="width:100%;text-align:left;border-radius:8px;">🎨 Image</button>
-        <button class="quick-btn" id="ghibli-btn" style="width:100%;text-align:left;border-radius:8px;">🌿 Ghibli Me</button>
-        <button class="quick-btn" id="file-gen-btn" style="width:100%;text-align:left;border-radius:8px;">📄 File / PDF</button>
-        <button class="quick-btn" id="homework-btn" style="width:100%;text-align:left;border-radius:8px;">📚 Homework & Study</button>
-        <button class="quick-btn" id="weather-btn" style="width:100%;text-align:left;border-radius:8px;">🌤 Weather</button>
-        <button class="quick-btn" id="search-btn" style="width:100%;text-align:left;border-radius:8px;">🔍 Search</button>
-        <button class="quick-btn" id="code-workspace-btn" style="width:100%;text-align:left;border-radius:8px;">💻 Code</button>
+      <div id="quick-actions">
+        <button class="quick-btn" id="img-gen-btn">🎨 Image</button>
+        <button class="quick-btn" id="ghibli-btn">🌿 Ghibli Me</button>
+        <button class="quick-btn" id="file-gen-btn">📄 File / PDF</button>
+        <button class="quick-btn" id="homework-btn">📚 Homework & Study</button>
+        <button class="quick-btn" id="weather-btn">🌤 Weather</button>
+        <button class="quick-btn" id="search-btn">🔍 Search</button>
+        <button class="quick-btn" id="code-workspace-btn">💻 Code</button>
       </div>
     </div>
     <div id="sidebar-footer">
-      <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
-        <button id="archived-toggle-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">⭐ Starred</button>
-        <button id="bookmarks-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">🔖 Bookmarks</button>
-        <button id="stats-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px;font-size:11px;cursor:pointer;font-family:inherit;">📊 Stats</button>
-        
+      <div style="display:none;">
+        <button id="archived-toggle-btn">⭐ Starred</button>
+        <button id="bookmarks-btn">🔖 Bookmarks</button>
+        <button id="stats-btn">📊 Stats</button>
       </div>
       Mythic AI &middot; by Aarav Singh
     </div>
@@ -7515,15 +7512,22 @@ def pwa_manifest():
         "description": "Smart AI assistant by Aarav Singh",
         "start_url": "/",
         "display": "standalone",
+        "display_override": ["standalone", "minimal-ui", "browser"],
         "background_color": "#1a1a1a",
         "theme_color": "#10a37f",
         "orientation": "any",
         "scope": "/",
         "lang": "en",
+        "prefer_related_applications": False,
         "categories": ["productivity", "utilities"],
+        # Some browsers/validators want "any" and "maskable" as separate icon
+        # entries rather than one combined "any maskable" string — listing
+        # both forms maximizes install-eligibility across engines.
         "icons": [
-            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
         ],
         # Powers Chrome's "richer" install UI (the bigger preview card instead
         # of a plain confirm dialog). Needs at least one screenshot with
