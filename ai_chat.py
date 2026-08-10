@@ -5647,59 +5647,11 @@ function _showGenericInstallModal() {
         <div style="color:var(--muted);font-size:12.5px;margin-top:4px;">Choose your browser below</div>
       </div>
       <div style="margin:14px 0 4px;">${rows}</div>
-      <div style="text-align:center;margin:14px 0 2px;color:var(--muted);font-size:11.5px;">— or —</div>
-      <button id="generic-install-download" style="margin-top:6px;background:none;color:var(--accent);border:1px solid var(--accent);border-radius:10px;padding:10px 24px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">⬇ Download quick-launch shortcut</button>
-      <div style="color:var(--muted);font-size:11px;text-align:center;margin-top:6px;line-height:1.5;">Opens Mythic AI in a browser tab — not a full standalone app. For the real thing, use the steps above.</div>
-      <button id="generic-install-close" style="margin-top:14px;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
+      <button id="generic-install-close" style="margin-top:16px;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
     </div>`;
   document.body.appendChild(m);
   m.addEventListener('click', e => { if (e.target === m) m.remove(); });
   document.getElementById('generic-install-close').addEventListener('click', () => m.remove());
-  document.getElementById('generic-install-download').addEventListener('click', () => _downloadAppShortcut());
-}
-
-// Real, guaranteed file download — used whenever the native browser install
-// prompt isn't available (unsupported browser, or Chrome just hasn't fired
-// beforeinstallprompt yet). Downloads a small launcher file that opens
-// Mythic AI when double-clicked:
-//   - Windows: a .url internet-shortcut file (native double-click launcher,
-//     can be dragged to the desktop/taskbar/Start menu like any other app)
-//   - Everything else (Mac/Linux/Android/generic): a tiny redirect .html
-//     file that immediately opens the real app when opened
-function _downloadAppShortcut() {
-  const ua = navigator.userAgent;
-  const origin = window.location.origin + '/';
-  const isWindows = /Windows/i.test(ua);
-
-  let blob, filename;
-  if (isWindows) {
-    const urlFileContent =
-      '[InternetShortcut]\r\n' +
-      'URL=' + origin + '\r\n' +
-      'IconFile=' + window.location.origin + '/icon.ico\r\n' +
-      'IconIndex=0\r\n';
-    blob = new Blob([urlFileContent], { type: 'application/octet-stream' });
-    filename = 'Mythic AI.url';
-  } else {
-    const htmlContent =
-      '<!DOCTYPE html><html><head><meta charset="utf-8">' +
-      '<meta http-equiv="refresh" content="0; url=' + origin + '">' +
-      '<title>Mythic AI</title></head><body>' +
-      '<p>Opening Mythic AI… <a href="' + origin + '">click here if nothing happens</a>.</p>' +
-      '<script>location.replace(' + JSON.stringify(origin) + ');<\/script>' +
-      '</body></html>';
-    blob = new Blob([htmlContent], { type: 'text/html' });
-    filename = 'Mythic AI.html';
-  }
-
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
 if (installBtn) {
@@ -7537,6 +7489,7 @@ def health_check():
 @app.route("/manifest.json")
 def pwa_manifest():
     manifest = {
+        "id": "/",
         "name": "Mythic AI",
         "short_name": "Mythic AI",
         "description": "Smart AI assistant by Aarav Singh",
@@ -7551,6 +7504,16 @@ def pwa_manifest():
         "icons": [
             {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
             {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+        ],
+        # Powers Chrome's "richer" install UI (the bigger preview card instead
+        # of a plain confirm dialog). Needs at least one screenshot with
+        # form_factor "wide" (shown on desktop) and at least one WITHOUT
+        # "wide" (shown on mobile) — both are required, one alone isn't enough.
+        "screenshots": [
+            {"src": "/screenshot-wide.png",   "sizes": "1280x800", "type": "image/png",
+             "form_factor": "wide", "label": "Mythic AI chat on desktop"},
+            {"src": "/screenshot-narrow.png", "sizes": "750x1334", "type": "image/png",
+             "form_factor": "narrow", "label": "Mythic AI chat on mobile"},
         ],
         "shortcuts": [
             {"name": "New Chat", "url": "/", "description": "Start a new chat"},
