@@ -5647,11 +5647,15 @@ function _showGenericInstallModal() {
         <div style="color:var(--muted);font-size:12.5px;margin-top:4px;">Choose your browser below</div>
       </div>
       <div style="margin:14px 0 4px;">${rows}</div>
-      <button id="generic-install-close" style="margin-top:16px;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
+      <div style="text-align:center;margin:14px 0 2px;color:var(--muted);font-size:11.5px;">— or —</div>
+      <button id="generic-install-download" style="margin-top:6px;background:none;color:var(--accent);border:1px solid var(--accent);border-radius:10px;padding:10px 24px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">⬇ Download quick-launch shortcut</button>
+      <div style="color:var(--muted);font-size:11px;text-align:center;margin-top:6px;line-height:1.5;">Opens Mythic AI in a browser tab — not a full standalone app. For the real thing, use the steps above.</div>
+      <button id="generic-install-close" style="margin-top:14px;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
     </div>`;
   document.body.appendChild(m);
   m.addEventListener('click', e => { if (e.target === m) m.remove(); });
   document.getElementById('generic-install-close').addEventListener('click', () => m.remove());
+  document.getElementById('generic-install-download').addEventListener('click', () => _downloadAppShortcut());
 }
 
 // Real, guaranteed file download — used whenever the native browser install
