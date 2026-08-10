@@ -334,39 +334,6 @@ app.config.update(
 )
 
 
-# --- CORS for the public /v1/ API only ----------------------------------------
-# The /v1/... endpoints (chat completions, image generation, code execution)
-# are the public, API-key-authenticated surface meant for OTHER apps to call
-# — including directly from browser JavaScript (e.g. a client-side fetch()
-# from someone else's website). Browsers block cross-origin fetch() calls
-# unless the server explicitly sends back Access-Control-Allow-Origin, which
-# is what was missing and caused "No 'Access-Control-Allow-Origin' header is
-# present on the requested resource" errors for anyone building against this
-# API from client-side JS.
-#
-# This is scoped ONLY to /v1/ on purpose: those routes authenticate via an
-# Authorization: Bearer <api_key> header (no cookies involved), so opening
-# them up to any origin is safe. The rest of the app (the main chat web UI)
-# uses session cookies and is deliberately left alone here — broadening CORS
-# there would risk cross-site request forgery against logged-in sessions.
-@app.after_request
-def _add_cors_headers(response):
-    if request.path.startswith("/v1/"):
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-        response.headers["Access-Control-Max-Age"] = "86400"
-    return response
-
-
-@app.route("/v1/<path:_any>", methods=["OPTIONS"])
-def _v1_cors_preflight(_any):
-    # Browsers send an OPTIONS "preflight" request before the real POST when
-    # a custom header (Authorization) is involved. Without a route to answer
-    # it, the preflight itself fails before your real request is ever sent.
-    return Response(status=204)
-
-
 def get_public_origin():
     """Returns the public-facing origin (scheme + host), forced to https for
     any real domain. Render/Vercel/most hosts terminate HTTPS at their own
