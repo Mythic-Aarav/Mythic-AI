@@ -1410,6 +1410,7 @@ def get_admin_stats(include_daily=False):
     return stats
 
 
+def _conv_file(username, conv_id):
     return _os.path.join(_user_conv_dir(username), f"{conv_id}.json")
 
 def _list_conversations_file(username):
