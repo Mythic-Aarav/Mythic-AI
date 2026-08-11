@@ -5578,8 +5578,13 @@ const _pwaDiag = {
   iconsReason: null,
   swRegistered: null,
   swControlling: null,
+  swScriptURL: null,
+  swScope: null,
+  swState: null,
   beforeInstallPromptReceived: false,
+  beforeInstallPromptAt: null,
   appInstalled: false,
+  appInstalledAt: null,
   checkedAt: null,
 };
 
@@ -5641,6 +5646,10 @@ async function _runPwaDiagnostics() {
       const reg = await navigator.serviceWorker.getRegistration('/');
       _pwaDiag.swRegistered = !!reg && !!(reg.active || reg.waiting || reg.installing);
       _pwaDiag.swControlling = !!navigator.serviceWorker.controller;
+      const sw = reg && (reg.active || reg.waiting || reg.installing);
+      _pwaDiag.swScriptURL = sw ? sw.scriptURL : null;
+      _pwaDiag.swScope = reg ? reg.scope : null;
+      _pwaDiag.swState = sw ? sw.state : null;
       console.log(_pwaDiag.swRegistered ? '[PWA] Service worker registered ✅' : '[PWA] Installation unavailable because: no service worker registration was found');
       console.log(_pwaDiag.swControlling
         ? '[PWA] Service worker controlling page ✅'
@@ -5664,6 +5673,9 @@ Object.defineProperty(window, '__pwaDebug', {
     deferredPromptAvailable: !!_deferredInstallPrompt,
     displayMode: window.matchMedia('(display-mode: standalone)').matches ? 'standalone' : 'browser',
     iosStandalone: !!window.navigator.standalone,
+    origin: window.location.origin,
+    protocol: window.location.protocol,
+    manifestURL: (document.querySelector('link[rel="manifest"]') || {}).href || null,
   }),
 });
 
@@ -5673,18 +5685,22 @@ window.addEventListener('beforeinstallprompt', e => {
   e.preventDefault();
   _deferredInstallPrompt = e;
   _pwaDiag.beforeInstallPromptReceived = true;
+  _pwaDiag.beforeInstallPromptAt = new Date().toISOString();
   _showInstallBtn();
   console.log('[PWA] beforeinstallprompt received — install prompt available ✅');
+  _refreshPwaDiagnosticsPanel();
 });
 
 window.addEventListener('appinstalled', () => {
   _hideInstallBtn();
   _deferredInstallPrompt = null;
   _pwaDiag.appInstalled = true;
+  _pwaDiag.appInstalledAt = new Date().toISOString();
   localStorage.setItem('mythic_pwa_installed', '1');
   _closeInstallModal();
   _showInstallSuccessToast();
   console.log('[PWA] appinstalled fired — app installed ✅');
+  _refreshPwaDiagnosticsPanel();
 });
 
 // After diagnostics finish, log a single clear summary line so it's obvious
@@ -5712,6 +5728,104 @@ if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.
   _hideInstallBtn();
 } else {
   _showInstallBtn();
+}
+
+// ─── Live PWA diagnostics panel ─────────────────────────────────────────
+// Reports the raw, real browser state — not a summary, not a guess.
+// Toggle with Alt+Shift+P, ?pwadebug=1 in the URL, or window.showPwaDiagnostics()
+// in the console. This is separate from (and never opened automatically by)
+// the install modal.
+//
+// Honest limitation: the field below labeled "Native install prompt
+// available" can only ever be YES or NO, because that's all the web
+// platform exposes to page JavaScript — there is no public API for "why".
+// Chrome's own internal reason code (e.g. "in-incognito", "already
+// installed", "prompt previously dismissed — cooldown active") is only
+// visible through Chrome DevTools → Application → Manifest → Installability,
+// or the DevTools Protocol's Page.getInstallabilityErrors, neither of which
+// a served web page can call on itself. When every check below is ✓ but the
+// prompt is still NO, that internal reason — not a bug in this code — is
+// almost always the explanation.
+function _pwaDiagnosticsRow(label, value) {
+  return `<div style="display:flex;justify-content:space-between;gap:14px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.06);">
+    <span style="color:var(--muted);">${label}</span>
+    <span style="color:var(--text);font-weight:600;text-align:right;word-break:break-all;">${value}</span>
+  </div>`;
+}
+
+function _pwaDiagnosticsHTML() {
+  const d = window.__pwaDebug;
+  const nativeAvailable = !!_deferredInstallPrompt;
+  const allChecksPass = d.httpsOk && d.manifestOk && d.iconsOk && d.swRegistered;
+  const reasonIfNo = d.appInstalled || d.displayMode === 'standalone' || d.iosStandalone
+    ? 'Already running as the installed app.'
+    : !allChecksPass
+      ? 'A configuration check below is failing — see the ✗ row(s).'
+      : 'All checkable requirements pass. The specific internal reason (Incognito, dismissal cooldown, already installed elsewhere, etc.) is only visible via Chrome DevTools → Application → Manifest → Installability, not to page JavaScript.';
+
+  return `
+    <div style="font-weight:700;font-size:13px;margin:10px 0 4px;color:var(--accent);">Native install prompt available: ${nativeAvailable ? 'YES' : 'NO'}</div>
+    ${nativeAvailable ? '' : `<div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;line-height:1.5;">${reasonIfNo}</div>`}
+    <div style="font-weight:700;font-size:12px;margin:10px 0 2px;color:var(--text);">Origin &amp; page</div>
+    ${_pwaDiagnosticsRow('window.location.origin', d.origin)}
+    ${_pwaDiagnosticsRow('location.protocol', d.protocol)}
+    ${_pwaDiagnosticsRow('display mode', d.displayMode)}
+    ${_pwaDiagnosticsRow('iOS standalone', d.iosStandalone)}
+    <div style="font-weight:700;font-size:12px;margin:10px 0 2px;color:var(--text);">Manifest</div>
+    ${_pwaDiagnosticsRow('manifest URL', d.manifestURL || 'not linked!')}
+    ${_pwaDiagnosticsRow('manifest valid', d.manifestOk === null ? 'checking…' : d.manifestOk)}
+    ${d.manifestReason ? _pwaDiagnosticsRow('reason', d.manifestReason) : ''}
+    ${_pwaDiagnosticsRow('icons load', d.iconsOk === null ? 'checking…' : d.iconsOk)}
+    ${d.iconsReason ? _pwaDiagnosticsRow('reason', d.iconsReason) : ''}
+    <div style="font-weight:700;font-size:12px;margin:10px 0 2px;color:var(--text);">Service worker</div>
+    ${_pwaDiagnosticsRow('registered', d.swRegistered === null ? 'checking…' : d.swRegistered)}
+    ${_pwaDiagnosticsRow('controller present', d.swControlling)}
+    ${_pwaDiagnosticsRow('registration scope', d.swScope || '—')}
+    ${_pwaDiagnosticsRow('script URL', d.swScriptURL || '—')}
+    ${_pwaDiagnosticsRow('worker state', d.swState || '—')}
+    <div style="font-weight:700;font-size:12px;margin:10px 0 2px;color:var(--text);">Events</div>
+    ${_pwaDiagnosticsRow('beforeinstallprompt received', d.beforeInstallPromptReceived)}
+    ${_pwaDiagnosticsRow('received at', d.beforeInstallPromptAt || '—')}
+    ${_pwaDiagnosticsRow('appinstalled fired', d.appInstalled)}
+    ${_pwaDiagnosticsRow('fired at', d.appInstalledAt || '—')}
+  `;
+}
+
+function _refreshPwaDiagnosticsPanel() {
+  const body = document.getElementById('pwa-diag-body');
+  if (body) body.innerHTML = _pwaDiagnosticsHTML();
+}
+
+async function showPwaDiagnostics() {
+  if (!_pwaDiag.checkedAt) await _pwaDiagReady;
+  const existing = document.getElementById('pwa-diag-panel');
+  if (existing) { existing.remove(); return; }
+  const panel = document.createElement('div');
+  panel.id = 'pwa-diag-panel';
+  panel.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:10001;width:340px;max-height:70vh;overflow:auto;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px;box-shadow:0 8px 40px rgba(0,0,0,.5);font-size:12px;font-family:inherit;';
+  panel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+      <span style="font-weight:800;font-size:13.5px;color:var(--text);">🔧 PWA Diagnostics</span>
+      <button id="pwa-diag-close" style="background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;line-height:1;">✕</button>
+    </div>
+    <div id="pwa-diag-body">${_pwaDiagnosticsHTML()}</div>
+    <button id="pwa-diag-refresh" style="margin-top:10px;width:100%;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Re-run checks</button>
+  `;
+  document.body.appendChild(panel);
+  document.getElementById('pwa-diag-close').addEventListener('click', () => panel.remove());
+  document.getElementById('pwa-diag-refresh').addEventListener('click', async () => {
+    await _runPwaDiagnostics();
+    _refreshPwaDiagnosticsPanel();
+  });
+}
+window.showPwaDiagnostics = showPwaDiagnostics;
+
+window.addEventListener('keydown', e => {
+  if (e.altKey && e.shiftKey && (e.key === 'P' || e.key === 'p')) showPwaDiagnostics();
+});
+
+if (new URLSearchParams(location.search).get('pwadebug')) {
+  _pwaDiagReady.then(() => showPwaDiagnostics());
 }
 
 // ─── Install modal shell ─────────────────────────────────────────────────
@@ -5888,7 +6002,10 @@ function _showUnsupportedInstallModal() {
     <div style="color:var(--muted);font-size:13.5px;line-height:1.7;margin-bottom:${showChecklist ? '14' : '20'}px;">${message}</div>
     ${showChecklist ? _diagChecklistHTML() : ''}
     <button data-install-close style="background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
+    ${showChecklist ? '<button id="install-modal-view-diag" style="margin-top:10px;background:none;border:none;color:var(--muted);font-size:11.5px;text-decoration:underline;cursor:pointer;font-family:inherit;">View full diagnostics panel</button>' : ''}
   `);
+  const diagLink = document.getElementById('install-modal-view-diag');
+  if (diagLink) diagLink.addEventListener('click', () => { _closeInstallModal(); showPwaDiagnostics(); });
 }
 
 async function _openInstallModal() {
