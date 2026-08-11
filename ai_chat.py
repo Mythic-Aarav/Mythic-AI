@@ -2359,8 +2359,8 @@ PAGE = r"""<!DOCTYPE html>
 <meta name="apple-mobile-web-app-title" content="Mythic AI">
 
 <!-- Primary SEO -->
-<title>Mythic AI (Aarav AI) — Free Smart AI Chat Assistant</title>
-<meta name="description" content="Mythic AI — also known as Aarav AI — is a free, smart AI chat assistant for questions, writing, coding, image generation, homework help, and more, built by Aarav Singh.">
+<title>Mythic AI — Free Smart AI Chat Assistant</title>
+<meta name="description" content="Mythic AI is a free, smart AI chat assistant for questions, writing, coding, image generation, homework help, and more — built by Aarav Singh.">
 <meta name="keywords" content="Mythic AI, Aarav AI, Aarav Singh AI, AI chat assistant, free AI chatbot, AI assistant, AI image generator, AI homework helper, AI coding assistant">
 <meta name="author" content="Aarav Singh">
 <meta name="robots" content="index, follow">
@@ -2370,8 +2370,8 @@ PAGE = r"""<!DOCTYPE html>
 <!-- Open Graph / Facebook / WhatsApp / LinkedIn -->
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Mythic AI">
-<meta property="og:title" content="Mythic AI (Aarav AI) — Free Smart AI Chat Assistant">
-<meta property="og:description" content="Chat, ask questions, generate images, get homework help, and more with Mythic AI (Aarav AI) — a free, smart AI assistant built by Aarav Singh.">
+<meta property="og:title" content="Mythic AI — Free Smart AI Chat Assistant">
+<meta property="og:description" content="Chat, ask questions, generate images, get homework help, and more with Mythic AI — a free, smart AI assistant built by Aarav Singh.">
 <meta property="og:url" content="__CANONICAL_URL__">
 <meta property="og:image" content="__CANONICAL_ORIGIN__/icon-512.png">
 <meta property="og:image:width" content="512">
@@ -2380,32 +2380,49 @@ PAGE = r"""<!DOCTYPE html>
 
 <!-- Twitter Card -->
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Mythic AI (Aarav AI) — Free Smart AI Chat Assistant">
-<meta name="twitter:description" content="Chat, ask questions, generate images, get homework help, and more with Mythic AI (Aarav AI) — a free, smart AI assistant.">
+<meta name="twitter:title" content="Mythic AI — Free Smart AI Chat Assistant">
+<meta name="twitter:description" content="Chat, ask questions, generate images, get homework help, and more with Mythic AI — a free, smart AI assistant.">
 <meta name="twitter:image" content="__CANONICAL_ORIGIN__/icon-512.png">
 
 <!-- Schema.org structured data — tells Google exactly what this site is,
-     and that "Aarav AI" refers to the same app as "Mythic AI" -->
+     and that "Aarav AI" refers to the same app as "Mythic AI".
+     The WebSite entity below is what Google's "Site Name" search-result
+     feature specifically reads (see developers.google.com/search/docs/appearance/site-names) —
+     WebApplication alone is not enough to set that. Both are combined in one
+     @graph so there is a single, non-conflicting source of truth. -->
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
-  "@type": "WebApplication",
-  "name": "Mythic AI",
-  "alternateName": ["Aarav AI", "Mythic AI Chat", "Aarav Singh AI"],
-  "url": "__CANONICAL_ORIGIN__/",
-  "description": "Mythic AI (also known as Aarav AI) is a free, smart AI chat assistant for questions, writing, coding, image generation, and homework help.",
-  "applicationCategory": "Chatbot, Productivity",
-  "operatingSystem": "Any",
-  "offers": {
-    "@type": "Offer",
-    "price": "0",
-    "priceCurrency": "USD"
-  },
-  "creator": {
-    "@type": "Person",
-    "name": "Aarav Singh"
-  },
-  "image": "__CANONICAL_ORIGIN__/icon-512.png"
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "__CANONICAL_ORIGIN__/#website",
+      "name": "Mythic AI",
+      "alternateName": ["Aarav AI", "Mythic AI Chat", "Aarav Singh AI"],
+      "url": "__CANONICAL_ORIGIN__/"
+    },
+    {
+      "@type": "WebApplication",
+      "@id": "__CANONICAL_ORIGIN__/#webapp",
+      "name": "Mythic AI",
+      "alternateName": ["Aarav AI", "Mythic AI Chat", "Aarav Singh AI"],
+      "url": "__CANONICAL_ORIGIN__/",
+      "description": "Mythic AI (also known as Aarav AI) is a free, smart AI chat assistant for questions, writing, coding, image generation, and homework help.",
+      "applicationCategory": "Chatbot, Productivity",
+      "operatingSystem": "Any",
+      "isPartOf": { "@id": "__CANONICAL_ORIGIN__/#website" },
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "creator": {
+        "@type": "Person",
+        "name": "Aarav Singh"
+      },
+      "image": "__CANONICAL_ORIGIN__/icon-512.png"
+    }
+  ]
 }
 </script>
 
