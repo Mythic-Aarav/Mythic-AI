@@ -5574,6 +5574,8 @@ window.addEventListener('appinstalled', () => {
   _hideInstallBtn();
   _deferredInstallPrompt = null;
   localStorage.setItem('mythic_pwa_installed', '1');
+  _closeInstallModal();
+  _showInstallSuccessToast();
   console.log('[PWA] app installed ✅');
 });
 
@@ -5599,122 +5601,142 @@ if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.
   _showInstallBtn();
 }
 
-function _showIOSInstallModal() {
-  const existing = document.getElementById('ios-install-modal');
-  if (existing) { existing.style.display = 'flex'; return; }
+// ─── Install modal shell ─────────────────────────────────────────────────
+// One shared modal container + close behavior; each _show*Modal() below
+// just supplies the inner content for its particular install state.
+function _closeInstallModal() {
+  const m = document.getElementById('install-modal');
+  if (m) m.remove();
+}
+
+function _renderInstallModal(bodyHTML, { anchorBottom = false } = {}) {
+  _closeInstallModal();
   const m = document.createElement('div');
-  m.id = 'ios-install-modal';
-  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:9999;display:flex;align-items:flex-end;justify-content:center;padding:20px;';
+  m.id = 'install-modal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:9999;display:flex;' +
+    (anchorBottom ? 'align-items:flex-end;' : 'align-items:center;') +
+    'justify-content:center;padding:20px;';
   m.innerHTML = `
-    <div style="background:var(--panel);border:1px solid var(--border);border-radius:20px;padding:28px 24px;width:100%;max-width:420px;text-align:center;box-shadow:0 -4px 40px rgba(0,0,0,.4);">
-      <div style="font-size:42px;margin-bottom:10px;">📲</div>
-      <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">Install Mythic AI</div>
-      <div style="color:var(--muted);font-size:13.5px;line-height:1.7;margin-bottom:20px;">
-        Tap the <strong style="color:var(--text);">Share button</strong> <span style="font-size:17px;">⬆</span> at the bottom of Safari,<br>
-        then tap <strong style="color:var(--text);">"Add to Home Screen"</strong> <span style="font-size:15px;">➕</span>
-      </div>
-      <button id="ios-install-close" style="background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:20px;padding:28px 24px;width:100%;max-width:420px;text-align:center;box-shadow:0 4px 40px rgba(0,0,0,.4);">
+      ${bodyHTML}
     </div>`;
   document.body.appendChild(m);
   m.addEventListener('click', e => { if (e.target === m) m.remove(); });
-  document.getElementById('ios-install-close').addEventListener('click', () => m.remove());
+  m.querySelectorAll('[data-install-close]').forEach(btn =>
+    btn.addEventListener('click', _closeInstallModal));
+  return m;
 }
 
-function _showGenericInstallModal() {
-  const existing = document.getElementById('generic-install-modal');
-  if (existing) { existing.style.display = 'flex'; return; }
-  const m = document.createElement('div');
-  m.id = 'generic-install-modal';
-  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
-  const rows = [
-    ['🌐', 'Chrome / Edge', 'Click the ⋮ menu → "Install app" (or the ⊕ icon in the address bar)'],
-    ['📱', 'Samsung Browser', 'Tap ⋮ → "Add page to" → "Home screen"'],
-    ['🦊', 'Firefox', 'Tap ⋮ → "Install"'],
-    ['🍎', 'Safari (iOS)', 'Tap Share ⬆ → "Add to Home Screen"'],
-  ].map(([icon, name, steps]) => `
-    <div style="display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:20px;flex-shrink:0;">${icon}</span>
-      <div>
-        <div style="font-weight:700;font-size:13.5px;color:var(--text);margin-bottom:2px;">${name}</div>
-        <div style="font-size:12.5px;color:var(--muted);line-height:1.5;">${steps}</div>
-      </div>
-    </div>`).join('');
-  m.innerHTML = `
-    <div style="background:var(--panel);border:1px solid var(--border);border-radius:20px;padding:26px 24px;width:100%;max-width:420px;box-shadow:0 4px 40px rgba(0,0,0,.4);">
-      <div style="text-align:center;margin-bottom:6px;">
-        <div style="font-size:38px;margin-bottom:8px;">📲</div>
-        <div style="font-weight:700;font-size:18px;color:var(--text);">Install Mythic AI</div>
-        <div style="color:var(--muted);font-size:12.5px;margin-top:4px;">Choose your browser below</div>
-      </div>
-      <div style="margin:14px 0 4px;">${rows}</div>
-      <button id="generic-install-close" style="margin-top:16px;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
-    </div>`;
-  document.body.appendChild(m);
-  m.addEventListener('click', e => { if (e.target === m) m.remove(); });
-  document.getElementById('generic-install-close').addEventListener('click', () => m.remove());
+function _showInstallSuccessToast() {
+  const t = document.createElement('div');
+  t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);' +
+    'background:var(--accent);color:#fff;padding:12px 22px;border-radius:10px;' +
+    'font-size:13.5px;font-weight:600;z-index:10000;box-shadow:0 4px 24px rgba(0,0,0,.35);' +
+    'max-width:90vw;text-align:center;';
+  t.textContent = '✅ Mythic AI has been installed successfully!';
+  document.body.appendChild(t);
+  setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3500);
 }
 
-// Real, guaranteed file download — used whenever the native browser install
-// prompt isn't available (unsupported browser, or Chrome just hasn't fired
-// beforeinstallprompt yet). Downloads a small launcher file that opens
-// Mythic AI when double-clicked:
-//   - Windows: a .url internet-shortcut file (native double-click launcher,
-//     can be dragged to the desktop/taskbar/Start menu like any other app)
-//   - Everything else (Mac/Linux/Android/generic): a tiny redirect .html
-//     file that immediately opens the real app when opened
-function _downloadAppShortcut() {
-  const ua = navigator.userAgent;
-  const origin = window.location.origin + '/';
-  const isWindows = /Windows/i.test(ua);
+// The primary, "real install" state — beforeinstallprompt already fired and
+// the deferred event is ready to use.
+function _showNativeInstallModal() {
+  _renderInstallModal(`
+    <div style="font-size:42px;margin-bottom:10px;">📲</div>
+    <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">Install Mythic AI</div>
+    <div style="color:var(--muted);font-size:13.5px;line-height:1.6;margin-bottom:20px;">
+      Install Mythic AI on your device for a faster, app-like experience.
+    </div>
+    <button id="install-modal-primary" style="background:var(--accent);color:#fff;border:none;border-radius:10px;padding:14px 32px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit;width:100%;margin-bottom:14px;">Install Mythic AI</button>
+    <div style="color:var(--muted);font-size:11.5px;line-height:1.5;">Works offline where supported &middot; Opens like a desktop/mobile app</div>
+  `);
+  const primary = document.getElementById('install-modal-primary');
+  if (primary) primary.addEventListener('click', _triggerNativeInstall);
+}
 
-  let blob, filename;
-  if (isWindows) {
-    const urlFileContent =
-      '[InternetShortcut]\r\n' +
-      'URL=' + origin + '\r\n' +
-      'IconFile=' + window.location.origin + '/icon.ico\r\n' +
-      'IconIndex=0\r\n';
-    blob = new Blob([urlFileContent], { type: 'application/octet-stream' });
-    filename = 'Mythic AI.url';
-  } else {
-    const htmlContent =
-      '<!DOCTYPE html><html><head><meta charset="utf-8">' +
-      '<meta http-equiv="refresh" content="0; url=' + origin + '">' +
-      '<title>Mythic AI</title></head><body>' +
-      '<p>Opening Mythic AI… <a href="' + origin + '">click here if nothing happens</a>.</p>' +
-      '<script>location.replace(' + JSON.stringify(origin) + ');<\/script>' +
-      '</body></html>';
-    blob = new Blob([htmlContent], { type: 'text/html' });
-    filename = 'Mythic AI.html';
+async function _triggerNativeInstall() {
+  if (!_deferredInstallPrompt) { _closeInstallModal(); return; }
+  // A saved beforeinstallprompt event can only be used once — grab it and
+  // clear the reference immediately so it's never reused.
+  const promptEvent = _deferredInstallPrompt;
+  _deferredInstallPrompt = null;
+  const primary = document.getElementById('install-modal-primary');
+  if (primary) { primary.disabled = true; primary.style.opacity = '.7'; primary.textContent = 'Waiting for confirmation…'; }
+  try {
+    promptEvent.prompt();
+    const { outcome } = await promptEvent.userChoice;
+    // On success, the 'appinstalled' listener closes the modal and shows
+    // the success toast. On dismissal, just close — the button stays
+    // hidden/shown correctly since we already cleared _deferredInstallPrompt.
+    if (outcome !== 'accepted') {
+      _closeInstallModal();
+      _hideInstallBtn();
+    }
+  } catch (err) {
+    console.warn('[PWA] install prompt failed:', err);
+    _renderInstallModal(`
+      <div style="font-size:38px;margin-bottom:10px;">⚠️</div>
+      <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">Install didn't start</div>
+      <div style="color:var(--muted);font-size:13.5px;line-height:1.6;margin-bottom:20px;">Something interrupted the install prompt. Please try again from the Install button, or use your browser's menu.</div>
+      <button data-install-close style="background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
+    `);
   }
+}
 
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 4000);
+// iOS Safari never fires beforeinstallprompt — "Add to Home Screen" via the
+// Share sheet is the only real installation path there.
+function _showIOSInstallModal() {
+  _renderInstallModal(`
+    <div style="font-size:42px;margin-bottom:10px;">📲</div>
+    <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">Install Mythic AI</div>
+    <div style="color:var(--muted);font-size:13.5px;line-height:1.7;margin-bottom:20px;">
+      Tap the <strong style="color:var(--text);">Share button</strong> <span style="font-size:17px;">⬆</span> at the bottom of Safari,<br>
+      then tap <strong style="color:var(--text);">"Add to Home Screen"</strong> <span style="font-size:15px;">➕</span>
+    </div>
+    <button data-install-close style="background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
+  `, { anchorBottom: true });
+}
+
+// Fallback for everything else: browsers that don't support one-click PWA
+// installs at all (desktop Safari, Firefox), or Chrome-family browsers that
+// haven't fired beforeinstallprompt yet. We never fake a download here —
+// just explain, per-browser, what's actually possible.
+function _showUnsupportedInstallModal() {
+  const ua = navigator.userAgent;
+  let message;
+  if (/Firefox/i.test(ua)) {
+    message = 'Firefox doesn\'t support one-tap app installs yet. You can still bookmark Mythic AI or pin the tab for quick access.';
+  } else if (/^((?!chrome|android|crios|edgios).)*safari/i.test(ua)) {
+    message = 'On macOS Sonoma or later, open Safari\'s Share menu and choose "Add to Dock". Otherwise, try Mythic AI in Chrome or Edge to install it as an app.';
+  } else if (/Edg|Chrome|SamsungBrowser/i.test(ua)) {
+    message = 'Your browser usually supports installing Mythic AI as an app, but it isn\'t ready yet — this can take a moment on a first visit. Try reloading the page, or use the ⋮ menu → "Install app".';
+  } else {
+    message = 'This browser doesn\'t support one-tap app installs. Try opening Mythic AI in Chrome, Edge, or Samsung Internet.';
+  }
+  _renderInstallModal(`
+    <div style="font-size:38px;margin-bottom:10px;">ℹ️</div>
+    <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">Installation isn't available here</div>
+    <div style="color:var(--muted);font-size:13.5px;line-height:1.7;margin-bottom:20px;">${message}</div>
+    <button data-install-close style="background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
+  `);
+}
+
+function _openInstallModal() {
+  if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
+    _hideInstallBtn();
+    return;
+  }
+  if (_deferredInstallPrompt) {
+    _showNativeInstallModal();
+  } else if (isIOS && !window.navigator.standalone) {
+    _showIOSInstallModal();
+  } else {
+    _showUnsupportedInstallModal();
+  }
 }
 
 if (installBtn) {
-  installBtn.addEventListener('click', async () => {
-    if (_deferredInstallPrompt) {
-      _deferredInstallPrompt.prompt();
-      const { outcome } = await _deferredInstallPrompt.userChoice;
-      if (outcome === 'accepted') {
-        _hideInstallBtn();
-        _deferredInstallPrompt = null;
-      }
-    } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
-      _showIOSInstallModal();
-    } else if (window.matchMedia('(display-mode: standalone)').matches) {
-      _hideInstallBtn();
-    } else {
-      _showGenericInstallModal();
-    }
-  });
+  installBtn.addEventListener('click', _openInstallModal);
 }
 
 const notifBanner     = document.getElementById('notif-banner');
