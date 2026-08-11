@@ -5553,6 +5553,7 @@ document.addEventListener('keydown', e => {
 // ─── PWA INSTALL BUTTON ──────────────────────────────────────────────────────
 const installBtn = document.getElementById('install-btn');
 let _deferredInstallPrompt = null;
+let _relatedAppInstalled = false; // set true if getInstalledRelatedApps() finds an existing Mythic AI install
 
 function _showInstallBtn() {
   if (!installBtn) return;
@@ -5737,6 +5738,7 @@ if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.
   if ('getInstalledRelatedApps' in navigator) {
     navigator.getInstalledRelatedApps().then(apps => {
       if (apps && apps.length > 0) {
+        _relatedAppInstalled = true;
         _hideInstallBtn();
         console.log('[PWA] getInstalledRelatedApps() found an existing install — hiding Install button');
       }
@@ -5943,11 +5945,14 @@ function _showIOSInstallModal() {
 // haven't fired beforeinstallprompt yet. We never fake a download here —
 // just explain, per-browser, what's actually possible.
 // STATE D — already running as an installed PWA.
-function _showAlreadyInstalledModal() {
+function _showAlreadyInstalledModal(viaRelatedApps) {
+  const message = viaRelatedApps
+    ? "Mythic AI is already installed on this device — you're just viewing it in a regular browser tab right now. Open it from your home screen/apps list, or use the \u201cOpen in app\u201d button in your browser's address bar."
+    : "You're running the installed app on this device.";
   _renderInstallModal(`
     <div style="font-size:38px;margin-bottom:10px;">✅</div>
     <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">Mythic AI is already installed</div>
-    <div style="color:var(--muted);font-size:13.5px;line-height:1.6;margin-bottom:20px;">You're running the installed app on this device.</div>
+    <div style="color:var(--muted);font-size:13.5px;line-height:1.6;margin-bottom:20px;">${message}</div>
     <button data-install-close style="background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
   `);
 }
@@ -6025,11 +6030,19 @@ function _showUnsupportedInstallModal() {
 async function _openInstallModal() {
   if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
     _hideInstallBtn();
-    _showAlreadyInstalledModal();
+    _showAlreadyInstalledModal(false);
     return;
   }
   if (_deferredInstallPrompt) {
     _showNativeInstallModal();
+    return;
+  }
+  // getInstalledRelatedApps() already told us this IS installed, just not
+  // in this tab — show that instead of the generic "hasn't appeared yet"
+  // fallback, which would be misleading here.
+  if (_relatedAppInstalled) {
+    _hideInstallBtn();
+    _showAlreadyInstalledModal(true);
     return;
   }
   // Make sure diagnostics have finished at least once before deciding what
