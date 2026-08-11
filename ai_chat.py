@@ -5563,38 +5563,151 @@ function _hideInstallBtn() {
   if (installBtn) installBtn.style.display = 'none';
 }
 
+// ─── Runtime PWA diagnostics ─────────────────────────────────────────────
+// Real, live checks (secure context, manifest fetched + validated the same
+// way the browser reads it, every manifest icon actually resolving, service
+// worker registration + control state) — run on load, logged to console,
+// and re-used by the install modal so it can show the ACTUAL detected
+// reason instead of a canned message. Inspect at any time via
+// window.__pwaDebug in DevTools.
+const _pwaDiag = {
+  httpsOk: null,
+  manifestOk: null,
+  manifestReason: null,
+  iconsOk: null,
+  iconsReason: null,
+  swRegistered: null,
+  swControlling: null,
+  beforeInstallPromptReceived: false,
+  appInstalled: false,
+  checkedAt: null,
+};
+
+async function _runPwaDiagnostics() {
+  _pwaDiag.httpsOk = window.isSecureContext === true;
+  console.log(_pwaDiag.httpsOk
+    ? '[PWA] Secure context OK (HTTPS or localhost)'
+    : '[PWA] Installation unavailable because: page is not a secure context (needs HTTPS)');
+
+  try {
+    const link = document.querySelector('link[rel="manifest"]');
+    const manifestUrl = link ? link.href : new URL('/manifest.json', location.href).href;
+    const res = await fetch(manifestUrl, { cache: 'no-store' });
+    if (!res.ok) {
+      _pwaDiag.manifestOk = false;
+      _pwaDiag.manifestReason = `manifest request failed (HTTP ${res.status})`;
+    } else {
+      const m = await res.json();
+      const missing = ['name', 'short_name', 'start_url', 'display', 'icons']
+        .filter(k => !m[k] || (Array.isArray(m[k]) && m[k].length === 0));
+      if (missing.length) {
+        _pwaDiag.manifestOk = false;
+        _pwaDiag.manifestReason = `manifest missing required field(s): ${missing.join(', ')}`;
+      } else if (!['standalone', 'fullscreen', 'minimal-ui'].includes(m.display)) {
+        _pwaDiag.manifestOk = false;
+        _pwaDiag.manifestReason = `manifest "display" is "${m.display}" (needs standalone/fullscreen/minimal-ui)`;
+      } else {
+        _pwaDiag.manifestOk = true;
+        const iconChecks = await Promise.all((m.icons || []).map(icon =>
+          fetch(new URL(icon.src, manifestUrl), { method: 'HEAD', cache: 'no-store' })
+            .then(r => ({ src: icon.src, ok: r.ok, sizes: icon.sizes || '' }))
+            .catch(() => ({ src: icon.src, ok: false, sizes: icon.sizes || '' }))
+        ));
+        const broken = iconChecks.filter(c => !c.ok);
+        const has192 = iconChecks.some(c => c.ok && c.sizes.split('x')[0] >= 192);
+        const has512 = iconChecks.some(c => c.ok && c.sizes.split('x')[0] >= 512);
+        if (broken.length) {
+          _pwaDiag.iconsOk = false;
+          _pwaDiag.iconsReason = `icon(s) failed to load: ${broken.map(b => b.src).join(', ')}`;
+        } else if (!has192 || !has512) {
+          _pwaDiag.iconsOk = false;
+          _pwaDiag.iconsReason = 'manifest needs at least one icon ≥192px and one ≥512px';
+        } else {
+          _pwaDiag.iconsOk = true;
+        }
+      }
+    }
+  } catch (err) {
+    _pwaDiag.manifestOk = false;
+    _pwaDiag.manifestReason = 'manifest fetch threw: ' + err.message;
+  }
+  console.log(_pwaDiag.manifestOk ? '[PWA] Manifest valid ✅' : `[PWA] Installation unavailable because: ${_pwaDiag.manifestReason}`);
+  if (_pwaDiag.manifestOk) {
+    console.log(_pwaDiag.iconsOk ? '[PWA] Manifest icons OK ✅' : `[PWA] Installation unavailable because: ${_pwaDiag.iconsReason}`);
+  }
+
+  if ('serviceWorker' in navigator) {
+    try {
+      const reg = await navigator.serviceWorker.getRegistration('/');
+      _pwaDiag.swRegistered = !!reg && !!(reg.active || reg.waiting || reg.installing);
+      _pwaDiag.swControlling = !!navigator.serviceWorker.controller;
+      console.log(_pwaDiag.swRegistered ? '[PWA] Service worker registered ✅' : '[PWA] Installation unavailable because: no service worker registration was found');
+      console.log(_pwaDiag.swControlling
+        ? '[PWA] Service worker controlling page ✅'
+        : '[PWA] Service worker not controlling this load yet (normal on a first visit — Chrome does not require this for installability, only that a registration exists)');
+    } catch (err) {
+      _pwaDiag.swRegistered = false;
+      console.warn('[PWA] Service worker check failed:', err);
+    }
+  } else {
+    _pwaDiag.swRegistered = false;
+    console.warn('[PWA] Installation unavailable because: navigator.serviceWorker is unsupported in this browser');
+  }
+
+  _pwaDiag.checkedAt = Date.now();
+  return _pwaDiag;
+}
+
+Object.defineProperty(window, '__pwaDebug', {
+  get: () => ({
+    ..._pwaDiag,
+    deferredPromptAvailable: !!_deferredInstallPrompt,
+    displayMode: window.matchMedia('(display-mode: standalone)').matches ? 'standalone' : 'browser',
+    iosStandalone: !!window.navigator.standalone,
+  }),
+});
+
+const _pwaDiagReady = _runPwaDiagnostics();
+
 window.addEventListener('beforeinstallprompt', e => {
   e.preventDefault();
   _deferredInstallPrompt = e;
+  _pwaDiag.beforeInstallPromptReceived = true;
   _showInstallBtn();
-  console.log('[PWA] beforeinstallprompt fired — installable ✅');
+  console.log('[PWA] beforeinstallprompt received — install prompt available ✅');
 });
 
 window.addEventListener('appinstalled', () => {
   _hideInstallBtn();
   _deferredInstallPrompt = null;
+  _pwaDiag.appInstalled = true;
   localStorage.setItem('mythic_pwa_installed', '1');
   _closeInstallModal();
   _showInstallSuccessToast();
-  console.log('[PWA] app installed ✅');
+  console.log('[PWA] appinstalled fired — app installed ✅');
 });
 
-// Diagnostic: if this warning appears in the console, open DevTools >
-// Application > Manifest on the deployed HTTPS URL — it names the exact
-// installability blocker (usually: not served over HTTPS, manifest
-// 404/invalid JSON, service worker not registered, or already installed).
-setTimeout(() => {
-  if (!_deferredInstallPrompt
-      && !window.matchMedia('(display-mode: standalone)').matches
-      && !window.navigator.standalone) {
-    console.warn('[PWA] beforeinstallprompt never fired. Check DevTools > Application > Manifest for the reason.');
+// After diagnostics finish, log a single clear summary line so it's obvious
+// at a glance whether beforeinstallprompt not firing is expected (browser
+// genuinely doesn't support it, or checks failed) or unexplained (checks
+// all pass — likely Incognito/Private mode, a recent dismissal cooldown,
+// or already installed under a different profile, all of which are normal
+// Chrome behavior with no code-level fix).
+_pwaDiagReady.then(() => {
+  if (_deferredInstallPrompt || window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) return;
+  const allChecksPass = _pwaDiag.httpsOk && _pwaDiag.manifestOk && _pwaDiag.iconsOk && _pwaDiag.swRegistered;
+  if (allChecksPass) {
+    console.log('[PWA] Install prompt available — all installability checks pass, but beforeinstallprompt has not fired on this load. Common causes: Incognito/Private browsing, a recently-dismissed prompt (Chrome cools down for a few days), or the app already installed in another profile.');
+  } else {
+    console.warn('[PWA] Installation currently blocked — see the "[PWA] Installation unavailable because" lines above for the exact reason(s).');
   }
-}, 3000);
+});
 
 // Only hide the Install button once we're SURE the app is already running
-// as an installed PWA — otherwise keep it visible (with a generic
-// "here's how" fallback below) so it's never mysteriously missing on
-// desktop Chrome/Firefox or browsers that don't fire beforeinstallprompt.
+// as an installed PWA — otherwise keep it visible (the install modal below
+// adapts to whatever state is actually detected) so it's never mysteriously
+// missing on desktop Chrome/Firefox or browsers that don't fire
+// beforeinstallprompt.
 if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
   _hideInstallBtn();
 } else {
@@ -5701,34 +5814,97 @@ function _showIOSInstallModal() {
 // installs at all (desktop Safari, Firefox), or Chrome-family browsers that
 // haven't fired beforeinstallprompt yet. We never fake a download here —
 // just explain, per-browser, what's actually possible.
-function _showUnsupportedInstallModal() {
-  const ua = navigator.userAgent;
-  let message;
-  if (/Firefox/i.test(ua)) {
-    message = 'Firefox doesn\'t support one-tap app installs yet. You can still bookmark Mythic AI or pin the tab for quick access.';
-  } else if (/^((?!chrome|android|crios|edgios).)*safari/i.test(ua)) {
-    message = 'On macOS Sonoma or later, open Safari\'s Share menu and choose "Add to Dock". Otherwise, try Mythic AI in Chrome or Edge to install it as an app.';
-  } else if (/Edg|Chrome|SamsungBrowser/i.test(ua)) {
-    message = 'Your browser usually supports installing Mythic AI as an app, but it isn\'t ready yet — this can take a moment on a first visit. Try reloading the page, or use the ⋮ menu → "Install app".';
-  } else {
-    message = 'This browser doesn\'t support one-tap app installs. Try opening Mythic AI in Chrome, Edge, or Samsung Internet.';
-  }
+// STATE D — already running as an installed PWA.
+function _showAlreadyInstalledModal() {
   _renderInstallModal(`
-    <div style="font-size:38px;margin-bottom:10px;">ℹ️</div>
-    <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">Installation isn't available here</div>
-    <div style="color:var(--muted);font-size:13.5px;line-height:1.7;margin-bottom:20px;">${message}</div>
+    <div style="font-size:38px;margin-bottom:10px;">✅</div>
+    <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">Mythic AI is already installed</div>
+    <div style="color:var(--muted);font-size:13.5px;line-height:1.6;margin-bottom:20px;">You're running the installed app on this device.</div>
     <button data-install-close style="background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
   `);
 }
 
-function _openInstallModal() {
+// A small ✓/✗ readout of the live diagnostic results, used by both STATE B
+// (browser supports installs, prompt just hasn't fired) and the genuine
+// failure case, so the reason shown is always the real, current state —
+// never a guess.
+function _diagChecklistHTML() {
+  const rows = [
+    ['Secure context (HTTPS/localhost)', _pwaDiag.httpsOk],
+    ['Manifest valid', _pwaDiag.manifestOk],
+    ['Manifest icons load', _pwaDiag.iconsOk],
+    ['Service worker registered', _pwaDiag.swRegistered],
+  ];
+  return `<div style="text-align:left;background:var(--bg,rgba(0,0,0,.15));border-radius:10px;padding:10px 14px;margin-bottom:16px;">` +
+    rows.map(([label, ok]) => `
+      <div style="display:flex;justify-content:space-between;gap:10px;padding:4px 0;font-size:12px;color:var(--muted);">
+        <span>${label}</span>
+        <span style="color:${ok === false ? '#e5484d' : ok === true ? 'var(--accent)' : 'var(--muted)'};font-weight:700;">
+          ${ok === false ? '✗' : ok === true ? '✓' : '…'}
+        </span>
+      </div>`).join('') +
+    `</div>`;
+}
+
+// STATE B/C — no deferred prompt available. Show what the live diagnostics
+// actually found: a concrete failure reason if one exists, or (when every
+// check passes) an honest explanation of why Chrome still might not have
+// offered the prompt, plus real per-browser fallback instructions.
+function _showUnsupportedInstallModal() {
+  const ua = navigator.userAgent;
+  const isChromiumFamily = /Edg|Chrome|SamsungBrowser/i.test(ua) && !/Firefox/i.test(ua);
+  const diagFailed = _pwaDiag.checkedAt && (
+    _pwaDiag.httpsOk === false || _pwaDiag.manifestOk === false ||
+    _pwaDiag.iconsOk === false || _pwaDiag.swRegistered === false
+  );
+  const failureReason = !_pwaDiag.httpsOk ? 'This page is not being served over HTTPS (or localhost), which PWA installation requires.'
+    : !_pwaDiag.manifestOk ? `Manifest problem: ${_pwaDiag.manifestReason}`
+    : !_pwaDiag.iconsOk ? `Icon problem: ${_pwaDiag.iconsReason}`
+    : !_pwaDiag.swRegistered ? 'No service worker registration was found for this page.'
+    : null;
+
+  let title, message, showChecklist = false;
+  if (diagFailed) {
+    title = 'Installation is blocked';
+    message = failureReason;
+  } else if (isChromiumFamily) {
+    title = "Install prompt hasn't appeared yet";
+    message = 'Every installability check below passes, so your browser does support installing Mythic AI — Chrome just hasn\'t offered the prompt on this visit. That usually means Private/Incognito browsing, a prompt you dismissed recently (Chrome pauses re-offering it for a few days), or the app already installed under a different profile. You can also install manually from the ⋮ menu → "Install app".';
+    showChecklist = true;
+  } else if (/Firefox/i.test(ua)) {
+    title = "Installation isn't available here";
+    message = 'Firefox doesn\'t support one-tap app installs yet. You can still bookmark Mythic AI or pin the tab for quick access.';
+  } else if (/^((?!chrome|android|crios|edgios).)*safari/i.test(ua)) {
+    title = "Installation isn't available here";
+    message = 'On macOS Sonoma or later, open Safari\'s Share menu and choose "Add to Dock". Otherwise, try Mythic AI in Chrome or Edge to install it as an app.';
+  } else {
+    title = "Installation isn't available here";
+    message = 'This browser doesn\'t support one-tap app installs. Try opening Mythic AI in Chrome, Edge, or Samsung Internet.';
+  }
+
+  _renderInstallModal(`
+    <div style="font-size:38px;margin-bottom:10px;">${diagFailed ? '⚠️' : 'ℹ️'}</div>
+    <div style="font-weight:700;font-size:18px;margin-bottom:8px;color:var(--text);">${title}</div>
+    <div style="color:var(--muted);font-size:13.5px;line-height:1.7;margin-bottom:${showChecklist ? '14' : '20'}px;">${message}</div>
+    ${showChecklist ? _diagChecklistHTML() : ''}
+    <button data-install-close style="background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px 32px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;width:100%;">Got it!</button>
+  `);
+}
+
+async function _openInstallModal() {
   if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
     _hideInstallBtn();
+    _showAlreadyInstalledModal();
     return;
   }
   if (_deferredInstallPrompt) {
     _showNativeInstallModal();
-  } else if (isIOS && !window.navigator.standalone) {
+    return;
+  }
+  // Make sure diagnostics have finished at least once before deciding what
+  // to show, so the checklist/reason is never stale or half-computed.
+  if (!_pwaDiag.checkedAt) await _pwaDiagReady;
+  if (isIOS && !window.navigator.standalone) {
     _showIOSInstallModal();
   } else {
     _showUnsupportedInstallModal();
