@@ -5892,12 +5892,12 @@ async function _triggerNativeInstall() {
   try {
     promptEvent.prompt();
     const { outcome } = await promptEvent.userChoice;
-    // On success, the 'appinstalled' listener closes the modal and shows
-    // the success toast. On dismissal, just close — the button stays
-    // hidden/shown correctly since we already cleared _deferredInstallPrompt.
+    // On success, the 'appinstalled' listener closes the modal, hides the
+    // button, and shows the success toast. On dismissal/cancel, just close
+    // the modal — the Install button must stay VISIBLE (per spec: only
+    // 'appinstalled' or already-standalone-on-load may hide it).
     if (outcome !== 'accepted') {
       _closeInstallModal();
-      _hideInstallBtn();
     }
   } catch (err) {
     console.warn('[PWA] install prompt failed:', err);
