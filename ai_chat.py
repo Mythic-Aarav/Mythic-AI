@@ -7840,6 +7840,7 @@ def health_check():
 @app.route("/manifest.json")
 def pwa_manifest():
     manifest = {
+        "id": "/",
         "name": "Mythic AI",
         "short_name": "Mythic AI",
         "description": "Smart AI assistant by Aarav Singh",
@@ -7852,11 +7853,26 @@ def pwa_manifest():
         "lang": "en",
         "categories": ["productivity", "utilities"],
         "icons": [
-            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+            # "any" and "maskable" are declared as SEPARATE icon entries
+            # (not combined "any maskable" on one entry) — combining them
+            # is flagged by Chrome's Installability panel as likely to
+            # render with wrong padding on some platforms.
+            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": "/icon.png",     "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+        ],
+        "screenshots": [
+            {"src": "/screenshot-wide.png",   "sizes": "1280x800",  "type": "image/png", "form_factor": "wide"},
+            {"src": "/screenshot-narrow.png", "sizes": "750x1334",  "type": "image/png", "form_factor": "narrow"},
         ],
         "shortcuts": [
-            {"name": "New Chat", "url": "/", "description": "Start a new chat"},
+            {
+                "name": "New Chat",
+                "url": "/",
+                "description": "Start a new chat",
+                "icons": [{"src": "/icon-96.png", "sizes": "96x96", "type": "image/png"}],
+            },
         ],
     }
     return Response(
