@@ -7887,7 +7887,7 @@ def robots_txt():
         "",
         f"Sitemap: {origin}/sitemap.xml",
     ]
-    return Response("\n".join(lines), mimetype="text/plain; charset=utf-8")
+    return Response("\n".join(lines), mimetype="text/plain")
 
 
 @app.route("/sitemap.xml")
@@ -7907,7 +7907,7 @@ def sitemap_xml():
     <priority>1.0</priority>
   </url>
 </urlset>"""
-    return Response(xml, mimetype="application/xml; charset=utf-8")
+    return Response(xml, mimetype="application/xml")
 
 
 def _make_mythic_icon_png(size=192):
@@ -9157,7 +9157,7 @@ def render_page():
     leak the literal __CANONICAL_URL__ placeholder text."""
     origin = get_public_origin()
     html = PAGE.replace("__CANONICAL_URL__", origin + "/").replace("__CANONICAL_ORIGIN__", origin)
-    return Response(html, mimetype="text/html; charset=utf-8")
+    return Response(html, mimetype="text/html")
 
 
 @app.route("/")
@@ -9242,7 +9242,7 @@ def claim_owner(secret):
     return Response(
         "You're now recognized as the account owner on this browser. "
         "<a href='/api-usage'>Go to API keys →</a>",
-        mimetype="text/html; charset=utf-8")
+        mimetype="text/html")
 
 
 # --- API key management (open to everyone — no owner gate) --------------------
@@ -9493,7 +9493,7 @@ async function doCreateKey() {
 loadKeys();
 </script>
 </body></html>"""
-    return Response(html, mimetype="text/html; charset=utf-8")
+    return Response(html, mimetype="text/html")
 
 
 @app.route("/analytics")
@@ -9923,7 +9923,7 @@ def analytics_dashboard():
 
 </body>
 </html>"""
-    return Response(html, mimetype="text/html; charset=utf-8")
+    return Response(html, mimetype="text/html")
 
 
 
@@ -10500,7 +10500,7 @@ def public_share_page(share_id):
     access to the viewer's own conversations. It does offer a "Continue
     this conversation" action, which forks a private copy for the visitor
     (see api_continue_shared_chat) rather than editing the original."""
-    return Response(SHARE_PAGE, mimetype="text/html; charset=utf-8")
+    return Response(SHARE_PAGE, mimetype="text/html")
 
 
 def _collect_full_reply(chunks):
@@ -11780,7 +11780,7 @@ def chat():
                 yield chunk.encode("utf-8")
 
         return Response(stream_with_context(generate_ephemeral()),
-                         mimetype="text/plain; charset=utf-8")
+                         mimetype="text/plain")
 
     if regenerate:
         if not conv_id:
@@ -11910,7 +11910,7 @@ def chat():
 
         save_conversation(username, conv_id, conv)
 
-    resp = Response(stream_with_context(generate()), mimetype="text/plain; charset=utf-8")
+    resp = Response(stream_with_context(generate()), mimetype="text/plain")
     resp.headers["Content-Type"] = "text/plain; charset=utf-8"
     resp.headers["X-Conversation-Id"] = conv_id
     return resp
