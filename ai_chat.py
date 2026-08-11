@@ -2423,6 +2423,8 @@ PAGE = r"""<!DOCTYPE html>
     --text:#ececec; --muted:#8e8ea0; --accent:#10a37f;
     --accent-dim:#1a3a30; --user-bubble:#2a2a2a; --user-text:#ececec;
     --ai-bubble:#1a1a1a; --sidebar-w:260px; --msg-font-size:14.5px;
+    --composer-bg:rgba(42,42,42,.72); --composer-border:rgba(255,255,255,.08);
+    --composer-shadow:0 12px 32px rgba(0,0,0,.35), 0 2px 8px rgba(0,0,0,.25);
   }
   * { box-sizing:border-box; margin:0; padding:0; }
   html,body { height:100%; background:var(--bg); color:var(--text);
@@ -2435,6 +2437,8 @@ PAGE = r"""<!DOCTYPE html>
     --bg:#f7f7f8; --panel:#ffffff; --border:#e3e3e6;
     --text:#1f1f1f; --muted:#6b6b76; --accent-dim:#e3f5ef;
     --user-bubble:#eef0f2; --user-text:#1f1f1f; --ai-bubble:#ffffff;
+    --composer-bg:rgba(255,255,255,.78); --composer-border:rgba(0,0,0,.07);
+    --composer-shadow:0 12px 32px rgba(0,0,0,.10), 0 2px 8px rgba(0,0,0,.06);
   }
 
   #sidebar { width:var(--sidebar-w); flex-shrink:0; background:var(--panel);
@@ -2714,26 +2718,33 @@ PAGE = r"""<!DOCTYPE html>
     display:none; align-items:center; gap:8px; font-size:12.5px; color:var(--muted); flex-shrink:0; }
   #pending-attach.show { display:flex; }
   #pending-attach button { background:none; border:none; color:var(--muted); cursor:pointer; }
-  .input-area { padding:10px 20px 16px; border-top:1px solid var(--border);
-    background:var(--bg); max-width:760px; margin:0 auto; width:100%; flex-shrink:0; }
-  .input-row { display:flex; gap:8px; align-items:flex-end; background:var(--panel);
-    border:1.5px solid var(--border); border-radius:14px; padding:8px 10px; }
-  .input-row:focus-within { border-color:var(--accent); }
-  .tool-btn { background:none; border:none; color:var(--muted); cursor:pointer;
-    width:36px; height:36px; border-radius:8px; font-size:18px; flex-shrink:0;
+  .input-area { padding:14px 20px 6px; border-top:none;
+    background:transparent; max-width:760px; margin:0 auto; width:100%; flex-shrink:0; }
+  .input-row { display:flex; flex-direction:column; gap:6px;
+    background:var(--composer-bg); border:1px solid var(--composer-border);
+    border-radius:28px; padding:16px 16px 10px;
+    box-shadow:var(--composer-shadow);
+    backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    transition:box-shadow .2s ease, border-color .2s ease, transform .15s ease; }
+  .input-row:focus-within { border-color:var(--accent);
+    box-shadow:var(--composer-shadow), 0 0 0 3px var(--accent-dim); }
+  .composer-bottom-row { display:flex; align-items:center; justify-content:space-between; }
+  .tool-btn { background:none; border:1px solid var(--composer-border); color:var(--muted); cursor:pointer;
+    width:38px; height:38px; border-radius:50%; font-size:18px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center;
     touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
-  .tool-btn:hover { background:var(--accent-dim); color:var(--accent); }
+  .tool-btn:hover { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
   .tool-btn.active { color:var(--accent); }
-  textarea { flex:1; resize:none; background:transparent; border:none; color:var(--text);
-    font-size:14.5px; font-family:inherit; line-height:1.4; max-height:140px;
-    outline:none; padding:4px 0; }
+  textarea { width:100%; resize:none; background:transparent; border:none; color:var(--text);
+    font-size:15.5px; font-family:inherit; line-height:1.5; max-height:160px; min-height:26px;
+    outline:none; padding:2px 4px 8px; }
   textarea::placeholder { color:var(--muted); }
-  #send-btn { background:var(--accent); color:#fff; border:none; border-radius:10px;
-    width:36px; height:36px; font-size:18px; cursor:pointer; flex-shrink:0;
+  #send-btn { background:var(--accent); color:#fff; border:none; border-radius:50%;
+    width:38px; height:38px; font-size:18px; cursor:pointer; flex-shrink:0;
     display:flex; align-items:center; justify-content:center;
+    box-shadow:0 2px 10px rgba(0,0,0,.18);
     touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
-  #send-btn:disabled { background:var(--accent-dim); color:var(--muted); cursor:not-allowed; }
+  #send-btn:disabled { background:var(--accent-dim); color:var(--muted); cursor:not-allowed; box-shadow:none; }
   #send-btn.generating { background:#ef4444; }
   #send-btn.generating:hover { opacity:.9; }
   #voice-btn.listening { color:#ef4444; animation:pulse 1s infinite; }
@@ -2803,9 +2814,9 @@ PAGE = r"""<!DOCTYPE html>
     .msg-actions { opacity:1; height:26px; }
     .msg-actions button { font-size:13px; padding:4px 9px; min-width:30px; min-height:26px; }
 
-    .input-area { padding:8px 10px max(10px,env(safe-area-inset-bottom)); }
-    .input-row { padding:6px 8px; }
-    textarea { font-size:16px; }
+    .input-area { padding:8px 10px max(8px,env(safe-area-inset-bottom)); }
+    .input-row { padding:12px 12px 8px; border-radius:22px; }
+    textarea { font-size:16px; padding:2px 2px 6px; }
     .tool-btn { width:34px; height:34px; font-size:17px; }
     #send-btn { width:34px; height:34px; font-size:16px; }
     #ai-disclaimer { font-size:10.5px; padding:0 12px; }
@@ -2962,26 +2973,20 @@ PAGE = r"""<!DOCTYPE html>
         <div class="input-row">
           <input type="file" id="file-input" accept="image/*,.txt,.md,.csv,.json,.pdf,.docx" style="display:none">
           <input type="file" id="camera-input" accept="image/*" capture="environment" style="display:none">
-          <button class="tool-btn" id="plus-btn" type="button" title="Add photo or file">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19"/>
-              <line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
-          </button>
-          <textarea id="input" rows="1" placeholder="Message Mythic AI..."></textarea>
-          <button class="tool-btn" id="voice-btn" type="button" title="Voice input">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-              <line x1="12" y1="19" x2="12" y2="23"/>
-              <line x1="8" y1="23" x2="16" y2="23"/>
-            </svg>
-          </button>
-          <button id="send-btn" type="submit" title="Send">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-            </svg>
-          </button>
+          <textarea id="input" rows="1" placeholder="Write a message..."></textarea>
+          <div class="composer-bottom-row">
+            <button class="tool-btn" id="plus-btn" type="button" title="Add photo or file">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"/>
+                <line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+            </button>
+            <button id="send-btn" type="submit" title="Send">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+              </svg>
+            </button>
+          </div>
         </div>
       </form>
       <div id="ai-disclaimer">Mythic AI is AI and can make mistakes. Please double-check responses.</div>
@@ -3809,6 +3814,7 @@ stopSpeakBtn.addEventListener('click', () => {
 
 function setupVoice() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!voiceBtn) return;
   if (!SR) { voiceBtn.title = 'Voice not supported in this browser'; return; }
   recognition = new SR();
   recognition.continuous = false;
@@ -3831,7 +3837,7 @@ function setupVoice() {
   recognition.onerror = () => voiceBtn.classList.remove('active', 'listening');
 }
 setupVoice();
-voiceBtn.addEventListener('click', () => {
+if (voiceBtn) voiceBtn.addEventListener('click', () => {
   if (!recognition) { alert('Voice input is not supported in this browser. Try Chrome.'); return; }
   if (voiceBtn.classList.contains('listening')) { recognition.stop(); return; }
   recognition.start();
