@@ -5728,6 +5728,20 @@ if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.
   _hideInstallBtn();
 } else {
   _showInstallBtn();
+  // Covers the case standalone-mode can't: the app IS installed, but this
+  // tab was opened as a normal URL rather than launched from the installed
+  // app icon (display-mode is still "browser" here). Chrome's own omnibox
+  // knows this via its "Open in app" button; getInstalledRelatedApps() is
+  // the one API that lets the page know it too, via the
+  // related_applications self-reference declared in manifest.json.
+  if ('getInstalledRelatedApps' in navigator) {
+    navigator.getInstalledRelatedApps().then(apps => {
+      if (apps && apps.length > 0) {
+        _hideInstallBtn();
+        console.log('[PWA] getInstalledRelatedApps() found an existing install — hiding Install button');
+      }
+    }).catch(() => {});
+  }
 }
 
 // ─── Live PWA diagnostics panel ─────────────────────────────────────────
@@ -7873,6 +7887,17 @@ def pwa_manifest():
                 "description": "Start a new chat",
                 "icons": [{"src": "/icon-96.png", "sizes": "96x96", "type": "image/png"}],
             },
+        ],
+        # Lets navigator.getInstalledRelatedApps() (called client-side) detect
+        # an existing Mythic AI install even when the current tab is NOT
+        # running in standalone mode — e.g. the user opened the plain URL in
+        # a normal browser tab after already installing the app. Without
+        # this, the page has no way to see that state and the Install button
+        # stays visibly (but harmlessly) shown. "prefer_related_applications"
+        # is deliberately omitted/false so this does NOT suppress
+        # beforeinstallprompt for genuinely new installs.
+        "related_applications": [
+            {"platform": "webapp", "url": get_public_origin() + "/manifest.json"},
         ],
     }
     return Response(
