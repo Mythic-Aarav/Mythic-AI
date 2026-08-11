@@ -2459,7 +2459,28 @@ PAGE = r"""<!DOCTYPE html>
     touch-action:manipulation; }
   .conv-item:hover .menu-btn { opacity:1; }
   .conv-item .menu-btn:hover { color:var(--accent); background:rgba(255,255,255,.06); }
-  #sidebar-footer { padding:12px; font-size:11px; color:var(--muted); border-top:1px solid var(--border); }
+  #sidebar-footer { padding:8px; font-size:11px; color:var(--muted); border-top:1px solid var(--border); }
+
+  #sidebar-profile { display:flex; align-items:center; gap:10px; width:100%;
+    background:none; border:none; padding:8px 6px; border-radius:10px; cursor:pointer;
+    font-family:inherit; text-align:left; touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+  #sidebar-profile:hover { background:var(--panel); }
+  #sidebar-profile-avatar { width:40px; height:40px; min-width:40px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center; flex-shrink:0;
+    font-size:15px; font-weight:700; color:#fff; letter-spacing:.2px;
+    background:linear-gradient(135deg,var(--accent),#0d8f6f);
+    border:1px solid var(--border); box-shadow:0 2px 6px rgba(0,0,0,.25);
+    object-fit:cover; overflow:hidden; image-rendering:auto; }
+  #sidebar-profile-avatar img { width:100%; height:100%; object-fit:cover; border-radius:50%; display:block; }
+  #sidebar-profile-text { display:flex; flex-direction:column; min-width:0; overflow:hidden; }
+  #sidebar-profile-name { font-size:13px; font-weight:600; color:var(--text);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #sidebar-profile-sub { font-size:11px; color:var(--muted); }
+  #sidebar-byline { text-align:center; padding-top:8px; margin-top:4px; border-top:1px solid var(--border); }
+
+  @media(max-width:768px) {
+    #sidebar-profile-avatar { width:38px; height:38px; min-width:38px; font-size:14px; }
+  }
 
   .app { display:flex; flex-direction:column; height:100vh;
     height:calc(var(--app-height, 100vh)); height:100dvh; flex:1; min-width:0; min-height:0; }
@@ -2546,6 +2567,33 @@ PAGE = r"""<!DOCTYPE html>
   body.pseudo-fullscreen #sidebar-toggle,
   body.pseudo-fullscreen header .left h1 { display:none; }
   body.pseudo-fullscreen header { padding-top:calc(6px + env(safe-area-inset-top)); padding-bottom:6px; }
+
+  /* ── Header "⋯" overflow menu ─────────────────────────────────────── */
+  #header-menu-wrap { position:relative; }
+  #header-menu-btn { background:none; border:1px solid var(--border); color:var(--muted);
+    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:18px; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center; touch-action:manipulation;
+    line-height:1; }
+  #header-menu-btn:hover, #header-menu-btn[aria-expanded="true"] { background:var(--panel); color:var(--text); border-color:var(--accent); }
+  #header-menu-dropdown { display:none; position:absolute; top:calc(100% + 6px); right:0;
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    box-shadow:0 8px 28px rgba(0,0,0,.35); min-width:200px; max-width:min(260px, calc(100vw - 24px));
+    overflow:hidden; z-index:500; padding:6px; }
+  #header-menu-dropdown.open { display:block; animation:headerMenuIn .12s ease-out; }
+  @keyframes headerMenuIn { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:none; } }
+  #header-menu-dropdown .menu-divider { height:1px; background:var(--border); margin:5px 6px; }
+  /* Scoped overrides — same buttons/ids/handlers as before, restyled as
+     full-width rows instead of their old standalone square icon look. */
+  #header-menu-dropdown button { display:flex; align-items:center; gap:10px; width:100%;
+    background:none; border:none; color:var(--text); font-size:13px; font-weight:500;
+    padding:9px 10px; border-radius:7px; cursor:pointer; font-family:inherit;
+    text-align:left; height:auto; }
+  #header-menu-dropdown button:hover { background:var(--accent-dim, rgba(16,163,127,.12)); }
+  #header-menu-dropdown button.active { color:var(--accent); }
+  #header-menu-dropdown button[data-label]::after { content:attr(data-label); }
+  #header-menu-dropdown #clear-btn { color:#ef4444; }
+  #header-menu-dropdown #clear-btn:hover { background:rgba(239,68,68,.1); }
+  #header-menu-dropdown #clear-btn::before { content:"🗑"; }
 
   #name-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55);
     z-index:200; align-items:center; justify-content:center; }
@@ -2696,6 +2744,9 @@ PAGE = r"""<!DOCTYPE html>
   #speaking-indicator.show { display:flex; }
   #stop-speak-btn { background:none; border:1px solid var(--border); color:var(--muted);
     font-size:11px; padding:2px 8px; border-radius:4px; cursor:pointer; }
+  #ai-disclaimer { max-width:760px; margin:6px auto 0; width:100%; padding:0 20px;
+    text-align:center; font-size:11.5px; line-height:1.5; color:var(--muted);
+    flex-shrink:0; }
   .quick-btn { background:var(--panel); border:1px solid var(--border); color:var(--text);
     font-size:12.5px; padding:6px 14px; border-radius:20px; cursor:pointer;
     transition:all .15s ease; white-space:nowrap; font-family:inherit; touch-action:manipulation; }
@@ -2757,6 +2808,7 @@ PAGE = r"""<!DOCTYPE html>
     textarea { font-size:16px; }
     .tool-btn { width:34px; height:34px; font-size:17px; }
     #send-btn { width:34px; height:34px; font-size:16px; }
+    #ai-disclaimer { font-size:10.5px; padding:0 12px; }
 
     .empty-state h2 { font-size:19px; }
     .empty-state p { font-size:13px; }
@@ -2820,7 +2872,14 @@ PAGE = r"""<!DOCTYPE html>
         <button id="bookmarks-btn">🔖 Bookmarks</button>
         <button id="stats-btn">📊 Stats</button>
       </div>
-      Mythic AI &middot; by Aarav Singh
+      <button id="sidebar-profile" type="button" title="Your profile — click to edit">
+        <span id="sidebar-profile-avatar" aria-hidden="true"></span>
+        <span id="sidebar-profile-text">
+          <span id="sidebar-profile-name">Guest</span>
+          <span id="sidebar-profile-sub">Your profile</span>
+        </span>
+      </button>
+      <div id="sidebar-byline">Mythic AI &middot; by Aarav Singh</div>
     </div>
   </div>
   <div class="app">
@@ -2833,15 +2892,21 @@ PAGE = r"""<!DOCTYPE html>
       </div>
       <div class="right">
         <button id="install-btn" title="Install Mythic AI" style="display:flex;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;touch-action:manipulation;align-items:center;gap:4px;">⬇ Install</button>
-        <button id="vip-btn" title="Mythic VIP">✨</button>
-        <button id="fullscreen-btn" type="button" title="Fullscreen">
-          <span id="fullscreen-icon">⛶</span>
-        </button>
-        <button id="name-btn" title="What should Mythic AI call you?">🙂</button>
-        <button id="settings-btn" title="Settings">⚙</button>
-        <button id="share-btn" title="Get invite link">🔗</button>
-        <button id="export-btn" title="Export this chat">⬇</button>
-        <button id="clear-btn">Delete chat</button>
+        <div id="header-menu-wrap">
+          <button id="header-menu-btn" type="button" title="More" aria-haspopup="true" aria-expanded="false">⋯</button>
+          <div id="header-menu-dropdown" role="menu">
+            <button id="vip-btn" title="Mythic VIP" data-label="VIP">✨</button>
+            <button id="fullscreen-btn" type="button" title="Fullscreen">
+              <span id="fullscreen-icon">⛶</span><span>Fullscreen</span>
+            </button>
+            <button id="name-btn" title="What should Mythic AI call you?">🙂<span>Nickname</span></button>
+            <button id="settings-btn" title="Settings">⚙<span>Settings</span></button>
+            <button id="share-btn" title="Get invite link">🔗<span>Share link</span></button>
+            <button id="export-btn" title="Export this chat">⬇<span>Download</span></button>
+            <div class="menu-divider"></div>
+            <button id="clear-btn">Delete chat</button>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -2919,6 +2984,7 @@ PAGE = r"""<!DOCTYPE html>
           </button>
         </div>
       </form>
+      <div id="ai-disclaimer">Mythic AI is AI and can make mistakes. Please double-check responses.</div>
     </div>
   </div>
 </div>
@@ -4177,7 +4243,9 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
       aiTextNode.textContent = fullText;
       scrollToBottom();
     }
-    speak(fullText);
+    // Per spec: Mythic AI never speaks automatically. Speech only happens
+    // when the user explicitly clicks the 🔊 "Read aloud" button on a
+    // message (see buildMsgActions override below, which calls speak()).
     _addArtifactsFromReply(fullText);
     loadConversationList();
     refreshStreakBadge();
@@ -4322,6 +4390,7 @@ function getUserName() { return localStorage.getItem('mythic_user_name') || ''; 
 function setUserName(name) {
   if (name) localStorage.setItem('mythic_user_name', name);
   else localStorage.removeItem('mythic_user_name');
+  if (typeof _renderSidebarProfile === 'function') _renderSidebarProfile();
 }
 function openNameModal() {
   nameInput.value = getUserName();
@@ -4344,6 +4413,29 @@ if (!localStorage.getItem('mythic_name_prompted')) {
   localStorage.setItem('mythic_name_prompted', '1');
   setTimeout(openNameModal, 600);
 }
+
+// ── Sidebar profile row (bottom of sidebar) ─────────────────────────────
+// Source of truth is the SAME saved name used everywhere else in the app
+// (getUserName() / mythic_user_name in localStorage) — no second profile
+// store is created. There's no existing avatar-upload feature in this app
+// to reuse, so the fallback here is a clean generated initials avatar,
+// which is exactly the "no saved avatar" case already called for.
+const sidebarProfileBtn    = document.getElementById('sidebar-profile');
+const sidebarProfileAvatar = document.getElementById('sidebar-profile-avatar');
+const sidebarProfileName   = document.getElementById('sidebar-profile-name');
+
+function _renderSidebarProfile() {
+  if (!sidebarProfileAvatar || !sidebarProfileName) return;
+  const name = getUserName();
+  const display = name || 'Guest';
+  sidebarProfileName.textContent = display;
+  const initial = (name || 'M').trim().charAt(0).toUpperCase() || 'M';
+  sidebarProfileAvatar.textContent = initial;
+  sidebarProfileAvatar.setAttribute('role', 'img');
+  sidebarProfileAvatar.setAttribute('aria-label', display + "'s avatar");
+}
+if (sidebarProfileBtn) sidebarProfileBtn.addEventListener('click', openNameModal);
+_renderSidebarProfile();
 
 if (isMobile()) sidebar.classList.add('hidden');
 newChatBtn.addEventListener('click', startNewChat);
@@ -6057,6 +6149,53 @@ async function _openInstallModal() {
 
 if (installBtn) {
   installBtn.addEventListener('click', _openInstallModal);
+}
+
+// ── Header "⋯" overflow menu ──────────────────────────────────────────
+// Purely a show/hide wrapper — none of the moved buttons' own click
+// handlers (vip-btn, fullscreen-btn, name-btn, settings-btn, share-btn,
+// export-btn, clear-btn) are touched; they're wired up elsewhere exactly
+// as before, by the same ids, and keep firing normally. This block only
+// closes the dropdown after a choice is made (or on outside click / Esc).
+const headerMenuBtn      = document.getElementById('header-menu-btn');
+const headerMenuDropdown = document.getElementById('header-menu-dropdown');
+
+function _openHeaderMenu() {
+  if (!headerMenuDropdown) return;
+  headerMenuDropdown.classList.add('open');
+  headerMenuBtn.setAttribute('aria-expanded', 'true');
+  setTimeout(() => {
+    document.addEventListener('click', _onHeaderMenuOutsideClick);
+    document.addEventListener('keydown', _onHeaderMenuEscape);
+  }, 0);
+}
+
+function _closeHeaderMenu() {
+  if (!headerMenuDropdown) return;
+  headerMenuDropdown.classList.remove('open');
+  headerMenuBtn.setAttribute('aria-expanded', 'false');
+  document.removeEventListener('click', _onHeaderMenuOutsideClick);
+  document.removeEventListener('keydown', _onHeaderMenuEscape);
+}
+
+function _onHeaderMenuOutsideClick(e) {
+  if (!headerMenuDropdown.contains(e.target) && e.target !== headerMenuBtn) _closeHeaderMenu();
+}
+
+function _onHeaderMenuEscape(e) {
+  if (e.key === 'Escape') _closeHeaderMenu();
+}
+
+if (headerMenuBtn && headerMenuDropdown) {
+  headerMenuBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    headerMenuDropdown.classList.contains('open') ? _closeHeaderMenu() : _openHeaderMenu();
+  });
+  // Let each item's own existing handler run first, then close the menu —
+  // this is the only new behavior; the handlers themselves are unchanged.
+  headerMenuDropdown.addEventListener('click', (e) => {
+    if (e.target.closest('button')) setTimeout(_closeHeaderMenu, 0);
+  });
 }
 
 const notifBanner     = document.getElementById('notif-banner');
