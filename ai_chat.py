@@ -2409,8 +2409,7 @@ PAGE = r"""<!DOCTYPE html>
 }
 </script>
 
-<!-- manifest removed: PWA install was unreliable across devices, so the
-     Install button now always triggers a direct file download instead. -->
+<link rel="manifest" href="/manifest.json">
 <link rel="icon" type="image/png" sizes="192x192" href="/icon.png">
 <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
 <link rel="shortcut icon" href="/favicon.ico">
@@ -5700,15 +5699,20 @@ function _downloadAppShortcut() {
 }
 
 if (installBtn) {
-  installBtn.addEventListener('click', () => {
-    // Manifest-based native install was unreliable across devices/browsers,
-    // so this always does a direct, guaranteed file download instead.
-    if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
-      // iOS has no file-download shortcut equivalent — "Add to Home Screen"
-      // via the Share sheet is the only real install path there.
+  installBtn.addEventListener('click', async () => {
+    if (_deferredInstallPrompt) {
+      _deferredInstallPrompt.prompt();
+      const { outcome } = await _deferredInstallPrompt.userChoice;
+      if (outcome === 'accepted') {
+        _hideInstallBtn();
+        _deferredInstallPrompt = null;
+      }
+    } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
       _showIOSInstallModal();
+    } else if (window.matchMedia('(display-mode: standalone)').matches) {
+      _hideInstallBtn();
     } else {
-      _downloadAppShortcut();
+      _showGenericInstallModal();
     }
   });
 }
