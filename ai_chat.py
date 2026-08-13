@@ -286,7 +286,14 @@ CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "gpt-oss-120b")
 SYSTEM_PROMPT = (
     "You are Mythic AI, a smart and friendly AI assistant made by Aarav Singh. "
     "If asked who made you, say you are Mythic AI made by Aarav Singh — say it once naturally, never repeat it unprompted. "
-    "Never mention Google, Groq, OpenRouter, HuggingFace, Cerebras, Meta, Mistral, Anthropic, or any AI company as your creator or backend. "
+    "IDENTITY & ARCHITECTURE: You are a cloud-based application that does not host or train its own "
+    "machine learning models. If asked how you work or what powers you, answer honestly and directly: "
+    "explain that Mythic AI is a lightweight app that securely routes user requests to external, "
+    "third-party foundational AI APIs for chat, plus separate specialized APIs for image generation, "
+    "weather, and other utility tools. Do not name the specific underlying model providers/vendors "
+    "unless the user explicitly asks which exact provider or model is used — that's a commercial "
+    "detail, not something to volunteer, but never deny or deflect the question if asked directly. "
+    "Never claim to be a fully custom, locally-trained model built from scratch. "
     "You can help with anything: questions, writing, coding, math, ideas, or just chatting. "
     "When writing code, always wrap it in markdown code blocks with the language name. "
     "LANGUAGE: Always reply ENTIRELY in the same language the user's message is written in — "
@@ -315,6 +322,7 @@ SYSTEM_PROMPT = (
     "detailed answers for messages that actually ask a real question or request "
     "something specific."
 )
+
 
 app = Flask(__name__)
 
@@ -2436,61 +2444,74 @@ PAGE = r"""<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&family=Noto+Sans+Devanagari:wght@400;600&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg:#1a1a1a; --panel:#2a2a2a; --border:#3a3a3a;
-    --text:#ececec; --muted:#8e8ea0; --accent:#10a37f;
-    --accent-dim:#1a3a30; --user-bubble:#2a2a2a; --user-text:#ececec;
-    --ai-bubble:#1a1a1a; --sidebar-w:260px; --msg-font-size:14.5px;
-    --composer-bg:rgba(42,42,42,.72); --composer-border:rgba(255,255,255,.08);
-    --composer-shadow:0 12px 32px rgba(0,0,0,.35), 0 2px 8px rgba(0,0,0,.25);
+    --bg:#0b0b14; --panel:#15151f; --border:#26263380;
+    --text:#f1f0f7; --muted:#8d8ba0; --accent:#7c5cff;
+    --accent2:#22d3ee; --accent-grad:linear-gradient(135deg,#7c5cff,#22d3ee);
+    --accent-dim:rgba(124,92,255,.16); --user-bubble:linear-gradient(135deg,#6d4dff,#4a3ad9);
+    --user-text:#ffffff;
+    --ai-bubble:transparent; --sidebar-w:272px; --msg-font-size:15px;
+    --composer-bg:rgba(21,21,31,.75); --composer-border:rgba(124,92,255,.25);
+    --composer-shadow:0 20px 44px rgba(0,0,0,.45), 0 0 0 1px rgba(124,92,255,.06);
+    --radius-lg:20px; --radius-md:14px; --radius-sm:10px;
   }
   * { box-sizing:border-box; margin:0; padding:0; }
-  html,body { height:100%; background:var(--bg); color:var(--text);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,
-      "Noto Sans","Noto Sans Devanagari",sans-serif; overflow:hidden; }
+  html,body { height:100%; background:
+      radial-gradient(1200px 700px at 12% -10%, rgba(124,92,255,.16), transparent 55%),
+      radial-gradient(900px 600px at 100% 0%, rgba(34,211,238,.10), transparent 50%),
+      var(--bg);
+    color:var(--text);
+    font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",
+      "Noto Sans","Noto Sans Devanagari",sans-serif; overflow:hidden; letter-spacing:.1px; }
   .layout { display:flex; height:100vh; height:calc(var(--app-height, 100vh));
-    height:100dvh; }
+    height:100dvh; gap:10px; padding:10px; }
 
   body.theme-light {
-    --bg:#f7f7f8; --panel:#ffffff; --border:#e3e3e6;
-    --text:#1f1f1f; --muted:#6b6b76; --accent-dim:#e3f5ef;
-    --user-bubble:#eef0f2; --user-text:#1f1f1f; --ai-bubble:#ffffff;
-    --composer-bg:rgba(255,255,255,.78); --composer-border:rgba(0,0,0,.07);
-    --composer-shadow:0 12px 32px rgba(0,0,0,.10), 0 2px 8px rgba(0,0,0,.06);
+    --bg:#f5f4fb; --panel:#ffffff; --border:#e6e3f5;
+    --text:#1b1a29; --muted:#6d6b82; --accent-dim:#efeaff;
+    --user-bubble:linear-gradient(135deg,#8a6dff,#5b47e0); --user-text:#ffffff; --ai-bubble:transparent;
+    --composer-bg:rgba(255,255,255,.82); --composer-border:rgba(124,92,255,.22);
+    --composer-shadow:0 20px 44px rgba(80,60,180,.14), 0 0 0 1px rgba(124,92,255,.06);
   }
+  body.theme-light html, body.theme-light { background:
+      radial-gradient(1200px 700px at 12% -10%, rgba(124,92,255,.10), transparent 55%),
+      radial-gradient(900px 600px at 100% 0%, rgba(34,211,238,.08), transparent 50%),
+      var(--bg); }
 
   #sidebar { width:var(--sidebar-w); flex-shrink:0; background:var(--panel);
-    border-right:1px solid var(--border); display:flex; flex-direction:column;
-    transition:margin-left .2s ease; }
-  #sidebar.hidden { margin-left:calc(-1 * var(--sidebar-w)); }
-  #new-chat-btn { margin:12px; padding:10px 14px; background:var(--accent); color:#fff;
-    border:none; border-radius:8px; font-size:13.5px; font-weight:600; cursor:pointer; text-align:left; }
-  #new-chat-btn:hover { opacity:.9; }
-  #api-keys-shortcut-btn { margin:0 12px 6px; padding:9px 14px; background:none; border:1px solid var(--border);
-    color:var(--muted); border-radius:8px; font-size:13px; font-weight:500; cursor:pointer;
+    border:1px solid var(--border); border-radius:var(--radius-lg); display:flex; flex-direction:column;
+    transition:margin-left .2s ease; box-shadow:0 10px 30px rgba(0,0,0,.25); overflow:hidden; }
+  #sidebar.hidden { margin-left:calc(-1 * var(--sidebar-w) - 10px); }
+  #new-chat-btn { margin:14px; padding:11px 15px; background:var(--accent-grad); color:#fff;
+    border:none; border-radius:var(--radius-md); font-size:13.5px; font-weight:700; cursor:pointer;
+    text-align:left; box-shadow:0 6px 18px rgba(124,92,255,.35); }
+  #new-chat-btn:hover { filter:brightness(1.08); }
+  #api-keys-shortcut-btn { margin:0 14px 8px; padding:9px 14px; background:none; border:1px solid var(--border);
+    color:var(--muted); border-radius:var(--radius-md); font-size:13px; font-weight:500; cursor:pointer;
     text-align:left; touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
-  #api-keys-shortcut-btn:hover { background:var(--panel); color:var(--text); border-color:var(--accent); }
-  #conv-list { flex:1; overflow-y:auto; padding:0 8px; display:flex; flex-direction:column; gap:2px; }
+  #api-keys-shortcut-btn:hover { background:var(--accent-dim); color:var(--text); border-color:var(--accent); }
+  #conv-list { flex:1; overflow-y:auto; padding:0 10px; display:flex; flex-direction:column; gap:3px; }
   .conv-item { display:flex; align-items:center; justify-content:space-between; gap:6px;
-    padding:9px 10px; border-radius:7px; cursor:pointer; font-size:13px; color:var(--muted); }
+    padding:10px 11px; border-radius:var(--radius-sm); cursor:pointer; font-size:13px; color:var(--muted); }
   .conv-item:hover { background:var(--accent-dim); color:var(--text); }
-  .conv-item.active { background:var(--accent-dim); color:var(--accent); font-weight:500; }
+  .conv-item.active { background:var(--accent-dim); color:var(--accent); font-weight:600;
+    box-shadow:inset 2px 0 0 var(--accent); }
   .conv-item .title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
   .conv-item .menu-btn { opacity:0; background:none; border:none; color:var(--muted);
     cursor:pointer; font-size:16px; padding:2px 8px; border-radius:5px; flex-shrink:0;
     touch-action:manipulation; }
   .conv-item:hover .menu-btn { opacity:1; }
-  .conv-item .menu-btn:hover { color:var(--accent); background:rgba(255,255,255,.06); }
-  #sidebar-footer { padding:8px; font-size:11px; color:var(--muted); border-top:1px solid var(--border); }
+  .conv-item .menu-btn:hover { color:var(--accent); background:rgba(124,92,255,.12); }
+  #sidebar-footer { padding:10px; font-size:11px; color:var(--muted); border-top:1px solid var(--border); }
 
   #sidebar-profile { display:flex; align-items:center; gap:10px; width:100%;
-    background:none; border:none; padding:8px 6px; border-radius:10px; cursor:pointer;
+    background:none; border:none; padding:9px 8px; border-radius:var(--radius-md); cursor:pointer;
     font-family:inherit; text-align:left; touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
-  #sidebar-profile:hover { background:var(--panel); }
+  #sidebar-profile:hover { background:var(--accent-dim); }
   #sidebar-profile-avatar { width:40px; height:40px; min-width:40px; border-radius:50%;
     display:flex; align-items:center; justify-content:center; flex-shrink:0;
     font-size:15px; font-weight:700; color:#fff; letter-spacing:.2px;
-    background:linear-gradient(135deg,var(--accent),#0d8f6f);
-    border:1px solid var(--border); box-shadow:0 2px 6px rgba(0,0,0,.25);
+    background:var(--accent-grad);
+    border:1px solid var(--border); box-shadow:0 4px 12px rgba(124,92,255,.35);
     object-fit:cover; overflow:hidden; image-rendering:auto; }
   #sidebar-profile-avatar img { width:100%; height:100%; object-fit:cover; border-radius:50%; display:block; }
   #sidebar-profile-text { display:flex; flex-direction:column; min-width:0; overflow:hidden; }
@@ -2504,36 +2525,39 @@ PAGE = r"""<!DOCTYPE html>
   }
 
   .app { display:flex; flex-direction:column; height:100vh;
-    height:calc(var(--app-height, 100vh)); height:100dvh; flex:1; min-width:0; min-height:0; }
+    height:calc(var(--app-height, 100vh)); height:100dvh; flex:1; min-width:0; min-height:0;
+    background:var(--panel); border:1px solid var(--border); border-radius:var(--radius-lg);
+    box-shadow:0 10px 30px rgba(0,0,0,.25); overflow:hidden; }
   header { padding:calc(14px + env(safe-area-inset-top)) 20px 14px; border-bottom:1px solid var(--border);
     display:flex; align-items:center; justify-content:space-between; gap:10px;
-    background:var(--bg); position:relative; z-index:20; flex-shrink:0; }
+    background:var(--panel); position:relative; z-index:20; flex-shrink:0; }
   header .left { display:flex; align-items:center; gap:10px; min-width:0; }
   header .right { display:flex; align-items:center; gap:8px; flex-shrink:0; }
   header button { touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
   #sidebar-toggle { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0; }
-  #sidebar-toggle:hover { background:var(--panel); }
-  header h1 { font-size:16px; font-weight:700; color:var(--accent); margin:0;
-    font-variant:small-caps; letter-spacing:.5px; }
+    width:36px; height:36px; border-radius:var(--radius-sm); cursor:pointer; font-size:15px; flex-shrink:0; }
+  #sidebar-toggle:hover { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
+  header h1 { font-size:17px; font-weight:800; margin:0; letter-spacing:.2px;
+    background:var(--accent-grad); -webkit-background-clip:text; background-clip:text;
+    -webkit-text-fill-color:transparent; }
   #streak-badge { display:none; align-items:center; gap:4px; background:linear-gradient(135deg,#ff9d42,#ff5f6d);
     color:#fff; font-size:11px; font-weight:800; padding:3px 9px; border-radius:12px; white-space:nowrap; }
   #name-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
+    width:36px; height:36px; border-radius:var(--radius-sm); cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
-  #name-btn:hover { background:var(--panel); }
+  #name-btn:hover { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
   #settings-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
+    width:36px; height:36px; border-radius:var(--radius-sm); cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
-  #settings-btn:hover { background:var(--panel); }
+  #settings-btn:hover { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
   #export-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
+    width:36px; height:36px; border-radius:var(--radius-sm); cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
-  #export-btn:hover { background:var(--panel); }
+  #export-btn:hover { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
   #share-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
+    width:36px; height:36px; border-radius:var(--radius-sm); cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
-  #share-btn:hover { background:var(--panel); }
+  #share-btn:hover { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
   #share-btn.active { color:var(--accent); border-color:var(--accent); }
 
   #share-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6);
@@ -11286,8 +11310,13 @@ def cron_reengagement():
 
 
 # ── /api/health: quick diagnostic so admins can see what's configured ────────
+# Gated behind ADMIN_SECRET — without it, anyone who guesses this URL could
+# see which underlying AI providers (Groq/Cerebras) and model names power
+# the app. Always set ADMIN_SECRET in production (Render env vars).
 @app.route("/api/health", methods=["GET"])
 def api_health():
+    if not _require_admin():
+        return jsonify({"status": "ok"}), 200
     supabase_status = {"configured": bool(SUPABASE_URL and SUPABASE_KEY)}
     if supabase_status["configured"]:
         try:
@@ -12312,7 +12341,11 @@ def generate_image():
         return jsonify({"error": f"Image generation failed (status {img_resp.status_code}). Please try again."}), 502
 
     except Exception as e:
-        return jsonify({"error": f"Image generation error: {str(e)}"}), 500
+        # Log the real detail server-side only — raw exception text can
+        # contain the underlying provider's URL/hostname, which we don't
+        # want to expose to the browser.
+        print(f"[image-generation] error: {e}")
+        return jsonify({"error": "Image generation failed. Please try again."}), 500
 
 
 # ══════════════════════════════════════════════════════════════════════════
