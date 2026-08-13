@@ -282,9 +282,20 @@ def _random_notification_body(category: str) -> str:
 GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "llama-3.1-8b-instant")
 HF_MODEL          = os.environ.get("HF_MODEL",          "mistralai/Mistral-7B-Instruct-v0.3")
 CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "gpt-oss-120b")
+# Vision-capable model — powers Video Call, Screen Share, and regular image
+# attachments, so Mythic AI can actually SEE the frame, not just read text
+# about it. Groq's multimodal lineup changes over time; override via env var
+# if this one is retired.
+GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
 
 SYSTEM_PROMPT = (
     "You are Mythic AI, a smart and friendly AI assistant made by Aarav Singh. "
+    "USER AGE: The person you're talking to is 11 years old. Keep this in mind "
+    "in every reply — use clear, age-appropriate language, keep content suitable "
+    "for a child, and never produce romantic, sexual, violent, or otherwise "
+    "mature content. Don't mention their age unprompted or bring it up "
+    "constantly; just let it naturally shape how you explain things and what "
+    "you're willing to help with. "
     "If asked who made you, say you are Mythic AI made by Aarav Singh — say it once naturally, never repeat it unprompted. "
     "IDENTITY & ARCHITECTURE: You are a cloud-based application that does not host or train its own "
     "machine learning models. If asked how you work or what powers you, answer honestly and directly: "
@@ -2838,6 +2849,18 @@ PAGE = r"""<!DOCTYPE html>
   #live-talk-status button { pointer-events:auto; background:none; border:1px solid rgba(255,255,255,.25);
     color:#fff; border-radius:14px; padding:2px 10px; font-size:11px; cursor:pointer; margin-left:4px; }
 
+  #video-call-btn.active, #screen-share-btn.active { color:#fff; background:#ef4444; }
+
+  #live-video-wrap { display:none; position:fixed; right:16px;
+    bottom:calc(120px + env(safe-area-inset-bottom)); z-index:301;
+    border-radius:14px; overflow:hidden; box-shadow:0 10px 30px rgba(0,0,0,.4);
+    border:2px solid rgba(255,255,255,.25); background:#000; }
+  #live-video-wrap.show { display:block; }
+  #live-video-preview { width:180px; max-width:38vw; height:auto; display:block; }
+  #live-video-stop-btn { position:absolute; top:4px; right:4px; background:rgba(0,0,0,.6);
+    color:#fff; border:none; border-radius:50%; width:22px; height:22px; font-size:12px;
+    cursor:pointer; line-height:1; }
+
   #speaking-indicator { display:none; align-items:center; gap:6px; font-size:12px;
     color:var(--accent); padding:4px 0; flex-shrink:0; }
   #speaking-indicator.show { display:flex; }
@@ -3037,6 +3060,11 @@ PAGE = r"""<!DOCTYPE html>
       <button id="live-talk-stop-btn">End</button>
     </div>
 
+    <div id="live-video-wrap">
+      <video id="live-video-preview" autoplay muted playsinline></video>
+      <button id="live-video-stop-btn" title="Stop sharing">✕</button>
+    </div>
+
     <div id="notif-banner" style="display:none;align-items:center;justify-content:space-between;gap:10px;
       background:linear-gradient(135deg,var(--accent-dim),rgba(16,163,127,.15));
       border:1px solid var(--accent);border-radius:12px;padding:10px 14px;
@@ -3081,6 +3109,19 @@ PAGE = r"""<!DOCTYPE html>
                 <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
                 <line x1="12" y1="19" x2="12" y2="23"/>
                 <line x1="8" y1="23" x2="16" y2="23"/>
+              </svg>
+            </button>
+            <button class="tool-btn" id="video-call-btn" type="button" title="Video Call — Mythic AI can see your camera and talk with you">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="23 7 16 12 23 17 23 7"/>
+                <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+              </svg>
+            </button>
+            <button class="tool-btn" id="screen-share-btn" type="button" title="Screen Share — Mythic AI can see your screen and talk with you">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                <line x1="8" y1="21" x2="16" y2="21"/>
+                <line x1="12" y1="17" x2="12" y2="21"/>
               </svg>
             </button>
             <button id="send-btn" type="submit" title="Send">
@@ -3268,17 +3309,6 @@ PAGE = r"""<!DOCTYPE html>
         <input type="text" id="api-key-new-value" readonly style="width:100%;padding:10px;font-family:monospace;font-size:11px;letter-spacing:0.5px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);box-sizing:border-box;cursor:text;overflow:auto;white-space:nowrap;" />
       </div>
       <div id="api-key-list" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;"></div>
-    </div>
-
-    <div class="settings-section" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
-      <label>🔊 Read-aloud language</label>
-      <select id="voice-language-select" class="settings-select"></select>
-    </div>
-
-    <div class="settings-section">
-      <label>🎙 Read-aloud voice</label>
-      <select id="voice-select" class="settings-select"></select>
-      <div id="voice-hint" style="font-size:11px;color:var(--muted);margin-top:6px;"></div>
     </div>
 
     <div class="settings-section" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
@@ -3897,13 +3927,8 @@ function speak(text) {
   currentUtterance = new SpeechSynthesisUtterance(plain);
   currentUtterance.rate = 1.05;
   const chosen = (typeof getChosenVoice === 'function') ? getChosenVoice() : null;
-  if (chosen) {
-    currentUtterance.voice = chosen;
-    currentUtterance.lang = chosen.lang;
-  } else {
-    const lang = localStorage.getItem('mythic_voice_lang');
-    if (lang) currentUtterance.lang = lang;
-  }
+  // One fixed voice for every language — no per-language switching.
+  if (chosen) currentUtterance.voice = chosen;
   currentUtterance.onstart = () => speakingIndicator.classList.add('show');
   currentUtterance.onend = () => speakingIndicator.classList.remove('show');
   currentUtterance.onerror = () => speakingIndicator.classList.remove('show');
@@ -3997,7 +4022,10 @@ function liveTalkListenOnce() {
       handled = true;
       input.value = t;
       autoResize();
-      setLiveTalkStatus('sending', 'Thinking…');
+      // Video Call / Screen Share: grab the current frame and attach it,
+      // so this message carries what Mythic AI is currently "seeing".
+      if (liveMediaStream) pendingFile = captureLiveFrame();
+      setLiveTalkStatus('sending', liveMediaStream ? 'Looking…' : 'Thinking…');
       form.requestSubmit();
       liveTalkWaitThenSpeak();
     }
@@ -4040,12 +4068,82 @@ function liveTalkWaitThenSpeak() {
   }, 400);
 }
 
+// ─── VIDEO CALL & SCREEN SHARE: Mythic AI can actually see a live frame ────
+// Captures a snapshot from the active camera/screen stream each time Live
+// Talk hears you finish speaking, attaches it to that message (same path as
+// a regular image attachment), and the backend routes it to a vision model.
+const videoCallBtn      = document.getElementById('video-call-btn');
+const screenShareBtn    = document.getElementById('screen-share-btn');
+const liveVideoWrap     = document.getElementById('live-video-wrap');
+const liveVideoPreview  = document.getElementById('live-video-preview');
+const liveVideoStopBtn  = document.getElementById('live-video-stop-btn');
+let liveMediaStream = null;   // active MediaStream (camera or screen)
+let liveMediaKind   = null;   // 'camera' | 'screen'
+let liveFrameCanvas = null;
+
+function captureLiveFrame() {
+  if (!liveMediaStream || !liveVideoPreview || !liveVideoPreview.videoWidth) return null;
+  if (!liveFrameCanvas) liveFrameCanvas = document.createElement('canvas');
+  liveFrameCanvas.width = liveVideoPreview.videoWidth;
+  liveFrameCanvas.height = liveVideoPreview.videoHeight;
+  const ctx = liveFrameCanvas.getContext('2d');
+  ctx.drawImage(liveVideoPreview, 0, 0, liveFrameCanvas.width, liveFrameCanvas.height);
+  const dataUrl = liveFrameCanvas.toDataURL('image/jpeg', 0.7);
+  const base64 = dataUrl.split(',')[1];
+  if (!base64) return null;
+  return { name: (liveMediaKind === 'screen' ? 'screen.jpg' : 'camera.jpg'), mimeType: 'image/jpeg', dataBase64: base64 };
+}
+
+function stopLiveMedia() {
+  if (liveMediaStream) { liveMediaStream.getTracks().forEach(t => { try { t.stop(); } catch {} }); }
+  liveMediaStream = null;
+  liveMediaKind = null;
+  if (liveVideoPreview) liveVideoPreview.srcObject = null;
+  if (liveVideoWrap) liveVideoWrap.classList.remove('show');
+  if (videoCallBtn) videoCallBtn.classList.remove('active');
+  if (screenShareBtn) screenShareBtn.classList.remove('active');
+}
+
+async function startLiveMedia(kind) {
+  if (!liveTalkSupported()) { alert('This needs microphone + speech support — try Chrome or Edge.'); return; }
+  stopLiveMedia();
+  try {
+    liveMediaStream = kind === 'screen'
+      ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+      : await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+  } catch (err) {
+    alert((kind === 'screen' ? 'Screen share' : 'Camera') + ' access was blocked or cancelled.');
+    return;
+  }
+  liveMediaKind = kind;
+  liveVideoPreview.srcObject = liveMediaStream;
+  liveVideoWrap.classList.add('show');
+  (kind === 'screen' ? screenShareBtn : videoCallBtn).classList.add('active');
+  // If the person stops sharing from the browser's own UI (not our button),
+  // clean up on this end too.
+  liveMediaStream.getVideoTracks()[0].addEventListener('ended', () => { if (liveMediaKind === kind) stopLiveMedia(); });
+  // A call implies talking — start Live Talk automatically if it isn't
+  // already running.
+  if (!liveTalkActive) { liveTalkActive = true; liveTalkListenOnce(); }
+}
+
+if (videoCallBtn) videoCallBtn.addEventListener('click', () => {
+  if (liveMediaKind === 'camera') { stopLiveMedia(); return; }
+  startLiveMedia('camera');
+});
+if (screenShareBtn) screenShareBtn.addEventListener('click', () => {
+  if (liveMediaKind === 'screen') { stopLiveMedia(); return; }
+  startLiveMedia('screen');
+});
+if (liveVideoStopBtn) liveVideoStopBtn.addEventListener('click', stopLiveMedia);
+
 function stopLiveTalk() {
   liveTalkActive = false;
   if (liveRecognition) { try { liveRecognition.stop(); } catch {} liveRecognition = null; }
   if (window.speechSynthesis) window.speechSynthesis.cancel();
   if (liveTalkStatus) liveTalkStatus.classList.remove('show');
   if (liveTalkBtn) liveTalkBtn.classList.remove('live-listening', 'live-speaking', 'live-idle-active');
+  stopLiveMedia();
 }
 
 if (liveTalkBtn) liveTalkBtn.addEventListener('click', () => {
@@ -5547,132 +5645,39 @@ fontSizeSlider.addEventListener('input', () => {
 
 loadSettings();
 
-// ─── VOICE & LANGUAGE PICKER ─────────────────────────────────────────────────
+// ─── VOICE: Mythic AI auto-picks ONE voice, used for every language ───────
+// No picker shown to the user — a single best-available voice is chosen
+// once and reused for every reply, regardless of what language it's in.
+// (Browsers can't make one system voice fluently pronounce every language,
+// but this keeps a single consistent voice identity instead of a per-
+// language switcher, per spec.)
 (function() {
-  const langSelect   = document.getElementById('voice-language-select');
-  const voiceSelect  = document.getElementById('voice-select');
-  const voiceHint    = document.getElementById('voice-hint');
-  if (!langSelect || !voiceSelect) return;
-
-  const LANGUAGES = [
-    ['en-US','English (US)'], ['en-GB','English (UK)'], ['en-IN','English (India)'],
-    ['hi-IN','Hindi'], ['bn-IN','Bengali'], ['ta-IN','Tamil'], ['te-IN','Telugu'],
-    ['mr-IN','Marathi'], ['gu-IN','Gujarati'], ['kn-IN','Kannada'], ['ml-IN','Malayalam'],
-    ['pa-IN','Punjabi'], ['ur-PK','Urdu'], ['es-ES','Spanish (Spain)'], ['es-MX','Spanish (Mexico)'],
-    ['fr-FR','French'], ['de-DE','German'], ['it-IT','Italian'], ['pt-BR','Portuguese (Brazil)'],
-    ['pt-PT','Portuguese (Portugal)'], ['nl-NL','Dutch'], ['ru-RU','Russian'], ['pl-PL','Polish'],
-    ['tr-TR','Turkish'], ['ar-SA','Arabic'], ['he-IL','Hebrew'], ['fa-IR','Persian'],
-    ['zh-CN','Chinese (Mandarin)'], ['zh-TW','Chinese (Taiwan)'], ['ja-JP','Japanese'],
-    ['ko-KR','Korean'], ['vi-VN','Vietnamese'], ['th-TH','Thai'], ['id-ID','Indonesian'],
-    ['ms-MY','Malay'], ['fil-PH','Filipino'], ['sw-KE','Swahili'], ['am-ET','Amharic'],
-    ['nb-NO','Norwegian'], ['sv-SE','Swedish'], ['da-DK','Danish'], ['fi-FI','Finnish'],
-    ['el-GR','Greek'], ['cs-CZ','Czech'], ['ro-RO','Romanian'], ['uk-UA','Ukrainian'],
-    ['hu-HU','Hungarian'], ['sk-SK','Slovak'], ['bg-BG','Bulgarian'], ['hr-HR','Croatian'],
-  ];
-  langSelect.innerHTML = LANGUAGES.map(([code,name]) => `<option value="${code}">${name}</option>`).join('');
-
-  const FEMALE_HINTS = ['female','woman','girl','samantha','victoria','karen','moira','tessa',
-    'zira','susan','fiona','kyoko','ting-ting','sin-ji','mei-jia','allison','ava','samanatha',
-    'salli','joanna','kimberly','kendra','ivy','aditi','raveena','shreya','lekha','veena',
-    'zoe','emma','sara','laura','anna','maria','sofia','ines','amelie','marie','paulina'];
-  const MALE_HINTS = ['male','man','boy','daniel','alex','fred','george','james','david',
-    'thomas','mark','ryan','oliver','matthew','justin','joey','brian','eric','yusuf',
-    'rishi','arthur','aaron','gordon','lee','diego','carlos','jorge','felix','henri',
-    'stefan','luca','marco','hans','pavel','yuri','takumi','wang','liang','google',
-    'microsoft','com.apple'];
-
-  function guessGender(voice) {
-    const n = voice.name.toLowerCase();
-    if (FEMALE_HINTS.some(h => n.includes(h))) return 'female';
-    if (MALE_HINTS.some(h => n.includes(h))) return 'male';
-    return null;
-  }
-
+  const GOOD_NAME_HINTS = ['natural', 'neural', 'premium', 'enhanced', 'online', 'google'];
   let cachedVoices = [];
+  let chosenVoice = null;
 
-  function populateVoiceSelect() {
-    const langCode = langSelect.value || 'en-US';
-    const langPrefix = langCode.split('-')[0];
-    let matches = cachedVoices.filter(v => v.lang && v.lang.toLowerCase().startsWith(langPrefix));
-    if (!matches.length) matches = cachedVoices;
-
-    // If there just aren't many voices at all for this language on this
-    // device, gender-bucketing (which caps each bucket and discards the
-    // rest) throws away real voices for no reason — that's the "only 3 male
-    // voices" complaint when 5+ were actually installed. Below a small
-    // threshold, just list every match, unlabeled by gender.
-    if (matches.length <= 8) {
-      voiceSelect.innerHTML = '';
-      const grp = document.createElement('optgroup');
-      grp.label = 'Available voices';
-      matches.forEach((v, i) => {
-        const opt = document.createElement('option');
-        opt.value = v.name + '||' + v.lang;
-        opt.textContent = `Voice ${i + 1} (${v.name})`;
-        grp.appendChild(opt);
-      });
-      voiceSelect.appendChild(grp);
-      voiceHint.textContent = matches.length
-        ? `${matches.length} voice(s) available for this language on your device.`
-        : 'No voices found for this language on your device yet — try again in a moment.';
-      const saved = localStorage.getItem('mythic_voice_choice');
-      if (saved && [...voiceSelect.options].some(o => o.value === saved)) voiceSelect.value = saved;
-      else if (voiceSelect.options.length) voiceSelect.selectedIndex = 0;
-      return;
-    }
-
-    const female = [], male = [], other = [];
-    matches.forEach(v => {
-      const g = guessGender(v);
-      if (g === 'female') female.push(v);
-      else if (g === 'male') male.push(v);
-      else other.push(v);
+  function pickBestVoice(voices) {
+    if (!voices.length) return null;
+    // Prefer an English voice that sounds highest quality (heuristic name
+    // match), then any English voice, then just the first voice available.
+    const english = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith('en'));
+    const pool = english.length ? english : voices;
+    const scored = pool.map(v => {
+      const n = v.name.toLowerCase();
+      let score = 0;
+      if (GOOD_NAME_HINTS.some(h => n.includes(h))) score += 2;
+      if (v.localService) score += 1; // local voices tend to be lower-latency
+      if (/^en-us$/i.test(v.lang || '')) score += 1;
+      return { v, score };
     });
-    // Top up whichever bucket is smaller from the unlabeled pool, up to 8
-    // each, alternating fairly instead of draining "other" into female first.
-    let turn = female.length <= male.length ? 'female' : 'male';
-    while (other.length && (female.length < 8 || male.length < 8)) {
-      if (turn === 'female' && female.length < 8) { female.push(other.shift()); turn = 'male'; }
-      else if (turn === 'male' && male.length < 8) { male.push(other.shift()); turn = 'female'; }
-      else if (female.length < 8) { female.push(other.shift()); }
-      else if (male.length < 8) { male.push(other.shift()); }
-      else break;
-    }
-
-    voiceSelect.innerHTML = '';
-    const addGroup = (label, list) => {
-      if (!list.length) return;
-      const grp = document.createElement('optgroup');
-      grp.label = label;
-      list.forEach((v, i) => {
-        const opt = document.createElement('option');
-        opt.value = v.name + '||' + v.lang;
-        opt.textContent = `${label === 'Female' ? '♀' : '♂'} ${label} Voice ${i+1} (${v.name})`;
-        grp.appendChild(opt);
-      });
-      voiceSelect.appendChild(grp);
-    };
-    addGroup('Female', female);
-    addGroup('Male', male);
-
-    if (!female.length && !male.length) {
-      voiceHint.textContent = 'No voices found for this language on your device yet — try again in a moment.';
-    } else {
-      voiceHint.textContent = `${female.length} female, ${male.length} male voice(s) available for this language.`;
-    }
-
-    const saved = localStorage.getItem('mythic_voice_choice');
-    if (saved && [...voiceSelect.options].some(o => o.value === saved)) {
-      voiceSelect.value = saved;
-    } else if (voiceSelect.options.length) {
-      voiceSelect.selectedIndex = 0;
-    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0].v;
   }
 
   function refreshVoices() {
     if (!window.speechSynthesis) return;
     cachedVoices = window.speechSynthesis.getVoices() || [];
-    populateVoiceSelect();
+    if (cachedVoices.length) chosenVoice = pickBestVoice(cachedVoices);
   }
 
   if (window.speechSynthesis) {
@@ -5680,22 +5685,7 @@ loadSettings();
     window.speechSynthesis.onvoiceschanged = refreshVoices;
   }
 
-  langSelect.value = localStorage.getItem('mythic_voice_lang') || 'en-US';
-  langSelect.addEventListener('change', () => {
-    localStorage.setItem('mythic_voice_lang', langSelect.value);
-    populateVoiceSelect();
-  });
-  voiceSelect.addEventListener('change', () => {
-    localStorage.setItem('mythic_voice_choice', voiceSelect.value);
-  });
-
-  window.getChosenVoice = function() {
-    const saved = localStorage.getItem('mythic_voice_choice');
-    if (!saved || !window.speechSynthesis) return null;
-    const [name, lang] = saved.split('||');
-    const voices = window.speechSynthesis.getVoices() || [];
-    return voices.find(v => v.name === name && v.lang === lang) || null;
-  };
+  window.getChosenVoice = function() { return chosenVoice; };
 })();
 
 function renderMarkdown(text) {
@@ -11044,6 +11034,51 @@ def to_openai_messages(gemini_messages, system_prompt):
     return msgs
 
 
+def to_openai_vision_messages(gemini_messages, system_prompt):
+    """Like to_openai_messages, but if the LAST user turn carries an image
+    (inline_data with an image/* mime type — a Video Call frame, Screen
+    Share frame, or a regular image attachment), that turn is sent as a
+    real multimodal content block so a vision-capable model can actually
+    see it. Earlier turns stay text-only — we don't re-send old frames,
+    which keeps requests small and avoids re-uploading stale video/screen
+    snapshots from earlier in the conversation."""
+    msgs = [{"role": "system", "content": system_prompt}]
+    last_idx = len(gemini_messages) - 1
+    for i, m in enumerate(gemini_messages):
+        role = "user" if m["role"] == "user" else "assistant"
+        text = "".join(p.get("text", "") for p in m["parts"] if "text" in p)
+        image_part = None
+        if i == last_idx and role == "user":
+            for p in m["parts"]:
+                inline = p.get("inline_data")
+                if inline and str(inline.get("mime_type", "")).startswith("image/"):
+                    image_part = inline
+                    break
+        if image_part:
+            content = []
+            if text:
+                content.append({"type": "text", "text": text})
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{image_part['mime_type']};base64,{image_part['data']}"},
+            })
+            msgs.append({"role": role, "content": content})
+        else:
+            msgs.append({"role": role, "content": text})
+    return msgs
+
+
+def groq_vision_stream_chunks(messages, api_key=None, model=None):
+    """Vision-capable completion via Groq's multimodal model. Used for Video
+    Call, Screen Share, and regular image attachments. No Cerebras fallback
+    here — Cerebras isn't used as a vision provider in this app — if this
+    yields nothing, the caller falls back to the normal text-only path."""
+    yield from _openai_style_stream(
+        "https://api.groq.com/openai/v1/chat/completions",
+        api_key or GROQ_API_KEY, model or GROQ_VISION_MODEL, messages, "Groq-Vision",
+    )
+
+
 def _openai_style_stream(url, api_key, model, messages, provider_label):
     """Shared streaming logic for Groq/Cerebras (both are OpenAI-compatible).
     Yields nothing at all on ANY failure (auth, rate limit, timeout, invalid
@@ -11286,11 +11321,37 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
     each provider (see Model Manager) — invalid choices auto-fall-back to the
     server's default model for that provider before moving to the next provider."""
     sp = system_prompt or SYSTEM_PROMPT
+    groq_key = (user_groq_key or "").strip() or GROQ_API_KEY
+    cerebras_key = (user_cerebras_key or "").strip() or CEREBRAS_API_KEY
+
+    # If the most recent user turn carries an image (a Video Call frame, a
+    # Screen Share frame, or a regular image attachment), try the vision
+    # model FIRST so Mythic AI can actually see it. Falls through to the
+    # normal text-only path below if the vision call fails or yields nothing
+    # (the image is simply dropped from context at that point).
+    has_image = False
+    if gemini_messages:
+        last = gemini_messages[-1]
+        if last.get("role") == "user":
+            has_image = any(
+                str((p.get("inline_data") or {}).get("mime_type", "")).startswith("image/")
+                for p in last.get("parts", [])
+            )
+    if has_image and PROVIDER in ("auto", "groq") and groq_key:
+        vision_msgs = to_openai_vision_messages(gemini_messages, sp)
+        collected = False
+        try:
+            for chunk in groq_vision_stream_chunks(vision_msgs, groq_key):
+                collected = True
+                yield chunk
+        except Exception as e:
+            print(f"[Groq-Vision] unexpected error: {e}")
+        if collected:
+            return
+
     openai_msgs = to_openai_messages(gemini_messages, sp)
 
     order = []
-    groq_key = (user_groq_key or "").strip() or GROQ_API_KEY
-    cerebras_key = (user_cerebras_key or "").strip() or CEREBRAS_API_KEY
     if PROVIDER in ("auto", "groq") and groq_key:
         order.append(("Groq", lambda: groq_stream_chunks(openai_msgs, groq_key, groq_model)))
     if PROVIDER in ("auto", "cerebras") and cerebras_key:
@@ -12249,11 +12310,10 @@ def chat():
                     doc_block += f"\n[Note: {extract_note}]"
                 user_parts.append({"text": doc_block})
             elif mime_type.startswith("image/"):
-                user_parts.append({"text": (
-                    f"\n\n[Attached image: {filename} — I can't see images (only Groq/Cerebras "
-                    f"text models are used here, no vision API is configured). If you need help "
-                    f"with what's in this image, please describe it in words.]"
-                )})
+                # No caption needed — the raw image bytes are attached as
+                # inline_data below and get routed to the vision model by
+                # auto_stream_chunks(), so Mythic AI actually sees this frame.
+                pass
             elif extract_note:
                 user_parts.append({"text": f"\n\n[Attached file: {filename} — {extract_note}]"})
             user_parts.append({
