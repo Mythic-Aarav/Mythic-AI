@@ -2444,7 +2444,7 @@ PAGE = r"""<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&family=Noto+Sans+Devanagari:wght@400;600&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg:#0c1410; --panel:#141f19; --border:#2a3a3080;
+    --bg:#0c1410; --panel:rgba(20,31,25,.86); --border:#2a3a3080;
     --text:#f5f3ea; --muted:#9aa89e; --accent:#FF9933;
     --accent2:#138808; --accent-grad:linear-gradient(135deg,#FF9933,#ffffff 50%,#138808);
     --accent-dim:rgba(255,153,51,.16); --user-bubble:linear-gradient(135deg,#FF9933,#e07b00);
@@ -2459,13 +2459,13 @@ PAGE = r"""<!DOCTYPE html>
     font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",
       "Noto Sans","Noto Sans Devanagari",sans-serif; overflow:hidden; letter-spacing:.1px;
     position:relative; }
-  html::before { content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+  body::before { content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
     background:
-      radial-gradient(46vw 40vw at 15% 12%, rgba(255,153,51,.30), transparent 62%),
-      radial-gradient(40vw 38vw at 85% 18%, rgba(255,153,51,.16), transparent 60%),
-      radial-gradient(46vw 42vw at 82% 88%, rgba(19,136,8,.28), transparent 62%),
-      radial-gradient(40vw 38vw at 18% 85%, rgba(19,136,8,.16), transparent 60%),
-      radial-gradient(30vw 30vw at 50% 50%, rgba(255,255,255,.10), transparent 65%);
+      radial-gradient(50vw 44vw at 15% 12%, rgba(255,153,51,.55), transparent 62%),
+      radial-gradient(44vw 42vw at 85% 18%, rgba(255,153,51,.30), transparent 60%),
+      radial-gradient(50vw 46vw at 82% 88%, rgba(19,136,8,.50), transparent 62%),
+      radial-gradient(44vw 42vw at 18% 85%, rgba(19,136,8,.30), transparent 60%),
+      radial-gradient(34vw 34vw at 50% 50%, rgba(255,255,255,.14), transparent 65%);
     background-repeat:no-repeat;
     animation:flagFloat 22s ease-in-out infinite; }
   @keyframes flagFloat {
@@ -2476,25 +2476,26 @@ PAGE = r"""<!DOCTYPE html>
     100% { background-position:0% 0%, 100% 0%, 100% 100%, 0% 100%, 50% 50%; }
   }
   .layout { position:relative; z-index:1; display:flex; height:100vh;
-    height:calc(var(--app-height, 100vh)); height:100dvh; gap:10px; padding:10px; }
+    height:calc(var(--app-height, 100vh)); height:100dvh; gap:18px; padding:18px; }
 
   body.theme-light {
-    --bg:#fdfaf3; --panel:#ffffff; --border:#e7e0cf;
+    --bg:#fdfaf3; --panel:rgba(255,255,255,.82); --border:#e7e0cf;
     --text:#1b1a13; --muted:#6d6a5e; --accent-dim:#fff1e0;
     --user-bubble:linear-gradient(135deg,#FF9933,#e07b00); --user-text:#ffffff; --ai-bubble:transparent;
     --composer-bg:rgba(255,255,255,.85); --composer-border:rgba(19,136,8,.22);
     --composer-shadow:0 20px 44px rgba(0,60,20,.10), 0 0 0 1px rgba(255,153,51,.08);
   }
-  body.theme-light html::before {
+  body.theme-light::before {
     background:
-      radial-gradient(46vw 40vw at 15% 12%, rgba(255,153,51,.26), transparent 62%),
-      radial-gradient(40vw 38vw at 85% 18%, rgba(255,153,51,.14), transparent 60%),
-      radial-gradient(46vw 42vw at 82% 88%, rgba(19,136,8,.22), transparent 62%),
-      radial-gradient(40vw 38vw at 18% 85%, rgba(19,136,8,.13), transparent 60%),
-      radial-gradient(30vw 30vw at 50% 50%, rgba(255,255,255,.55), transparent 65%);
+      radial-gradient(50vw 44vw at 15% 12%, rgba(255,153,51,.45), transparent 62%),
+      radial-gradient(44vw 42vw at 85% 18%, rgba(255,153,51,.24), transparent 60%),
+      radial-gradient(50vw 46vw at 82% 88%, rgba(19,136,8,.40), transparent 62%),
+      radial-gradient(44vw 42vw at 18% 85%, rgba(19,136,8,.24), transparent 60%),
+      radial-gradient(34vw 34vw at 50% 50%, rgba(255,255,255,.65), transparent 65%);
   }
 
   #sidebar { width:var(--sidebar-w); flex-shrink:0; background:var(--panel);
+    backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px);
     border:1px solid var(--border); border-radius:var(--radius-lg); display:flex; flex-direction:column;
     transition:margin-left .2s ease; box-shadow:0 10px 30px rgba(0,0,0,.25); overflow:hidden; }
   #sidebar.hidden { margin-left:calc(-1 * var(--sidebar-w) - 10px); }
@@ -2543,7 +2544,8 @@ PAGE = r"""<!DOCTYPE html>
 
   .app { display:flex; flex-direction:column; height:100vh;
     height:calc(var(--app-height, 100vh)); height:100dvh; flex:1; min-width:0; min-height:0;
-    background:var(--panel); border:1px solid var(--border); border-radius:var(--radius-lg);
+    background:var(--panel); backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px);
+    border:1px solid var(--border); border-radius:var(--radius-lg);
     box-shadow:0 10px 30px rgba(0,0,0,.25); overflow:hidden; }
   header { padding:calc(14px + env(safe-area-inset-top)) 20px 14px; border-bottom:1px solid var(--border);
     display:flex; align-items:center; justify-content:space-between; gap:10px;
