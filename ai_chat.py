@@ -2467,11 +2467,31 @@ PAGE = r"""<!DOCTYPE html>
   }
   * { box-sizing:border-box; margin:0; padding:0; }
   html,body { height:100%;
-    background:var(--bg);
+    background:linear-gradient(160deg,
+      rgba(255,153,51,.42) 0%, rgba(255,153,51,.20) 22%,
+      rgba(255,255,255,.10) 42%, rgba(255,255,255,.10) 58%,
+      rgba(19,136,8,.20) 78%, rgba(19,136,8,.42) 100%), var(--bg);
     color:var(--text);
     font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",
       "Noto Sans","Noto Sans Devanagari",sans-serif; overflow:hidden; letter-spacing:.1px;
     position:relative; }
+  body::before { content:""; position:fixed; inset:-10vh -10vw; z-index:0; pointer-events:none;
+    filter:blur(60px) saturate(1.3);
+    background:
+      radial-gradient(38vw 34vw at 18% 20%, rgba(255,153,51,.85), transparent 68%),
+      radial-gradient(34vw 30vw at 82% 12%, rgba(255,255,255,.35), transparent 65%),
+      radial-gradient(38vw 36vw at 80% 82%, rgba(19,136,8,.80), transparent 68%),
+      radial-gradient(30vw 28vw at 15% 85%, rgba(19,136,8,.35), transparent 62%),
+      radial-gradient(26vw 26vw at 50% 48%, rgba(255,255,255,.20), transparent 65%);
+    background-repeat:no-repeat;
+    animation:flagFloat 30s ease-in-out infinite; }
+  @keyframes flagFloat {
+    0%   { background-position:0% 0%, 100% 0%, 100% 100%, 0% 100%, 50% 50%; transform:rotate(0deg) scale(1); }
+    25%  { background-position:10% 6%, 90% 8%, 88% 90%, 8% 92%, 56% 44%; transform:rotate(1.2deg) scale(1.03); }
+    50%  { background-position:2% 12%, 98% 2%, 94% 82%, 2% 98%, 44% 56%; transform:rotate(-1deg) scale(1.05); }
+    75%  { background-position:12% 2%, 86% 12%, 100% 92%, 12% 86%, 50% 50%; transform:rotate(.8deg) scale(1.02); }
+    100% { background-position:0% 0%, 100% 0%, 100% 100%, 0% 100%, 50% 50%; transform:rotate(0deg) scale(1); }
+  }
   .layout { position:relative; z-index:1; display:flex; height:100vh;
     height:calc(var(--app-height, 100vh)); height:100dvh; gap:18px; padding:18px; }
 
