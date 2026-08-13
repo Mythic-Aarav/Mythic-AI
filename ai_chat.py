@@ -2464,21 +2464,22 @@ PAGE = r"""<!DOCTYPE html>
     font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",
       "Noto Sans","Noto Sans Devanagari",sans-serif; overflow:hidden; letter-spacing:.1px;
     position:relative; }
-  body::before { content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+  body::before { content:""; position:fixed; inset:-10vh -10vw; z-index:0; pointer-events:none;
+    filter:blur(60px) saturate(1.3);
     background:
-      radial-gradient(50vw 44vw at 15% 12%, rgba(255,153,51,.55), transparent 62%),
-      radial-gradient(44vw 42vw at 85% 18%, rgba(255,153,51,.30), transparent 60%),
-      radial-gradient(50vw 46vw at 82% 88%, rgba(19,136,8,.50), transparent 62%),
-      radial-gradient(44vw 42vw at 18% 85%, rgba(19,136,8,.30), transparent 60%),
-      radial-gradient(34vw 34vw at 50% 50%, rgba(255,255,255,.14), transparent 65%);
+      radial-gradient(38vw 34vw at 18% 20%, rgba(255,153,51,.85), transparent 68%),
+      radial-gradient(34vw 30vw at 82% 12%, rgba(255,255,255,.35), transparent 65%),
+      radial-gradient(38vw 36vw at 80% 82%, rgba(19,136,8,.80), transparent 68%),
+      radial-gradient(30vw 28vw at 15% 85%, rgba(19,136,8,.35), transparent 62%),
+      radial-gradient(26vw 26vw at 50% 48%, rgba(255,255,255,.20), transparent 65%);
     background-repeat:no-repeat;
-    animation:flagFloat 22s ease-in-out infinite; }
+    animation:flagFloat 30s ease-in-out infinite; }
   @keyframes flagFloat {
-    0%   { background-position:0% 0%, 100% 0%, 100% 100%, 0% 100%, 50% 50%; }
-    25%  { background-position:6% 4%, 94% 6%, 92% 92%, 6% 96%, 54% 46%; }
-    50%  { background-position:0% 8%, 100% 2%, 96% 88%, 2% 100%, 46% 54%; }
-    75%  { background-position:8% 0%, 92% 8%, 100% 94%, 8% 92%, 50% 50%; }
-    100% { background-position:0% 0%, 100% 0%, 100% 100%, 0% 100%, 50% 50%; }
+    0%   { background-position:0% 0%, 100% 0%, 100% 100%, 0% 100%, 50% 50%; transform:rotate(0deg) scale(1); }
+    25%  { background-position:10% 6%, 90% 8%, 88% 90%, 8% 92%, 56% 44%; transform:rotate(1.2deg) scale(1.03); }
+    50%  { background-position:2% 12%, 98% 2%, 94% 82%, 2% 98%, 44% 56%; transform:rotate(-1deg) scale(1.05); }
+    75%  { background-position:12% 2%, 86% 12%, 100% 92%, 12% 86%, 50% 50%; transform:rotate(.8deg) scale(1.02); }
+    100% { background-position:0% 0%, 100% 0%, 100% 100%, 0% 100%, 50% 50%; transform:rotate(0deg) scale(1); }
   }
   .layout { position:relative; z-index:1; display:flex; height:100vh;
     height:calc(var(--app-height, 100vh)); height:100dvh; gap:18px; padding:18px; }
@@ -2492,11 +2493,11 @@ PAGE = r"""<!DOCTYPE html>
   }
   body.theme-light::before {
     background:
-      radial-gradient(50vw 44vw at 15% 12%, rgba(255,153,51,.45), transparent 62%),
-      radial-gradient(44vw 42vw at 85% 18%, rgba(255,153,51,.24), transparent 60%),
-      radial-gradient(50vw 46vw at 82% 88%, rgba(19,136,8,.40), transparent 62%),
-      radial-gradient(44vw 42vw at 18% 85%, rgba(19,136,8,.24), transparent 60%),
-      radial-gradient(34vw 34vw at 50% 50%, rgba(255,255,255,.65), transparent 65%);
+      radial-gradient(38vw 34vw at 18% 20%, rgba(255,153,51,.65), transparent 68%),
+      radial-gradient(34vw 30vw at 82% 12%, rgba(255,255,255,.60), transparent 65%),
+      radial-gradient(38vw 36vw at 80% 82%, rgba(19,136,8,.55), transparent 68%),
+      radial-gradient(30vw 28vw at 15% 85%, rgba(19,136,8,.28), transparent 62%),
+      radial-gradient(26vw 26vw at 50% 48%, rgba(255,255,255,.55), transparent 65%);
   }
 
   #sidebar { width:var(--sidebar-w); flex-shrink:0; background:var(--panel);
@@ -2786,37 +2787,56 @@ PAGE = r"""<!DOCTYPE html>
     display:none; align-items:center; gap:8px; font-size:12.5px; color:var(--muted); flex-shrink:0; }
   #pending-attach.show { display:flex; }
   #pending-attach button { background:none; border:none; color:var(--muted); cursor:pointer; }
-  .input-area { padding:14px 20px 6px; border-top:none;
+  .input-area { padding:10px 26px 22px; border-top:none;
     background:transparent; max-width:760px; margin:0 auto; width:100%; flex-shrink:0; }
   .input-row { display:flex; flex-direction:column; gap:6px;
     background:var(--composer-bg); border:1px solid var(--composer-border);
-    border-radius:28px; padding:16px 16px 10px;
-    box-shadow:var(--composer-shadow);
-    backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    border-radius:30px; padding:16px 16px 10px;
+    box-shadow:var(--composer-shadow), 0 24px 60px -18px rgba(255,153,51,.35), 0 24px 60px -18px rgba(19,136,8,.25);
+    backdrop-filter:blur(28px) saturate(1.4); -webkit-backdrop-filter:blur(28px) saturate(1.4);
     transition:box-shadow .2s ease, border-color .2s ease, transform .15s ease; }
   .input-row:focus-within { border-color:var(--accent);
-    box-shadow:var(--composer-shadow), 0 0 0 3px var(--accent-dim); }
+    box-shadow:var(--composer-shadow), 0 0 0 3px var(--accent-dim),
+      0 24px 60px -18px rgba(255,153,51,.45), 0 24px 60px -18px rgba(19,136,8,.35); }
   .composer-bottom-row { display:flex; align-items:center; justify-content:space-between; }
-  .tool-btn { background:none; border:1px solid var(--composer-border); color:var(--muted); cursor:pointer;
+  .tool-btn { background:rgba(255,255,255,.06); border:1px solid transparent; color:var(--muted); cursor:pointer;
     width:38px; height:38px; border-radius:50%; font-size:18px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center;
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    transition:background .15s ease, color .15s ease, transform .1s ease;
     touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
-  .tool-btn:hover { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
-  .tool-btn.active { color:var(--accent); }
+  .tool-btn:hover { background:var(--accent-dim); color:var(--accent); transform:translateY(-1px); }
+  .tool-btn.active { color:var(--accent); background:var(--accent-dim); }
   textarea { width:100%; resize:none; background:transparent; border:none; color:var(--text);
     font-size:15.5px; font-family:inherit; line-height:1.5; max-height:160px; min-height:26px;
     outline:none; padding:2px 4px 8px; }
   textarea::placeholder { color:var(--muted); }
-  #send-btn { background:var(--accent); color:#fff; border:none; border-radius:50%;
+  #send-btn { background:linear-gradient(135deg,#FF9933,#138808); color:#fff; border:none; border-radius:50%;
     width:38px; height:38px; font-size:18px; cursor:pointer; flex-shrink:0;
     display:flex; align-items:center; justify-content:center;
-    box-shadow:0 2px 10px rgba(0,0,0,.18);
+    box-shadow:0 4px 14px rgba(255,153,51,.35);
     touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
   #send-btn:disabled { background:var(--accent-dim); color:var(--muted); cursor:not-allowed; box-shadow:none; }
   #send-btn.generating { background:#ef4444; }
   #send-btn.generating:hover { opacity:.9; }
   #voice-btn.listening { color:#ef4444; animation:pulse 1s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  #live-talk-btn.live-listening { color:#fff; background:#ef4444; animation:pulse 1s infinite; }
+  #live-talk-btn.live-speaking { color:#fff; background:var(--accent-grad); }
+  #live-talk-btn.live-idle-active { color:var(--accent); background:var(--accent-dim); }
+
+  #live-talk-status { display:none; align-items:center; gap:8px; position:fixed;
+    left:50%; transform:translateX(-50%); bottom:calc(120px + env(safe-area-inset-bottom));
+    background:rgba(15,15,22,.85); color:#fff; padding:8px 16px 8px 12px; border-radius:24px;
+    font-size:12.5px; font-weight:600; z-index:300; backdrop-filter:blur(14px);
+    box-shadow:0 10px 30px rgba(0,0,0,.35); pointer-events:none; }
+  #live-talk-status.show { display:flex; }
+  #live-talk-status .dot { width:8px; height:8px; border-radius:50%; background:#ef4444;
+    animation:pulse 1s infinite; flex-shrink:0; }
+  #live-talk-status.speaking .dot { background:var(--accent2); animation:none; }
+  #live-talk-status button { pointer-events:auto; background:none; border:1px solid rgba(255,255,255,.25);
+    color:#fff; border-radius:14px; padding:2px 10px; font-size:11px; cursor:pointer; margin-left:4px; }
 
   #speaking-indicator { display:none; align-items:center; gap:6px; font-size:12px;
     color:var(--accent); padding:4px 0; flex-shrink:0; }
@@ -3011,6 +3031,12 @@ PAGE = r"""<!DOCTYPE html>
       <button id="stop-speak-btn">Stop</button>
     </div>
 
+    <div id="live-talk-status">
+      <span class="dot"></span>
+      <span id="live-talk-status-text">Listening…</span>
+      <button id="live-talk-stop-btn">End</button>
+    </div>
+
     <div id="notif-banner" style="display:none;align-items:center;justify-content:space-between;gap:10px;
       background:linear-gradient(135deg,var(--accent-dim),rgba(16,163,127,.15));
       border:1px solid var(--accent);border-radius:12px;padding:10px 14px;
@@ -3047,6 +3073,14 @@ PAGE = r"""<!DOCTYPE html>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="12" y1="5" x2="12" y2="19"/>
                 <line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+            </button>
+            <button class="tool-btn" id="live-talk-btn" type="button" title="Live Talk — speak and Mythic AI replies out loud">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="23"/>
+                <line x1="8" y1="23" x2="16" y2="23"/>
               </svg>
             </button>
             <button id="send-btn" type="submit" title="Send">
@@ -3910,6 +3944,117 @@ if (voiceBtn) voiceBtn.addEventListener('click', () => {
   if (voiceBtn.classList.contains('listening')) { recognition.stop(); return; }
   recognition.start();
 });
+
+// ─── LIVE TALK: continuous hands-free voice conversation ───────────────────
+// Loop: listen for speech -> auto-submit as a message -> wait for the AI's
+// reply to finish streaming -> speak it aloud -> automatically start
+// listening again. Runs until the user taps the button (or the status
+// pill's "End") to stop. Independent of the (currently unused) voiceBtn
+// dictation path above — Live Talk manages its own recognition instance.
+const liveTalkBtn        = document.getElementById('live-talk-btn');
+const liveTalkStatus     = document.getElementById('live-talk-status');
+const liveTalkStatusText = document.getElementById('live-talk-status-text');
+const liveTalkStopBtn    = document.getElementById('live-talk-stop-btn');
+let liveTalkActive = false;
+let liveRecognition = null;
+let liveTalkPhase = 'idle'; // 'listening' | 'sending' | 'speaking'
+
+function liveTalkSupported() {
+  return !!(window.SpeechRecognition || window.webkitSpeechRecognition) && !!window.speechSynthesis;
+}
+
+function setLiveTalkStatus(phase, text) {
+  liveTalkPhase = phase;
+  if (liveTalkStatus) {
+    liveTalkStatus.classList.toggle('show', liveTalkActive);
+    liveTalkStatus.classList.toggle('speaking', phase === 'speaking');
+  }
+  if (liveTalkStatusText) liveTalkStatusText.textContent = text;
+  if (liveTalkBtn) {
+    liveTalkBtn.classList.toggle('live-listening', liveTalkActive && phase === 'listening');
+    liveTalkBtn.classList.toggle('live-speaking', liveTalkActive && phase === 'speaking');
+    liveTalkBtn.classList.toggle('live-idle-active', liveTalkActive && phase !== 'listening' && phase !== 'speaking');
+  }
+}
+
+function liveTalkListenOnce() {
+  if (!liveTalkActive) return;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const rec = new SR();
+  liveRecognition = rec;
+  rec.continuous = false;
+  rec.interimResults = false;
+  rec.lang = 'en-US';
+  setLiveTalkStatus('listening', 'Listening…');
+  let handled = false;
+  rec.onresult = (e) => {
+    let t = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) t += e.results[i][0].transcript;
+    }
+    t = t.trim();
+    if (t) {
+      handled = true;
+      input.value = t;
+      autoResize();
+      setLiveTalkStatus('sending', 'Thinking…');
+      form.requestSubmit();
+      liveTalkWaitThenSpeak();
+    }
+  };
+  rec.onerror = (e) => {
+    if (!liveTalkActive) return;
+    if (e.error === 'no-speech' || e.error === 'aborted') { setTimeout(() => { if (liveTalkActive) liveTalkListenOnce(); }, 300); }
+  };
+  rec.onend = () => {
+    if (!liveTalkActive || handled) return;
+    // Silence/timeout with nothing said — just keep listening.
+    setTimeout(() => { if (liveTalkActive) liveTalkListenOnce(); }, 300);
+  };
+  try { rec.start(); } catch { setTimeout(() => { if (liveTalkActive) liveTalkListenOnce(); }, 500); }
+}
+
+function liveTalkWaitThenSpeak() {
+  const check = setInterval(() => {
+    if (!liveTalkActive) { clearInterval(check); return; }
+    if (!isGenerating) {
+      clearInterval(check);
+      const allRows = messagesEl.querySelectorAll('.msg-row.ai');
+      const lastRow = allRows[allRows.length - 1];
+      const textEl = lastRow ? lastRow.querySelector('.msg-text,.md-rendered') : null;
+      const replyText = textEl ? (textEl.textContent || textEl.innerText || '') : '';
+      if (replyText.trim() && liveTalkActive) {
+        setLiveTalkStatus('speaking', 'Speaking…');
+        speak(replyText);
+        const waitSpeak = setInterval(() => {
+          if (!liveTalkActive) { clearInterval(waitSpeak); return; }
+          if (!window.speechSynthesis.speaking) {
+            clearInterval(waitSpeak);
+            if (liveTalkActive) liveTalkListenOnce();
+          }
+        }, 250);
+      } else if (liveTalkActive) {
+        liveTalkListenOnce();
+      }
+    }
+  }, 400);
+}
+
+function stopLiveTalk() {
+  liveTalkActive = false;
+  if (liveRecognition) { try { liveRecognition.stop(); } catch {} liveRecognition = null; }
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  if (liveTalkStatus) liveTalkStatus.classList.remove('show');
+  if (liveTalkBtn) liveTalkBtn.classList.remove('live-listening', 'live-speaking', 'live-idle-active');
+}
+
+if (liveTalkBtn) liveTalkBtn.addEventListener('click', () => {
+  if (!liveTalkSupported()) { alert('Live Talk needs microphone + speech support — try Chrome or Edge.'); return; }
+  if (liveTalkActive) { stopLiveTalk(); return; }
+  liveTalkActive = true;
+  liveTalkListenOnce();
+});
+if (liveTalkStopBtn) liveTalkStopBtn.addEventListener('click', stopLiveTalk);
 
 function handleFileSelect(file) {
   if (!file) return;
