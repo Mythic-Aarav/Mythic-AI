@@ -2455,7 +2455,12 @@ PAGE = r"""<!DOCTYPE html>
     --radius-lg:20px; --radius-md:14px; --radius-sm:10px; --chakra:#000080;
   }
   * { box-sizing:border-box; margin:0; padding:0; }
-  html,body { height:100%; background:var(--bg); color:var(--text);
+  html,body { height:100%;
+    background:linear-gradient(160deg,
+      rgba(255,153,51,.22) 0%, rgba(255,153,51,.10) 22%,
+      rgba(255,255,255,.06) 42%, rgba(255,255,255,.06) 58%,
+      rgba(19,136,8,.10) 78%, rgba(19,136,8,.22) 100%), var(--bg);
+    color:var(--text);
     font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",
       "Noto Sans","Noto Sans Devanagari",sans-serif; overflow:hidden; letter-spacing:.1px;
     position:relative; }
