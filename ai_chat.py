@@ -2444,7 +2444,7 @@ PAGE = r"""<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&family=Noto+Sans+Devanagari:wght@400;600&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg:#0c1410; --panel:rgba(20,31,25,.86); --border:#2a3a3080;
+    --bg:#0c1410; --panel:rgba(20,31,25,.60); --border:#2a3a3080;
     --text:#f5f3ea; --muted:#9aa89e; --accent:#FF9933;
     --accent2:#138808; --accent-grad:linear-gradient(135deg,#FF9933,#ffffff 50%,#138808);
     --accent-dim:rgba(255,153,51,.16); --user-bubble:linear-gradient(135deg,#FF9933,#e07b00);
@@ -2457,9 +2457,9 @@ PAGE = r"""<!DOCTYPE html>
   * { box-sizing:border-box; margin:0; padding:0; }
   html,body { height:100%;
     background:linear-gradient(160deg,
-      rgba(255,153,51,.22) 0%, rgba(255,153,51,.10) 22%,
-      rgba(255,255,255,.06) 42%, rgba(255,255,255,.06) 58%,
-      rgba(19,136,8,.10) 78%, rgba(19,136,8,.22) 100%), var(--bg);
+      rgba(255,153,51,.42) 0%, rgba(255,153,51,.20) 22%,
+      rgba(255,255,255,.10) 42%, rgba(255,255,255,.10) 58%,
+      rgba(19,136,8,.20) 78%, rgba(19,136,8,.42) 100%), var(--bg);
     color:var(--text);
     font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",
       "Noto Sans","Noto Sans Devanagari",sans-serif; overflow:hidden; letter-spacing:.1px;
@@ -2484,7 +2484,7 @@ PAGE = r"""<!DOCTYPE html>
     height:calc(var(--app-height, 100vh)); height:100dvh; gap:18px; padding:18px; }
 
   body.theme-light {
-    --bg:#fdfaf3; --panel:rgba(255,255,255,.82); --border:#e7e0cf;
+    --bg:#fdfaf3; --panel:rgba(255,255,255,.55); --border:#e7e0cf;
     --text:#1b1a13; --muted:#6d6a5e; --accent-dim:#fff1e0;
     --user-bubble:linear-gradient(135deg,#FF9933,#e07b00); --user-text:#ffffff; --ai-bubble:transparent;
     --composer-bg:rgba(255,255,255,.85); --composer-border:rgba(19,136,8,.22);
