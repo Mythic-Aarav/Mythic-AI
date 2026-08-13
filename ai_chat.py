@@ -2444,20 +2444,20 @@ PAGE = r"""<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&family=Noto+Sans+Devanagari:wght@400;600&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg:#0b0b14; --panel:#15151f; --border:#26263380;
-    --text:#f1f0f7; --muted:#8d8ba0; --accent:#7c5cff;
-    --accent2:#22d3ee; --accent-grad:linear-gradient(135deg,#7c5cff,#22d3ee);
-    --accent-dim:rgba(124,92,255,.16); --user-bubble:linear-gradient(135deg,#6d4dff,#4a3ad9);
+    --bg:#0c1410; --panel:#141f19; --border:#2a3a3080;
+    --text:#f5f3ea; --muted:#9aa89e; --accent:#FF9933;
+    --accent2:#138808; --accent-grad:linear-gradient(135deg,#FF9933,#ffffff 50%,#138808);
+    --accent-dim:rgba(255,153,51,.16); --user-bubble:linear-gradient(135deg,#FF9933,#e07b00);
     --user-text:#ffffff;
     --ai-bubble:transparent; --sidebar-w:272px; --msg-font-size:15px;
-    --composer-bg:rgba(21,21,31,.75); --composer-border:rgba(124,92,255,.25);
-    --composer-shadow:0 20px 44px rgba(0,0,0,.45), 0 0 0 1px rgba(124,92,255,.06);
-    --radius-lg:20px; --radius-md:14px; --radius-sm:10px;
+    --composer-bg:rgba(20,31,25,.75); --composer-border:rgba(19,136,8,.30);
+    --composer-shadow:0 20px 44px rgba(0,0,0,.45), 0 0 0 1px rgba(255,153,51,.08);
+    --radius-lg:20px; --radius-md:14px; --radius-sm:10px; --chakra:#000080;
   }
   * { box-sizing:border-box; margin:0; padding:0; }
   html,body { height:100%; background:
-      radial-gradient(1200px 700px at 12% -10%, rgba(124,92,255,.16), transparent 55%),
-      radial-gradient(900px 600px at 100% 0%, rgba(34,211,238,.10), transparent 50%),
+      radial-gradient(1200px 700px at 12% -10%, rgba(255,153,51,.16), transparent 55%),
+      radial-gradient(900px 600px at 100% 0%, rgba(19,136,8,.14), transparent 50%),
       var(--bg);
     color:var(--text);
     font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",
@@ -2466,15 +2466,15 @@ PAGE = r"""<!DOCTYPE html>
     height:100dvh; gap:10px; padding:10px; }
 
   body.theme-light {
-    --bg:#f5f4fb; --panel:#ffffff; --border:#e6e3f5;
-    --text:#1b1a29; --muted:#6d6b82; --accent-dim:#efeaff;
-    --user-bubble:linear-gradient(135deg,#8a6dff,#5b47e0); --user-text:#ffffff; --ai-bubble:transparent;
-    --composer-bg:rgba(255,255,255,.82); --composer-border:rgba(124,92,255,.22);
-    --composer-shadow:0 20px 44px rgba(80,60,180,.14), 0 0 0 1px rgba(124,92,255,.06);
+    --bg:#fdfaf3; --panel:#ffffff; --border:#e7e0cf;
+    --text:#1b1a13; --muted:#6d6a5e; --accent-dim:#fff1e0;
+    --user-bubble:linear-gradient(135deg,#FF9933,#e07b00); --user-text:#ffffff; --ai-bubble:transparent;
+    --composer-bg:rgba(255,255,255,.85); --composer-border:rgba(19,136,8,.22);
+    --composer-shadow:0 20px 44px rgba(0,60,20,.10), 0 0 0 1px rgba(255,153,51,.08);
   }
   body.theme-light html, body.theme-light { background:
-      radial-gradient(1200px 700px at 12% -10%, rgba(124,92,255,.10), transparent 55%),
-      radial-gradient(900px 600px at 100% 0%, rgba(34,211,238,.08), transparent 50%),
+      radial-gradient(1200px 700px at 12% -10%, rgba(255,153,51,.10), transparent 55%),
+      radial-gradient(900px 600px at 100% 0%, rgba(19,136,8,.10), transparent 50%),
       var(--bg); }
 
   #sidebar { width:var(--sidebar-w); flex-shrink:0; background:var(--panel);
@@ -2531,6 +2531,9 @@ PAGE = r"""<!DOCTYPE html>
   header { padding:calc(14px + env(safe-area-inset-top)) 20px 14px; border-bottom:1px solid var(--border);
     display:flex; align-items:center; justify-content:space-between; gap:10px;
     background:var(--panel); position:relative; z-index:20; flex-shrink:0; }
+  header::before { content:""; position:absolute; top:0; left:0; right:0; height:4px;
+    background:linear-gradient(90deg,#FF9933 0 33.33%, #ffffff 33.33% 66.66%, #138808 66.66% 100%);
+    border-radius:var(--radius-lg) var(--radius-lg) 0 0; }
   header .left { display:flex; align-items:center; gap:10px; min-width:0; }
   header .right { display:flex; align-items:center; gap:8px; flex-shrink:0; }
   header button { touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
