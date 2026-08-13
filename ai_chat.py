@@ -2460,7 +2460,7 @@ PAGE = r"""<!DOCTYPE html>
     --accent2:#138808; --accent-grad:linear-gradient(135deg,#FF9933,#ffffff 50%,#138808);
     --accent-dim:rgba(255,153,51,.16); --user-bubble:linear-gradient(135deg,#FF9933,#e07b00);
     --user-text:#ffffff;
-    --ai-bubble:transparent; --sidebar-w:272px; --msg-font-size:15px;
+    --ai-bubble:transparent; --sidebar-w:272px; --msg-font-size:16px;
     --composer-bg:rgba(20,31,25,.75); --composer-border:rgba(19,136,8,.30);
     --composer-shadow:0 20px 44px rgba(0,0,0,.45), 0 0 0 1px rgba(255,153,51,.08);
     --radius-lg:20px; --radius-md:14px; --radius-sm:10px; --chakra:#000080;
@@ -2574,27 +2574,27 @@ PAGE = r"""<!DOCTYPE html>
   header .right { display:flex; align-items:center; gap:8px; flex-shrink:0; }
   header button { touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
   #sidebar-toggle { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:var(--radius-sm); cursor:pointer; font-size:15px; flex-shrink:0; }
+    width:40px; height:40px; border-radius:var(--radius-sm); cursor:pointer; font-size:16px; flex-shrink:0; }
   #sidebar-toggle:hover { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
-  header h1 { font-size:17px; font-weight:800; margin:0; letter-spacing:.2px;
+  header h1 { font-size:19px; font-weight:800; margin:0; letter-spacing:.2px;
     background:var(--accent-grad); -webkit-background-clip:text; background-clip:text;
     -webkit-text-fill-color:transparent; }
   #streak-badge { display:none; align-items:center; gap:4px; background:linear-gradient(135deg,#ff9d42,#ff5f6d);
     color:#fff; font-size:11px; font-weight:800; padding:3px 9px; border-radius:12px; white-space:nowrap; }
   #name-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:var(--radius-sm); cursor:pointer; font-size:15px; flex-shrink:0;
+    width:40px; height:40px; border-radius:var(--radius-sm); cursor:pointer; font-size:16px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
   #name-btn:hover { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
   #settings-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:var(--radius-sm); cursor:pointer; font-size:15px; flex-shrink:0;
+    width:40px; height:40px; border-radius:var(--radius-sm); cursor:pointer; font-size:16px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
   #settings-btn:hover { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
   #export-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:var(--radius-sm); cursor:pointer; font-size:15px; flex-shrink:0;
+    width:40px; height:40px; border-radius:var(--radius-sm); cursor:pointer; font-size:16px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
   #export-btn:hover { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
   #share-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:var(--radius-sm); cursor:pointer; font-size:15px; flex-shrink:0;
+    width:40px; height:40px; border-radius:var(--radius-sm); cursor:pointer; font-size:16px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
   #share-btn:hover { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
   #share-btn.active { color:var(--accent); border-color:var(--accent); }
@@ -2634,19 +2634,19 @@ PAGE = r"""<!DOCTYPE html>
     font-family:inherit; }
   #share-status { font-size:11.5px; color:var(--muted); text-align:center; margin-top:2px; min-height:14px; }
   #vip-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
+    width:40px; height:40px; border-radius:6px; cursor:pointer; font-size:16px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
   #vip-btn:hover { background:var(--panel); }
   #vip-btn.active { color:var(--accent); border-color:var(--accent); }
 
   #fullscreen-btn { display:flex; align-items:center; justify-content:center;
-    width:36px; height:36px; border-radius:6px; flex-shrink:0;
+    width:40px; height:40px; border-radius:6px; flex-shrink:0;
     background:none; border:1px solid var(--border);
-    color:var(--muted); font-size:15px; cursor:pointer; touch-action:manipulation;
+    color:var(--muted); font-size:16px; cursor:pointer; touch-action:manipulation;
     -webkit-tap-highlight-color:transparent; }
   #fullscreen-btn:hover { color:var(--text); border-color:var(--accent); background:var(--panel); }
   #fullscreen-btn.active { color:var(--accent); border-color:var(--accent); }
-  #fullscreen-icon { font-size:15px; }
+  #fullscreen-icon { font-size:16px; }
 
   body.pseudo-fullscreen #sidebar-toggle,
   body.pseudo-fullscreen header .left h1 { display:none; }
@@ -2655,7 +2655,7 @@ PAGE = r"""<!DOCTYPE html>
   /* ── Header "⋯" overflow menu ─────────────────────────────────────── */
   #header-menu-wrap { position:relative; }
   #header-menu-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:18px; flex-shrink:0;
+    width:40px; height:40px; border-radius:6px; cursor:pointer; font-size:19px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation;
     line-height:1; }
   #header-menu-btn:hover, #header-menu-btn[aria-expanded="true"] { background:var(--panel); color:var(--text); border-color:var(--accent); }
@@ -2776,8 +2776,8 @@ PAGE = r"""<!DOCTYPE html>
   .msg-timestamp { font-size:10.5px; color:var(--muted); margin-top:2px; }
   .empty-state { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
     text-align:center; color:var(--muted); }
-  .empty-state h2 { font-size:22px; font-weight:700; color:var(--accent); margin-bottom:8px; }
-  .empty-state p { font-size:14px; }
+  .empty-state h2 { font-size:25px; font-weight:700; color:var(--accent); margin-bottom:8px; }
+  .empty-state p { font-size:16px; }
   .typing { align-self:flex-start; display:flex; gap:5px; padding:14px 16px;
     background:var(--ai-bubble); border-radius:18px; border-bottom-left-radius:4px; }
   .typing span { width:7px; height:7px; border-radius:50%; background:var(--muted);
@@ -2811,7 +2811,7 @@ PAGE = r"""<!DOCTYPE html>
       0 24px 60px -18px rgba(255,153,51,.45), 0 24px 60px -18px rgba(19,136,8,.35); }
   .composer-bottom-row { display:flex; align-items:center; justify-content:space-between; }
   .tool-btn { background:rgba(255,255,255,.06); border:1px solid transparent; color:var(--muted); cursor:pointer;
-    width:38px; height:38px; border-radius:50%; font-size:18px; flex-shrink:0;
+    width:42px; height:42px; border-radius:50%; font-size:19px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center;
     backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
     transition:background .15s ease, color .15s ease, transform .1s ease;
@@ -2819,11 +2819,11 @@ PAGE = r"""<!DOCTYPE html>
   .tool-btn:hover { background:var(--accent-dim); color:var(--accent); transform:translateY(-1px); }
   .tool-btn.active { color:var(--accent); background:var(--accent-dim); }
   textarea { width:100%; resize:none; background:transparent; border:none; color:var(--text);
-    font-size:15.5px; font-family:inherit; line-height:1.5; max-height:160px; min-height:26px;
+    font-size:16px; font-family:inherit; line-height:1.5; max-height:160px; min-height:26px;
     outline:none; padding:2px 4px 8px; }
   textarea::placeholder { color:var(--muted); }
   #send-btn { background:linear-gradient(135deg,#FF9933,#138808); color:#fff; border:none; border-radius:50%;
-    width:38px; height:38px; font-size:18px; cursor:pointer; flex-shrink:0;
+    width:42px; height:42px; font-size:19px; cursor:pointer; flex-shrink:0;
     display:flex; align-items:center; justify-content:center;
     box-shadow:0 4px 14px rgba(255,153,51,.35);
     touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
@@ -2907,39 +2907,42 @@ PAGE = r"""<!DOCTYPE html>
     header .left { flex-wrap:wrap; row-gap:4px; }
     header .right { flex-wrap:wrap; justify-content:flex-end; row-gap:6px; gap:6px; }
     header h1 { font-size:14px; }
-    #sidebar-toggle { width:36px; height:36px; font-size:13px; }
-    #name-btn { width:36px; height:36px; font-size:13px; }
-    #settings-btn { width:36px; height:36px; font-size:13px; }
-    #export-btn { width:36px; height:36px; font-size:13px; }
-    #share-btn { width:36px; height:36px; font-size:13px; }
-    #vip-btn { width:36px; height:36px; font-size:13px; }
-    #clear-btn { font-size:11px; padding:8px 10px; min-height:36px; }
-    #speak-toggle { font-size:11px; padding:5px 8px; }
-    #fullscreen-btn { width:36px; height:36px; font-size:13px; }
-    #install-btn { padding:6px 10px; font-size:11px; }
+    #sidebar-toggle { width:44px; height:44px; font-size:15px; }
+    #name-btn { width:44px; height:44px; font-size:15px; }
+    #settings-btn { width:44px; height:44px; font-size:15px; }
+    #export-btn { width:44px; height:44px; font-size:15px; }
+    #share-btn { width:44px; height:44px; font-size:15px; }
+    #vip-btn { width:44px; height:44px; font-size:15px; }
+    #clear-btn { font-size:12.5px; padding:10px 12px; min-height:44px; }
+    #speak-toggle { font-size:12.5px; padding:8px 10px; min-height:44px; }
+    #fullscreen-btn { width:44px; height:44px; font-size:15px; }
+    #install-btn { padding:9px 12px; font-size:12.5px; min-height:44px; }
 
     #messages-wrap { overflow-y:auto; -webkit-overflow-scrolling:touch; }
     #messages { padding:14px 10px; gap:12px; max-width:100%; }
-    .msg { max-width:90%; font-size:14px; padding:10px 12px; }
+    .msg { max-width:90%; font-size:15px; padding:11px 13px; }
     .msg-row { max-width:90%; }
-    .msg-actions { opacity:1; height:26px; }
-    .msg-actions button { font-size:13px; padding:4px 9px; min-width:30px; min-height:26px; }
+    .msg-actions { opacity:1; height:36px; }
+    .msg-actions button { font-size:14px; padding:6px 12px; min-width:40px; min-height:36px; }
 
     .input-area { padding:8px 10px max(8px,env(safe-area-inset-bottom)); }
     .input-row { padding:12px 12px 8px; border-radius:22px; }
     textarea { font-size:16px; padding:2px 2px 6px; }
-    .tool-btn { width:34px; height:34px; font-size:17px; }
-    #send-btn { width:34px; height:34px; font-size:16px; }
+    .tool-btn { width:44px; height:44px; font-size:18px; }
+    #send-btn { width:44px; height:44px; font-size:18px; }
     #ai-disclaimer { font-size:10.5px; padding:0 12px; }
 
     .empty-state h2 { font-size:19px; }
     .empty-state p { font-size:13px; }
-    #scroll-btn { bottom:80px; right:12px; width:34px; height:34px; }
+    #scroll-btn { bottom:80px; right:12px; width:40px; height:40px; }
 
-    #new-chat-btn { margin:10px; padding:10px 12px; font-size:13.5px; }
-    .conv-item { padding:10px 8px; font-size:13px; min-height:44px; }
-    .conv-item .menu-btn { opacity:1; }
-    #sidebar-footer { font-size:11px; padding:10px 12px; }
+    #new-chat-btn { margin:10px; padding:12px; font-size:14.5px; min-height:44px; }
+    .conv-item { padding:12px 10px; font-size:14px; min-height:48px; }
+    .conv-item .menu-btn { opacity:1; width:36px; height:36px; }
+    #sidebar-footer { font-size:12px; padding:12px; }
+    #search-chats-btn, #reminders-btn { padding:10px 4px; font-size:13px; min-height:40px; }
+    .quick-btn { font-size:13.5px; padding:9px 16px; min-height:40px; }
+    .mode-tab { font-size:14px; padding:10px 12px; min-height:40px; }
   }
 
   @media(max-width:380px) {
@@ -3063,6 +3066,18 @@ PAGE = r"""<!DOCTYPE html>
     <div id="live-video-wrap">
       <video id="live-video-preview" autoplay muted playsinline></video>
       <button id="live-video-stop-btn" title="Stop sharing">✕</button>
+    </div>
+
+    <!-- In-page camera capture: takes a photo without leaving the app for
+         the phone's native camera app (unlike a plain <input capture>). -->
+    <div id="camera-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:400;flex-direction:column;align-items:center;justify-content:center;">
+      <video id="camera-modal-video" autoplay muted playsinline style="max-width:100%;max-height:70vh;border-radius:12px;background:#000;"></video>
+      <canvas id="camera-modal-canvas" style="display:none;"></canvas>
+      <div style="display:flex;gap:16px;margin-top:20px;">
+        <button id="camera-modal-cancel" type="button" style="background:none;border:1px solid rgba(255,255,255,.4);color:#fff;border-radius:24px;padding:12px 22px;font-size:14px;cursor:pointer;font-family:inherit;">Cancel</button>
+        <button id="camera-modal-shoot" type="button" style="background:#fff;border:none;color:#111;border-radius:50%;width:60px;height:60px;font-size:22px;cursor:pointer;">📸</button>
+      </div>
+      <div id="camera-modal-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:14px;max-width:80vw;text-align:center;"></div>
     </div>
 
     <div id="notif-banner" style="display:none;align-items:center;justify-content:space-between;gap:10px;
@@ -4105,14 +4120,38 @@ function stopLiveMedia() {
 }
 
 async function startLiveMedia(kind) {
-  if (!liveTalkSupported()) { alert('This needs microphone + speech support — try Chrome or Edge.'); return; }
+  // Camera (Video Call) only needs getUserMedia — it does NOT need speech
+  // recognition support. Screen Share needs getDisplayMedia, which simply
+  // does not exist on ANY mobile browser (Android Chrome or iOS Safari) —
+  // that's a platform limitation, not something fixable here, so we detect
+  // it up front and say so clearly instead of silently failing.
+  if (kind === 'screen') {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      alert('Screen sharing isn\'t available in mobile browsers (Chrome/Safari on '
+        + 'phones don\'t support it) — this only works on desktop Chrome/Edge.');
+      return;
+    }
+  } else {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      alert('Camera access isn\'t available in this browser.');
+      return;
+    }
+  }
   stopLiveMedia();
   try {
     liveMediaStream = kind === 'screen'
       ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
       : await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
   } catch (err) {
-    alert((kind === 'screen' ? 'Screen share' : 'Camera') + ' access was blocked or cancelled.');
+    if (err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError')) {
+      alert((kind === 'screen' ? 'Screen share' : 'Camera') + ' permission was denied. '
+        + 'Check your browser\'s site settings and allow camera access, then try again.');
+    } else if (err && err.name === 'NotFoundError') {
+      alert('No camera was found on this device.');
+    } else {
+      alert((kind === 'screen' ? 'Screen share' : 'Camera') + ' access was blocked or cancelled'
+        + (err && err.message ? (': ' + err.message) : '.'));
+    }
     return;
   }
   liveMediaKind = kind;
@@ -4122,9 +4161,20 @@ async function startLiveMedia(kind) {
   // If the person stops sharing from the browser's own UI (not our button),
   // clean up on this end too.
   liveMediaStream.getVideoTracks()[0].addEventListener('ended', () => { if (liveMediaKind === kind) stopLiveMedia(); });
-  // A call implies talking — start Live Talk automatically if it isn't
-  // already running.
-  if (!liveTalkActive) { liveTalkActive = true; liveTalkListenOnce(); }
+  // A call implies talking — auto-start Live Talk ONLY if this browser
+  // actually supports speech recognition (e.g. not Safari). If it doesn't,
+  // the camera/screen preview still works fine on its own — the person can
+  // type messages instead of speaking them.
+  if (!liveTalkActive) {
+    if (liveTalkSupported()) {
+      liveTalkActive = true;
+      liveTalkListenOnce();
+    } else {
+      setLiveTalkStatus('idle', 'Voice control not supported here — type your message instead');
+      if (liveTalkStatus) liveTalkStatus.classList.add('show');
+      setTimeout(() => { if (!liveTalkActive && liveTalkStatus) liveTalkStatus.classList.remove('show'); }, 4000);
+    }
+  }
 }
 
 if (videoCallBtn) videoCallBtn.addEventListener('click', () => {
@@ -4170,6 +4220,84 @@ function closePlusMenu() {
   const existing = document.querySelector('.plus-menu-dropdown');
   if (existing) existing.remove();
 }
+
+// ─── In-page camera capture ─────────────────────────────────────────────
+// Stays inside the app (a full-screen overlay) instead of handing off to
+// the phone's native camera app the way a plain <input capture> does.
+// Falls back to the native file-picker (cameraInput.click()) only if this
+// browser has no getUserMedia support at all.
+let _cameraModalStream = null;
+
+async function openCameraModal() {
+  const overlay = document.getElementById('camera-modal-overlay');
+  const videoEl = document.getElementById('camera-modal-video');
+  const errEl   = document.getElementById('camera-modal-error');
+  if (!overlay || !videoEl) { cameraInput.click(); return; }
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    // No in-page camera API available in this browser at all — fall back
+    // to the OS camera picker rather than showing a dead-end screen.
+    cameraInput.click();
+    return;
+  }
+
+  overlay.style.display = 'flex';
+  errEl.style.display = 'none';
+  try {
+    _cameraModalStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' }, audio: false,
+    });
+    videoEl.srcObject = _cameraModalStream;
+  } catch (err) {
+    errEl.textContent = (err && err.name === 'NotAllowedError')
+      ? 'Camera permission denied — allow camera access in your browser settings and try again.'
+      : 'Could not open the camera' + (err && err.message ? (': ' + err.message) : '.') + ' Using photo picker instead…';
+    errEl.style.display = 'block';
+    setTimeout(() => { closeCameraModal(); cameraInput.click(); }, 1600);
+  }
+}
+
+function closeCameraModal() {
+  const overlay = document.getElementById('camera-modal-overlay');
+  if (overlay) overlay.style.display = 'none';
+  if (_cameraModalStream) {
+    _cameraModalStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
+    _cameraModalStream = null;
+  }
+}
+
+function shootCameraModalPhoto() {
+  const videoEl  = document.getElementById('camera-modal-video');
+  const canvasEl = document.getElementById('camera-modal-canvas');
+  if (!videoEl || !videoEl.videoWidth) return;
+  canvasEl.width = videoEl.videoWidth;
+  canvasEl.height = videoEl.videoHeight;
+  const ctx = canvasEl.getContext('2d');
+  ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
+  const dataUrl = canvasEl.toDataURL('image/jpeg', 0.85);
+  const base64 = dataUrl.split(',')[1];
+  if (!base64) return;
+  pendingFile = { name: 'photo-' + Date.now() + '.jpg', mimeType: 'image/jpeg', dataBase64: base64 };
+  pendingName.textContent = pendingFile.name;
+  pendingAttach.classList.add('show');
+  closeCameraModal();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const cancelBtn = document.getElementById('camera-modal-cancel');
+  const shootBtn  = document.getElementById('camera-modal-shoot');
+  if (cancelBtn) cancelBtn.addEventListener('click', closeCameraModal);
+  if (shootBtn) shootBtn.addEventListener('click', shootCameraModalPhoto);
+});
+// In case this script runs after DOMContentLoaded already fired (it's at
+// the bottom of the page), wire up immediately too — harmless if it also
+// fires via the listener above since getElementById calls are idempotent.
+(function _wireCameraModalNow() {
+  const cancelBtn = document.getElementById('camera-modal-cancel');
+  const shootBtn  = document.getElementById('camera-modal-shoot');
+  if (cancelBtn && !cancelBtn._wired) { cancelBtn._wired = true; cancelBtn.addEventListener('click', closeCameraModal); }
+  if (shootBtn && !shootBtn._wired) { shootBtn._wired = true; shootBtn.addEventListener('click', shootCameraModalPhoto); }
+})();
 plusBtn.addEventListener('click', (e) => {
   e.stopPropagation();
   if (document.querySelector('.plus-menu-dropdown')) { closePlusMenu(); return; }
@@ -4184,7 +4312,7 @@ plusBtn.addEventListener('click', (e) => {
   menu.style.left = rect.left + 'px';
 
   const items = [
-    { label: '📷 Take Photo', action: () => cameraInput.click() },
+    { label: '📷 Take Photo', action: () => openCameraModal() },
     { label: '📎 Upload File', action: () => fileInput.click() },
     { label: '🎨 Image', action: () => document.getElementById('img-gen-btn')?.click() },
     { label: '🌿 Ghibli Me', action: () => document.getElementById('ghibli-btn')?.click() },
@@ -4497,6 +4625,19 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
   }
 
   let aiTextNode = null;
+  // Watchdogs so a hung/dead connection ALWAYS surfaces something visible
+  // instead of silently sitting there forever — this is the #1 cause of
+  // "nothing happens" on mobile networks, where a carrier's NAT/proxy can
+  // silently drop a long-idle streaming connection without ever sending
+  // fetch() a clean error.
+  let noResponseTimer = null;
+  let streamStallTimer = null;
+  const STREAM_STALL_MS = 20000; // no NEW chunk for 20s while streaming = stalled
+  const NO_RESPONSE_MS = 45000;  // no response headers at all for 45s = dead
+  function clearWatchdogs() {
+    if (noResponseTimer) { clearTimeout(noResponseTimer); noResponseTimer = null; }
+    if (streamStallTimer) { clearTimeout(streamStallTimer); streamStallTimer = null; }
+  }
   try {
     const chatPayload = {
       method: 'POST',
@@ -4514,6 +4655,10 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
       })
     };
 
+    noResponseTimer = setTimeout(() => {
+      if (currentAbortController) currentAbortController.abort('no-response-timeout');
+    }, NO_RESPONSE_MS);
+
     // On free-tier hosts (Render, etc.) the server can go to sleep after
     // inactivity — the very first request after that wakes it up but often
     // fails or times out while it's cold-starting. Rather than immediately
@@ -4528,6 +4673,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
       await new Promise(res => setTimeout(res, 3000));
       r = await fetch('/api/chat', chatPayload);
     }
+    clearWatchdogs();
     if (!r.ok || !r.body) {
       hideTyping();
       let errMsg = 'Something went wrong. Try again.';
@@ -4553,12 +4699,31 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
     const decoder = new TextDecoder();
     let fullText = '';
     while (true) {
-      const { done, value } = await reader.read();
+      // Race each chunk read against a stall timer — if the connection has
+      // gone dead mid-stream (common on cellular networks that silently
+      // kill idle-looking connections), abort instead of hanging forever.
+      const stallPromise = new Promise((_, reject) => {
+        streamStallTimer = setTimeout(() => reject(new Error('stream-stalled')), STREAM_STALL_MS);
+      });
+      let readResult;
+      try {
+        readResult = await Promise.race([reader.read(), stallPromise]);
+      } finally {
+        if (streamStallTimer) { clearTimeout(streamStallTimer); streamStallTimer = null; }
+      }
+      const { done, value } = readResult;
       if (done) break;
       const chunk = decoder.decode(value, { stream: true });
       fullText += chunk;
       aiTextNode.textContent = fullText;
       scrollToBottom();
+    }
+    // If the connection reported success but delivered literally nothing
+    // (empty stream), don't leave a blank, invisible message row sitting
+    // in the chat — that's indistinguishable from "nothing happened".
+    if (!fullText.trim()) {
+      fullText = "I didn't get a response back from the server that time — please try again.";
+      aiTextNode.textContent = fullText;
     }
     // Per spec: Mythic AI never speaks automatically. Speech only happens
     // when the user explicitly clicks the 🔊 "Read aloud" button on a
@@ -4576,9 +4741,22 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
       window._notifyAiReply(preview || 'Your answer is ready 💬');
     }
   } catch (err) {
+    clearWatchdogs();
     hideTyping();
-    if (err.name === 'AbortError') {
+    const wasWatchdogAbort = err.name === 'AbortError' &&
+      (currentAbortController === null || currentAbortController.signal.reason === 'no-response-timeout');
+    const wasStall = err.message === 'stream-stalled';
+    if (err.name === 'AbortError' && !wasWatchdogAbort) {
+      // Genuinely user-initiated stop (Stop button clicked).
       if (aiTextNode && !aiTextNode.textContent.trim()) aiTextNode.textContent = '[Stopped]';
+    } else if (wasWatchdogAbort || wasStall) {
+      const msg = 'Lost connection to the server (this can happen on a weak '
+        + 'or switching mobile connection). Please try again.';
+      if (aiTextNode) {
+        aiTextNode.textContent = msg;
+      } else {
+        addMessage('error', msg);
+      }
     } else {
       addMessage('error', 'Network error: ' + err.message);
       askClarification({
@@ -4593,6 +4771,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
       });
     }
   } finally {
+    clearWatchdogs();
     setGenerating(false);
     currentAbortController = null;
   }
@@ -12390,6 +12569,14 @@ def chat():
     resp = Response(stream_with_context(generate()), mimetype="text/plain")
     resp.headers["Content-Type"] = "text/plain; charset=utf-8"
     resp.headers["X-Conversation-Id"] = conv_id
+    # Tell any intermediate proxy (nginx, Render's edge, Cloudflare, etc.)
+    # NOT to buffer this response. Without this, some proxies collect the
+    # entire streamed reply server-side before sending anything to the
+    # browser at all — on a mobile connection that delay can exceed the
+    # proxy's own idle timeout, so the connection gets killed and the
+    # browser sees nothing, ever. This header is the standard fix.
+    resp.headers["X-Accel-Buffering"] = "no"
+    resp.headers["Cache-Control"] = "no-cache, no-transform"
     return resp
 
 
