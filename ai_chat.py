@@ -2455,15 +2455,28 @@ PAGE = r"""<!DOCTYPE html>
     --radius-lg:20px; --radius-md:14px; --radius-sm:10px; --chakra:#000080;
   }
   * { box-sizing:border-box; margin:0; padding:0; }
-  html,body { height:100%; background:
-      radial-gradient(1200px 700px at 12% -10%, rgba(255,153,51,.16), transparent 55%),
-      radial-gradient(900px 600px at 100% 0%, rgba(19,136,8,.14), transparent 50%),
-      var(--bg);
-    color:var(--text);
+  html,body { height:100%; background:var(--bg); color:var(--text);
     font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",
-      "Noto Sans","Noto Sans Devanagari",sans-serif; overflow:hidden; letter-spacing:.1px; }
-  .layout { display:flex; height:100vh; height:calc(var(--app-height, 100vh));
-    height:100dvh; gap:10px; padding:10px; }
+      "Noto Sans","Noto Sans Devanagari",sans-serif; overflow:hidden; letter-spacing:.1px;
+    position:relative; }
+  html::before { content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+    background:
+      radial-gradient(46vw 40vw at 15% 12%, rgba(255,153,51,.30), transparent 62%),
+      radial-gradient(40vw 38vw at 85% 18%, rgba(255,153,51,.16), transparent 60%),
+      radial-gradient(46vw 42vw at 82% 88%, rgba(19,136,8,.28), transparent 62%),
+      radial-gradient(40vw 38vw at 18% 85%, rgba(19,136,8,.16), transparent 60%),
+      radial-gradient(30vw 30vw at 50% 50%, rgba(255,255,255,.10), transparent 65%);
+    background-repeat:no-repeat;
+    animation:flagFloat 22s ease-in-out infinite; }
+  @keyframes flagFloat {
+    0%   { background-position:0% 0%, 100% 0%, 100% 100%, 0% 100%, 50% 50%; }
+    25%  { background-position:6% 4%, 94% 6%, 92% 92%, 6% 96%, 54% 46%; }
+    50%  { background-position:0% 8%, 100% 2%, 96% 88%, 2% 100%, 46% 54%; }
+    75%  { background-position:8% 0%, 92% 8%, 100% 94%, 8% 92%, 50% 50%; }
+    100% { background-position:0% 0%, 100% 0%, 100% 100%, 0% 100%, 50% 50%; }
+  }
+  .layout { position:relative; z-index:1; display:flex; height:100vh;
+    height:calc(var(--app-height, 100vh)); height:100dvh; gap:10px; padding:10px; }
 
   body.theme-light {
     --bg:#fdfaf3; --panel:#ffffff; --border:#e7e0cf;
@@ -2472,10 +2485,14 @@ PAGE = r"""<!DOCTYPE html>
     --composer-bg:rgba(255,255,255,.85); --composer-border:rgba(19,136,8,.22);
     --composer-shadow:0 20px 44px rgba(0,60,20,.10), 0 0 0 1px rgba(255,153,51,.08);
   }
-  body.theme-light html, body.theme-light { background:
-      radial-gradient(1200px 700px at 12% -10%, rgba(255,153,51,.10), transparent 55%),
-      radial-gradient(900px 600px at 100% 0%, rgba(19,136,8,.10), transparent 50%),
-      var(--bg); }
+  body.theme-light html::before {
+    background:
+      radial-gradient(46vw 40vw at 15% 12%, rgba(255,153,51,.26), transparent 62%),
+      radial-gradient(40vw 38vw at 85% 18%, rgba(255,153,51,.14), transparent 60%),
+      radial-gradient(46vw 42vw at 82% 88%, rgba(19,136,8,.22), transparent 62%),
+      radial-gradient(40vw 38vw at 18% 85%, rgba(19,136,8,.13), transparent 60%),
+      radial-gradient(30vw 30vw at 50% 50%, rgba(255,255,255,.55), transparent 65%);
+  }
 
   #sidebar { width:var(--sidebar-w); flex-shrink:0; background:var(--panel);
     border:1px solid var(--border); border-radius:var(--radius-lg); display:flex; flex-direction:column;
