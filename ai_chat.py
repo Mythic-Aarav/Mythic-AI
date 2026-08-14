@@ -2892,6 +2892,11 @@ PAGE = r"""<!DOCTYPE html>
   @media(max-width:768px) {
     :root { --sidebar-w: 78vw; }
 
+    .layout { gap:0; padding:0; }
+    .app { border-radius:0; border:none; box-shadow:none; }
+    header::before { border-radius:0; }
+    #sidebar { border-radius:0; border-right:1px solid var(--border); border-top:none; border-left:none; border-bottom:none; }
+
     #sidebar { position:fixed; top:0; left:0; z-index:100; height:100%;
       height:-webkit-fill-available; width:var(--sidebar-w) !important;
       transform:translateX(0); transition:transform .25s ease;
