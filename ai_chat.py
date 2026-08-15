@@ -149,6 +149,44 @@ VAPID_PRIVATE_KEY   = os.environ.get("VAPID_PRIVATE_KEY",   "").strip()
 VAPID_PUBLIC_KEY    = "".join(os.environ.get("VAPID_PUBLIC_KEY", "").split())
 VAPID_CLAIMS_EMAIL  = os.environ.get("VAPID_CLAIMS_EMAIL",  "mailto:admin@mythic-ai.app").strip()
 
+# ── Push subscription persistence ─────────────────────────────────────────
+# On Render's FREE plan the filesystem is ephemeral: every restart/redeploy/
+# spin-down wipes local files, silently deleting every saved push
+# subscription. That's why notifications can quietly stop working on devices
+# you don't reopen often, while a frequently-reopened tab (which re-saves
+# its subscription on every load) looks unaffected.
+#
+# Fix: optionally persist subscriptions to Upstash Redis (a free, permanent,
+# REST-based key-value store — no native Redis driver needed, just HTTPS).
+# To enable: sign up at upstash.com (free tier), create a Redis database,
+# and set these two env vars on Render:
+#   UPSTASH_REDIS_REST_URL
+#   UPSTASH_REDIS_REST_TOKEN
+# If unset, this falls back to the original local-JSON-file behavior
+# unchanged (fine for local dev, but still ephemeral on Render free tier).
+UPSTASH_REDIS_REST_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "").strip()
+UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "").strip()
+_USE_UPSTASH = bool(UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN)
+_UPSTASH_PUSH_KEY = "mythic:push_subscriptions"
+
+def _upstash_cmd(*parts):
+    """Run one Upstash Redis REST command. Returns the 'result' field, or
+    None on any failure (network error, bad response, not configured)."""
+    if not _USE_UPSTASH:
+        return None
+    try:
+        resp = requests.post(
+            UPSTASH_REDIS_REST_URL,
+            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+            json=list(parts),
+            timeout=5,
+        )
+        if resp.ok:
+            return resp.json().get("result")
+    except Exception:
+        pass
+    return None
+
 # In-memory subscription store (replaced by file/Supabase in production)
 # Key: a stable browser id, Value: the full PushSubscription JSON object
 # (each subscription also carries an internal "_username" field so
@@ -157,7 +195,10 @@ _push_subscriptions: dict = {}
 
 def _save_push_subscription(sub_id: str, sub_data: dict):
     _push_subscriptions[sub_id] = sub_data
-    # Persist to disk alongside conversations so subs survive restarts
+    if _USE_UPSTASH:
+        _upstash_cmd("HSET", _UPSTASH_PUSH_KEY, sub_id, json.dumps(sub_data))
+        return
+    # Local-file fallback (fine for local dev; ephemeral on Render free tier)
     try:
         path = _os.path.join(_DATA_DIR, "push_subscriptions.json")
         existing = {}
@@ -172,6 +213,18 @@ def _save_push_subscription(sub_id: str, sub_data: dict):
 
 def _load_push_subscriptions():
     global _push_subscriptions
+    if _USE_UPSTASH:
+        result = _upstash_cmd("HGETALL", _UPSTASH_PUSH_KEY)
+        data = {}
+        if result:
+            it = iter(result)
+            for k, v in zip(it, it):
+                try:
+                    data[k] = json.loads(v)
+                except Exception:
+                    pass
+        _push_subscriptions = data
+        return
     try:
         path = _os.path.join(_DATA_DIR, "push_subscriptions.json")
         if _os.path.exists(path):
@@ -182,6 +235,9 @@ def _load_push_subscriptions():
 
 def _delete_push_subscription(sub_id: str):
     _push_subscriptions.pop(sub_id, None)
+    if _USE_UPSTASH:
+        _upstash_cmd("HDEL", _UPSTASH_PUSH_KEY, sub_id)
+        return
     try:
         path = _os.path.join(_DATA_DIR, "push_subscriptions.json")
         if _os.path.exists(path):
@@ -307,16 +363,16 @@ SYSTEM_PROMPT = (
     "Never claim to be a fully custom, locally-trained model built from scratch. "
     "You can help with anything: questions, writing, coding, math, ideas, or just chatting. "
     "When writing code, always wrap it in markdown code blocks with the language name. "
-    "LANGUAGE: Always reply ENTIRELY in the same language the user's message is written in — "
-    "never mix two languages in a single reply, and never produce garbled or mis-encoded text. "
-    "If they write in Hindi, reply fully in Hindi (in proper Devanagari script, never romanized or "
-    "mis-encoded). If they write in Tamil, reply fully in Tamil (Tamil script). The same rule applies "
-    "to Gujarati, Marathi, Bengali, Telugu, Malayalam, or any other language — always reply in that "
-    "language's own native script, fully and consistently, from the first word to the last. "
-    "If they write in English, reply fully in English (do not slip into any other language partway "
-    "through, even if source information you know is in a different language — translate it into the "
-    "reply language first). If they mix languages themselves, match their mix. Never force English "
-    "on the user. "
+    "LANGUAGE: Your primary/default language is English. Always reply in the SAME language the user's "
+    "current message is written in — never switch language on your own. If the user writes in English, "
+    "reply fully in English. If the user writes in Hinglish (Hindi+English mixed, Roman script), reply in "
+    "that same Hinglish style. If the user writes fully in Hindi using Devanagari script, reply fully in "
+    "Hindi using Devanagari script. If they write in Tamil, reply fully in Tamil (Tamil script). The same "
+    "rule applies to Gujarati, Marathi, Bengali, Telugu, Malayalam, or any other specific language — always "
+    "reply in that language's own native script, fully and consistently, from the first word to the last. "
+    "Never mix two languages within a single word or produce garbled or mis-encoded text. If they mix "
+    "languages themselves, match their mix. Default to English whenever the user's language is ambiguous "
+    "or you are unsure — never default to Hindi. "
     "TOOL USE: Never write out fake tool calls, function names, or JSON like {\"query\": ...} in your reply — "
     "those are internal mechanisms the user must never see. You do not have live web search access — "
     "answer from what you know and say your information may not be fully up to date if asked about "
@@ -2686,6 +2742,18 @@ PAGE = r"""<!DOCTYPE html>
     padding:22px; width:90%; max-width:360px; box-shadow:0 10px 40px rgba(0,0,0,.3); }
   #name-modal h3 { margin:0 0 6px; font-size:16px; color:var(--text); }
   #name-modal p { margin:0 0 14px; font-size:12.5px; color:var(--muted); }
+  #avatar-upload-row { display:flex; align-items:center; gap:14px; margin-bottom:18px; }
+  #avatar-upload-preview { width:64px; height:64px; min-width:64px; border-radius:50%;
+    background:var(--accent-grad); display:flex; align-items:center; justify-content:center;
+    color:#fff; font-weight:800; font-size:24px; overflow:hidden; flex-shrink:0; }
+  #avatar-upload-preview img { width:100%; height:100%; object-fit:cover; border-radius:50%; display:block; }
+  #avatar-upload-actions { display:flex; flex-direction:column; gap:6px; }
+  #avatar-upload-btn { display:inline-block; padding:7px 12px; border-radius:8px; font-size:12.5px;
+    cursor:pointer; border:1px solid var(--border); background:none; color:var(--text); text-align:center; }
+  #avatar-upload-btn:hover { background:var(--panel); }
+  #avatar-remove-btn { padding:6px 12px; border-radius:8px; font-size:12px;
+    cursor:pointer; border:1px solid transparent; background:none; color:var(--muted); }
+  #avatar-remove-btn:hover { color:var(--text); text-decoration:underline; }
   #name-input { width:100%; box-sizing:border-box; padding:10px 12px; border-radius:8px;
     border:1.5px solid var(--border); background:var(--panel); color:var(--text);
     font-size:14.5px; outline:none; }
@@ -2763,7 +2831,12 @@ PAGE = r"""<!DOCTYPE html>
 
   .msg-row { display:flex; flex-direction:column; max-width:80%; }
   .msg-row.user { align-self:flex-end; align-items:flex-end; }
-  .msg-row.ai { align-self:flex-start; align-items:flex-start; max-width:100%; width:100%; }
+  .msg-row.ai { align-self:flex-start; align-items:flex-start; max-width:100%; width:100%;
+    position:relative; padding-left:38px; }
+  .msg-row.ai::before { content:"M"; position:absolute; left:0; top:0;
+    width:28px; height:28px; border-radius:50%; background:var(--accent-grad);
+    color:#fff; font-weight:800; font-size:13px; display:flex; align-items:center; justify-content:center;
+    box-shadow:0 2px 8px rgba(0,0,0,.25); flex-shrink:0; }
   .msg-row.error { align-self:center; align-items:center; max-width:90%; }
   .msg-row .msg { max-width:100%; }
   .msg-actions { display:flex; gap:4px; margin-top:3px; opacity:0; transition:opacity .15s;
@@ -3159,8 +3232,16 @@ PAGE = r"""<!DOCTYPE html>
 
 <div id="name-modal-overlay">
   <div id="name-modal">
-    <h3>What should Mythic AI call you?</h3>
-    <p>Enter your preferred name — Mythic AI will use it when it talks to you.</p>
+    <h3>Your profile</h3>
+    <p>Set a photo and the name Mythic AI will use when it talks to you.</p>
+    <div id="avatar-upload-row">
+      <span id="avatar-upload-preview" aria-hidden="true"></span>
+      <div id="avatar-upload-actions">
+        <label id="avatar-upload-btn" for="avatar-file-input">Change photo</label>
+        <button id="avatar-remove-btn" type="button">Remove</button>
+        <input type="file" id="avatar-file-input" accept="image/*" style="display:none">
+      </div>
+    </div>
     <input type="text" id="name-input" maxlength="60" placeholder="e.g. Aarav" autocomplete="off">
     <div id="name-modal-actions">
       <button id="name-cancel-btn" type="button">Cancel</button>
@@ -4893,8 +4974,67 @@ function setUserName(name) {
   else localStorage.removeItem('mythic_user_name');
   if (typeof _renderSidebarProfile === 'function') _renderSidebarProfile();
 }
+function getUserAvatar() { return localStorage.getItem('mythic_user_avatar') || ''; }
+function setUserAvatar(dataUrl) {
+  if (dataUrl) localStorage.setItem('mythic_user_avatar', dataUrl);
+  else localStorage.removeItem('mythic_user_avatar');
+  if (typeof _renderSidebarProfile === 'function') _renderSidebarProfile();
+  _renderAvatarPreview();
+}
+function _renderAvatarPreview() {
+  const preview = document.getElementById('avatar-upload-preview');
+  if (!preview) return;
+  const photo = getUserAvatar();
+  if (photo) {
+    preview.innerHTML = '<img src="' + photo + '" alt="Profile photo">';
+  } else {
+    const name = getUserName();
+    const initial = (name || 'M').trim().charAt(0).toUpperCase() || 'M';
+    preview.textContent = initial;
+  }
+}
+// Resize/compress the picked image client-side before storing it (keeps
+// localStorage small and avoids giant base64 blobs from full-res photos).
+function _resizeImageFile(file, maxSize) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('read failed'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('decode failed'));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height && width > maxSize) { height = Math.round(height * maxSize / width); width = maxSize; }
+        else if (height > maxSize) { width = Math.round(width * maxSize / height); height = maxSize; }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+const avatarFileInput  = document.getElementById('avatar-file-input');
+const avatarRemoveBtn  = document.getElementById('avatar-remove-btn');
+if (avatarFileInput) avatarFileInput.addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  if (!file.type.startsWith('image/')) { alert('Please pick an image file'); return; }
+  try {
+    const dataUrl = await _resizeImageFile(file, 256);
+    setUserAvatar(dataUrl);
+  } catch (err) {
+    console.warn('[avatar] resize failed:', err);
+    alert('Could not load that image');
+  }
+  avatarFileInput.value = '';
+});
+if (avatarRemoveBtn) avatarRemoveBtn.addEventListener('click', () => setUserAvatar(''));
 function openNameModal() {
   nameInput.value = getUserName();
+  _renderAvatarPreview();
   nameModalOverlay.classList.add('show');
   setTimeout(() => nameInput.focus(), 50);
 }
@@ -4916,11 +5056,8 @@ if (!localStorage.getItem('mythic_name_prompted')) {
 }
 
 // ── Sidebar profile row (bottom of sidebar) ─────────────────────────────
-// Source of truth is the SAME saved name used everywhere else in the app
-// (getUserName() / mythic_user_name in localStorage) — no second profile
-// store is created. There's no existing avatar-upload feature in this app
-// to reuse, so the fallback here is a clean generated initials avatar,
-// which is exactly the "no saved avatar" case already called for.
+// Source of truth: getUserName() / mythic_user_name and getUserAvatar() /
+// mythic_user_avatar in localStorage — same values shown in the profile modal.
 const sidebarProfileBtn    = document.getElementById('sidebar-profile');
 const sidebarProfileAvatar = document.getElementById('sidebar-profile-avatar');
 const sidebarProfileName   = document.getElementById('sidebar-profile-name');
@@ -4930,8 +5067,13 @@ function _renderSidebarProfile() {
   const name = getUserName();
   const display = name || 'Guest';
   sidebarProfileName.textContent = display;
-  const initial = (name || 'M').trim().charAt(0).toUpperCase() || 'M';
-  sidebarProfileAvatar.textContent = initial;
+  const photo = getUserAvatar();
+  if (photo) {
+    sidebarProfileAvatar.innerHTML = '<img src="' + photo + '" alt="">';
+  } else {
+    const initial = (name || 'M').trim().charAt(0).toUpperCase() || 'M';
+    sidebarProfileAvatar.textContent = initial;
+  }
   sidebarProfileAvatar.setAttribute('role', 'img');
   sidebarProfileAvatar.setAttribute('aria-label', display + "'s avatar");
 }
@@ -6633,8 +6775,12 @@ async function _doSubscribe(reg) {
 }
 
 // Detect if running on iPhone/iOS — moved to top-level scope
-if ('serviceWorker' in navigator && !isIOS) {
-  // Service workers are unreliable on iOS, skip on iPhone
+// iOS Safari has supported Web Push since iOS 16.4, but ONLY when the site
+// is installed to the Home Screen (running standalone) — never in a regular
+// Safari tab. That's a hard OS restriction, not something code can bypass.
+const _iosStandalone = isIOS && window.navigator.standalone === true;
+
+if ('serviceWorker' in navigator && (!isIOS || _iosStandalone)) {
   navigator.serviceWorker.register('/sw.js', { scope: '/' })
     .then(reg => {
       _swReg = reg;
@@ -6650,14 +6796,28 @@ if ('serviceWorker' in navigator && !isIOS) {
       _showBanner();
     });
 } else if (isIOS) {
-  // iPhone: skip push notifications (not supported in Safari PWA)
-  // App still works fine, just no push notifications
-  console.log('[iOS] Push notifications not supported in Safari PWA');
+  // iPhone, but NOT installed to Home Screen yet: push is impossible from a
+  // Safari tab (hard iOS restriction). Reuse the existing "Add to Home
+  // Screen" install modal so the user has a clear path to actually get
+  // notifications instead of silently getting nothing.
+  console.log('[iOS] Push notifications need the app added to Home Screen first.');
+  if (notifBanner && !localStorage.getItem('mythic_notif_dismissed')) {
+    notifBanner.style.display = 'flex';
+    if (notifAllowBtn) notifAllowBtn.textContent = '📲 Add to Home Screen';
+  }
 } else {
   _showBanner();
 }
 
 if (notifAllowBtn) notifAllowBtn.addEventListener('click', async () => {
+  if (isIOS && !window.navigator.standalone) {
+    // On iPhone in a plain Safari tab, there's no permission to request —
+    // push literally cannot work until the app is installed. Send them to
+    // the install flow instead of firing a no-op permission prompt.
+    _hideBanner();
+    _openInstallModal();
+    return;
+  }
   _hideBanner();
   let perm;
   try { perm = await Notification.requestPermission(); }
