@@ -387,7 +387,16 @@ SYSTEM_PROMPT = (
     "'hey', 'thanks', or 'ok' gets a short, casual, 1-2 sentence reply — never a long "
     "essay, never a list of your capabilities, never multiple paragraphs. Save longer, "
     "detailed answers for messages that actually ask a real question or request "
-    "something specific."
+    "something specific. "
+    "EMOJI STYLE: Use emojis naturally and generously throughout your replies — like "
+    "ChatGPT does. Sprinkle relevant emojis to make responses feel fun, warm, and "
+    "engaging. Use them at the start of bullet points, next to key words, and at the "
+    "end of sentences where they fit the mood. Examples: use \u2728 for exciting things, "
+    "\U0001f4a1 for ideas/tips, \U0001f525 for cool stuff, \U0001f60a for friendly moments, \U0001f389 for "
+    "achievements, \U0001f4da for learning, \U0001f4bb for code/tech, \U0001f31f for highlights, "
+    "\u2764\ufe0f for encouragement, \U0001f680 for progress. Don't overdo it to the point of being "
+    "annoying — aim for 2-5 emojis per reply depending on length, more for fun/casual "
+    "chats, fewer for serious/technical answers."
 )
 
 
@@ -8636,60 +8645,27 @@ def robots_txt():
         "Disallow: /claim-owner/",
         "",
         f"Sitemap: {origin}/sitemap.xml",
-        f"Sitemap: {origin}/sitemap-index.xml",
     ]
     return Response("\n".join(lines), mimetype="text/plain")
 
 
 @app.route("/sitemap.xml")
 def sitemap_xml():
-    """Sitemap for Mythic AI.
-    Only genuinely public, crawlable URLs are listed here.
-    Private/session-scoped routes (/api/*, /invite/*, /share/*, etc.)
-    are excluded — they are also Disallowed in robots.txt so crawlers
-    never try to index them.
-    lastmod reflects today's date because the app's content (models,
-    features, UI) is continuously updated."""
+    """Minimal sitemap — this is a single-page chat app behind an anonymous
+    session, so there's really only one meaningful public URL (the home
+    page) worth listing for crawlers. lastmod is set to "today" on every
+    request since the app's content is dynamic/always current."""
     origin = get_public_origin()
     lastmod = datetime.date.today().isoformat()
-    # Public URLs worth indexing — all render meaningful content to
-    # an unauthenticated visitor (landing page, login prompt, etc.)
-    pages = [
-        # (path, changefreq, priority)
-        ("/",           "daily",   "1.0"),
-    ]
-    url_entries = "\n".join(
-        f"""  <url>
-    <loc>{origin}{path}</loc>
-    <lastmod>{lastmod}</lastmod>
-    <changefreq>{freq}</changefreq>
-    <priority>{pri}</priority>
-  </url>"""
-        for path, freq, pri in pages
-    )
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<urlset
-  xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
-  xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
-{url_entries}
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>{origin}/</loc>
+    <lastmod>{lastmod}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
 </urlset>"""
-    return Response(xml, mimetype="application/xml")
-
-
-@app.route("/sitemap-index.xml")
-def sitemap_index_xml():
-    """Sitemap index — useful once the site grows beyond a single sitemap.
-    Google Search Console lets you submit this one URL and it discovers
-    all child sitemaps automatically."""
-    origin = get_public_origin()
-    lastmod = datetime.date.today().isoformat()
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <sitemap>
-    <loc>{origin}/sitemap.xml</loc>
-    <lastmod>{lastmod}</lastmod>
-  </sitemap>
-</sitemapindex>"""
     return Response(xml, mimetype="application/xml")
 
 
