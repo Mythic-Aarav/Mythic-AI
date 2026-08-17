@@ -2440,7 +2440,7 @@ PAGE = r"""<!DOCTYPE html>
 <meta name="author" content="Aarav Singh">
 <meta name="robots" content="index, follow">
 <link rel="canonical" href="__CANONICAL_URL__">
-<meta name="google-site-verification" content="YODfolZFzGRTUGQ_hzqYv4ab56pLJ-tzuW-7-B60GbE" />
+<meta name="google-site-verification" content="PFkkupIPte_3H3QnLU0oQ-_WF67Pu8kTlIkTRWussww" />
 
 <!-- Open Graph / Facebook / WhatsApp / LinkedIn -->
 <meta property="og:type" content="website">
@@ -8636,27 +8636,60 @@ def robots_txt():
         "Disallow: /claim-owner/",
         "",
         f"Sitemap: {origin}/sitemap.xml",
+        f"Sitemap: {origin}/sitemap-index.xml",
     ]
     return Response("\n".join(lines), mimetype="text/plain")
 
 
 @app.route("/sitemap.xml")
 def sitemap_xml():
-    """Minimal sitemap — this is a single-page chat app behind an anonymous
-    session, so there's really only one meaningful public URL (the home
-    page) worth listing for crawlers. lastmod is set to "today" on every
-    request since the app's content is dynamic/always current."""
+    """Sitemap for Mythic AI.
+    Only genuinely public, crawlable URLs are listed here.
+    Private/session-scoped routes (/api/*, /invite/*, /share/*, etc.)
+    are excluded — they are also Disallowed in robots.txt so crawlers
+    never try to index them.
+    lastmod reflects today's date because the app's content (models,
+    features, UI) is continuously updated."""
+    origin = get_public_origin()
+    lastmod = datetime.date.today().isoformat()
+    # Public URLs worth indexing — all render meaningful content to
+    # an unauthenticated visitor (landing page, login prompt, etc.)
+    pages = [
+        # (path, changefreq, priority)
+        ("/",           "daily",   "1.0"),
+    ]
+    url_entries = "\n".join(
+        f"""  <url>
+    <loc>{origin}{path}</loc>
+    <lastmod>{lastmod}</lastmod>
+    <changefreq>{freq}</changefreq>
+    <priority>{pri}</priority>
+  </url>"""
+        for path, freq, pri in pages
+    )
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset
+  xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+  xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+{url_entries}
+</urlset>"""
+    return Response(xml, mimetype="application/xml")
+
+
+@app.route("/sitemap-index.xml")
+def sitemap_index_xml():
+    """Sitemap index — useful once the site grows beyond a single sitemap.
+    Google Search Console lets you submit this one URL and it discovers
+    all child sitemaps automatically."""
     origin = get_public_origin()
     lastmod = datetime.date.today().isoformat()
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>{origin}/</loc>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap>
+    <loc>{origin}/sitemap.xml</loc>
     <lastmod>{lastmod}</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>1.0</priority>
-  </url>
-</urlset>"""
+  </sitemap>
+</sitemapindex>"""
     return Response(xml, mimetype="application/xml")
 
 
