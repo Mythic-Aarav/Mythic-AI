@@ -12040,6 +12040,13 @@ def groq_vision_stream_chunks(messages, api_key=None, model=None):
     )
 
 
+# TEMP DEBUG: collects a human-readable reason for each provider failure
+# within a single request, so the actual cause can be shown to the user
+# instead of only being printed to server logs. Reset at the start of every
+# auto_stream_chunks() call. Remove this once providers are confirmed working.
+_LAST_PROVIDER_ERRORS = []
+
+
 def _openai_style_stream(url, api_key, model, messages, provider_label):
     """Shared streaming logic for Groq/Cerebras (both are OpenAI-compatible).
     Yields nothing at all on ANY failure (auth, rate limit, timeout, invalid
@@ -12050,7 +12057,9 @@ def _openai_style_stream(url, api_key, model, messages, provider_label):
     so we fall back to a single non-streaming request that returns the full
     reply in one go — the frontend still displays it, just not word-by-word."""
     if not api_key:
-        print(f"[{provider_label}] skipped: no API key configured")
+        msg = f"[{provider_label}] skipped: no API key configured"
+        print(msg)
+        _LAST_PROVIDER_ERRORS.append(msg)
         return
 
     # Non-streaming path on serverless — avoids Vercel's edge buffer cutting
@@ -12064,18 +12073,24 @@ def _openai_style_stream(url, api_key, model, messages, provider_label):
                 timeout=45,
             )
         except requests.RequestException as e:
-            print(f"[{provider_label}] network error: {e}")
+            msg = f"[{provider_label}] network error: {e}"
+            print(msg)
+            _LAST_PROVIDER_ERRORS.append(msg)
             return
         if resp.status_code != 200:
             try: body_preview = resp.text[:500]
             except Exception: body_preview = "<unreadable>"
-            print(f"[{provider_label}] HTTP {resp.status_code}: {body_preview}")
+            msg = f"[{provider_label}] HTTP {resp.status_code}: {body_preview}"
+            print(msg)
+            _LAST_PROVIDER_ERRORS.append(msg)
             return
         try:
             obj = resp.json()
             content = obj["choices"][0]["message"]["content"] or ""
         except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
-            print(f"[{provider_label}] bad JSON: {e}")
+            msg = f"[{provider_label}] bad JSON: {e}"
+            print(msg)
+            _LAST_PROVIDER_ERRORS.append(msg)
             return
         # Yield the full reply in reasonable chunks so the frontend still
         # renders progressively even though the network delivered it all at once
@@ -12096,7 +12111,9 @@ def _openai_style_stream(url, api_key, model, messages, provider_label):
                 stream=True, timeout=60,
             )
         except requests.RequestException as e:
-            print(f"[{provider_label}] network error: {e}")
+            msg = f"[{provider_label}] network error: {e}"
+            print(msg)
+            _LAST_PROVIDER_ERRORS.append(msg)
             return
         if resp.status_code == 429 and attempt < max_retries:
             # Rate-limited — brief backoff, then retry the same model/provider
@@ -12112,7 +12129,9 @@ def _openai_style_stream(url, api_key, model, messages, provider_label):
             body_preview = resp.text[:500]
         except Exception:
             body_preview = "<unreadable>"
-        print(f"[{provider_label}] HTTP {resp.status_code}: {body_preview}")
+        msg = f"[{provider_label}] HTTP {resp.status_code}: {body_preview}"
+        print(msg)
+        _LAST_PROVIDER_ERRORS.append(msg)
         return
 
     for raw_line in resp.iter_lines(decode_unicode=False):
@@ -12281,6 +12300,7 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
     `groq_model`/`cerebras_model` optionally override the chosen model within
     each provider (see Model Manager) — invalid choices auto-fall-back to the
     server's default model for that provider before moving to the next provider."""
+    _LAST_PROVIDER_ERRORS.clear()
     sp = system_prompt or SYSTEM_PROMPT
     groq_key = (user_groq_key or "").strip() or GROQ_API_KEY
     cerebras_key = (user_cerebras_key or "").strip() or CEREBRAS_API_KEY
@@ -12335,8 +12355,12 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
         except Exception as e:
             print(f"[{_name}] unexpected error: {e}")
 
-    # All configured providers failed silently — keep it short and generic.
-    yield "I couldn't get a reply just now. Please try again in a moment."
+    # All configured providers failed. TEMP DEBUG: surface the actual reason
+    # directly in the chat reply so it's visible without checking server
+    # logs. Remove this block (and go back to the generic message) once
+    # providers are confirmed working.
+    debug_detail = " | ".join(_LAST_PROVIDER_ERRORS) if _LAST_PROVIDER_ERRORS else "no providers attempted"
+    yield f"I couldn't get a reply just now.\n\n[DEBUG] {debug_detail}"
 
 
 # --- Model selector (cosmetic tiers over the same underlying providers) -----
