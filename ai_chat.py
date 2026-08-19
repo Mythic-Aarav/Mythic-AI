@@ -128,6 +128,31 @@ HF_API_KEY        = os.environ.get("HF_API_KEY",        "")
 NANO_BANANA_API_KEY = os.environ.get("NANO_BANANA_API_KEY", "")
 NANO_BANANA_BASE     = "https://api.nanobananaapi.ai/api/v1/nanobanana"
 
+# Judge0 (code execution engine) — powers the multi-language Run button in
+# Code Workspace (Python, C++, C, Java, Node.js, TypeScript, Go, Ruby).
+# By default this calls the free public https://ce.judge0.com demo instance,
+# which needs no key at all but is rate-limited and best-effort.
+# For a reliable/production setup, get a free RapidAPI key at
+# https://rapidapi.com/judge0-official/api/judge0-ce and set JUDGE0_API_KEY
+# as an environment variable — the app will then route requests through
+# RapidAPI's judge0-ce host instead.
+JUDGE0_API_KEY  = os.environ.get("JUDGE0_API_KEY", "").strip()
+JUDGE0_API_HOST = os.environ.get("JUDGE0_API_HOST", "judge0-ce.p.rapidapi.com").strip()
+JUDGE0_BASE_URL = (
+    f"https://{JUDGE0_API_HOST}" if JUDGE0_API_KEY else "https://ce.judge0.com"
+)
+# language key (sent by the frontend) -> Judge0 language_id
+JUDGE0_LANGUAGE_IDS = {
+    "python":     71,  # Python (3.8.1)
+    "cpp":        54,  # C++ (GCC 9.2.0)
+    "c":          50,  # C (GCC 9.2.0)
+    "java":       62,  # Java (OpenJDK 13.0.1)
+    "javascript": 63,  # JavaScript (Node.js 12.14.0)
+    "typescript": 74,  # TypeScript (3.7.4)
+    "go":         60,  # Go (1.13.5)
+    "ruby":       72,  # Ruby (2.7.0)
+}
+
 # ── Push Notifications (Web Push / VAPID) ────────────────────────────────────
 # Generate VAPID keys once and store as env vars:
 #   pip install py-vapid
@@ -3636,14 +3661,29 @@ PAGE = r"""<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Language selector — Web (HTML/CSS/JS, live preview) or a single-file
+         language run remotely via Judge0 (see /api/code/run below) -->
+    <div id="code-lang-row" style="display:flex;gap:6px;padding:8px 18px;border-bottom:1px solid var(--border);flex-shrink:0;overflow-x:auto;">
+      <button class="code-lang-btn active" data-lang="web" style="padding:6px 12px;border-radius:20px;border:1px solid var(--accent);background:var(--accent-dim);color:var(--accent);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;">🌐 Web</button>
+      <button class="code-lang-btn" data-lang="python" style="padding:6px 12px;border-radius:20px;border:1px solid var(--border);background:none;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;">🐍 Python</button>
+      <button class="code-lang-btn" data-lang="cpp" style="padding:6px 12px;border-radius:20px;border:1px solid var(--border);background:none;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;">C++</button>
+      <button class="code-lang-btn" data-lang="c" style="padding:6px 12px;border-radius:20px;border:1px solid var(--border);background:none;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;">C</button>
+      <button class="code-lang-btn" data-lang="java" style="padding:6px 12px;border-radius:20px;border:1px solid var(--border);background:none;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;">☕ Java</button>
+      <button class="code-lang-btn" data-lang="javascript" style="padding:6px 12px;border-radius:20px;border:1px solid var(--border);background:none;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;">🟩 Node.js</button>
+      <button class="code-lang-btn" data-lang="typescript" style="padding:6px 12px;border-radius:20px;border:1px solid var(--border);background:none;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;">🔷 TypeScript</button>
+      <button class="code-lang-btn" data-lang="go" style="padding:6px 12px;border-radius:20px;border:1px solid var(--border);background:none;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;">🐹 Go</button>
+      <button class="code-lang-btn" data-lang="ruby" style="padding:6px 12px;border-radius:20px;border:1px solid var(--border);background:none;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;">💎 Ruby</button>
+    </div>
+
     <div style="display:flex;flex:1;min-height:0;">
       <!-- Editor pane -->
       <div style="flex:1;display:flex;flex-direction:column;min-width:0;border-right:1px solid var(--border);">
-        <div style="display:flex;border-bottom:1px solid var(--border);flex-shrink:0;">
+        <div id="code-web-tabs" style="display:flex;border-bottom:1px solid var(--border);flex-shrink:0;">
           <button class="code-file-tab active" data-target="code-editor-html" style="flex:1;padding:9px;background:var(--accent-dim);color:var(--accent);border:none;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;">HTML</button>
           <button class="code-file-tab" data-target="code-editor-css" style="flex:1;padding:9px;background:none;color:var(--muted);border:none;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;">CSS</button>
           <button class="code-file-tab" data-target="code-editor-js" style="flex:1;padding:9px;background:none;color:var(--muted);border:none;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;">JS</button>
         </div>
+        <div id="code-single-tab" style="display:none;padding:9px 14px;border-bottom:1px solid var(--border);flex-shrink:0;font-size:12.5px;font-weight:600;color:var(--accent);"></div>
         <textarea id="code-editor-html" spellcheck="false" style="flex:1;background:#0d1117;color:#c9d1d9;border:none;outline:none;padding:14px;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:13px;line-height:1.6;resize:none;tab-size:2;white-space:pre;overflow:auto;">&lt;!-- Write your HTML here --&gt;
 &lt;h1&gt;Hello from Mythic AI Code Workspace&lt;/h1&gt;
 &lt;p&gt;Edit HTML, CSS, and JS, then hit Run.&lt;/p&gt;
@@ -3666,12 +3706,15 @@ button {
         <textarea id="code-editor-js" spellcheck="false" style="flex:1;display:none;background:#0d1117;color:#c9d1d9;border:none;outline:none;padding:14px;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:13px;line-height:1.6;resize:none;tab-size:2;white-space:pre;overflow:auto;">function sayHi() {
   alert("Hello from your Code Workspace!");
 }</textarea>
+        <textarea id="code-editor-single" spellcheck="false" style="flex:1;display:none;background:#0d1117;color:#c9d1d9;border:none;outline:none;padding:14px;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:13px;line-height:1.6;resize:none;tab-size:2;white-space:pre;overflow:auto;"></textarea>
+        <textarea id="code-stdin" spellcheck="false" placeholder="stdin (optional) — piped into your program when it runs" style="display:none;height:64px;flex-shrink:0;background:#0a0d12;color:#8b949e;border:none;border-top:1px solid var(--border);outline:none;padding:8px 14px;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:12px;line-height:1.5;resize:none;white-space:pre;overflow:auto;"></textarea>
       </div>
 
-      <!-- Preview pane -->
+      <!-- Preview / Output pane -->
       <div style="flex:1;display:flex;flex-direction:column;min-width:0;background:#fff;">
-        <div style="padding:6px 12px;background:var(--bg);border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);flex-shrink:0;">Live Preview</div>
+        <div id="code-preview-label" style="padding:6px 12px;background:var(--bg);border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);flex-shrink:0;">Live Preview</div>
         <iframe id="code-preview-frame" sandbox="allow-scripts allow-modals" style="flex:1;border:none;width:100%;background:#fff;"></iframe>
+        <pre id="code-output-console" style="flex:1;display:none;margin:0;padding:14px;background:#0d1117;color:#c9d1d9;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:12.5px;line-height:1.6;overflow:auto;white-space:pre-wrap;word-break:break-word;"></pre>
       </div>
     </div>
   </div>
@@ -7560,7 +7603,8 @@ renderRecentSearches();
   });
 })();
 
-// ─── CODE WORKSPACE — HTML/CSS/JS editor with live preview ─────────────────
+// ─── CODE WORKSPACE — HTML/CSS/JS live preview, plus Python/C++/C/Java/
+//     Node.js/TypeScript/Go/Ruby executed remotely via /api/code/run ───────
 (function() {
   const codeBtn        = document.getElementById('code-workspace-btn');
   const codeModal       = document.getElementById('code-modal-overlay');
@@ -7570,20 +7614,47 @@ renderRecentSearches();
   const fullscreenBtn   = document.getElementById('code-fullscreen-preview-btn');
   const projectNameInput= document.getElementById('code-project-name');
   const previewFrame    = document.getElementById('code-preview-frame');
+  const outputConsole   = document.getElementById('code-output-console');
+  const previewLabel    = document.getElementById('code-preview-label');
+  const webTabs         = document.getElementById('code-web-tabs');
+  const singleTabLabel  = document.getElementById('code-single-tab');
+  const singleEditor    = document.getElementById('code-editor-single');
+  const stdinBox         = document.getElementById('code-stdin');
   const editors = {
     html: document.getElementById('code-editor-html'),
     css:  document.getElementById('code-editor-css'),
     js:   document.getElementById('code-editor-js'),
   };
   const tabs = document.querySelectorAll('.code-file-tab');
+  const langBtns = document.querySelectorAll('.code-lang-btn');
   if (!codeBtn) return;
+
+  // Per-language metadata: display name, file extension, and starter code
+  // shown the first time someone switches to that language.
+  const LANGS = {
+    python:     { label: 'Python',     ext: 'py',  starter: 'print("Hello from Mythic AI Code Workspace!")\n' },
+    cpp:        { label: 'C++',        ext: 'cpp', starter: '#include <iostream>\n\nint main() {\n  std::cout << "Hello from Mythic AI Code Workspace!" << std::endl;\n  return 0;\n}\n' },
+    c:          { label: 'C',          ext: 'c',   starter: '#include <stdio.h>\n\nint main() {\n  printf("Hello from Mythic AI Code Workspace!\\n");\n  return 0;\n}\n' },
+    java:       { label: 'Java',       ext: 'java',starter: 'public class Main {\n  public static void main(String[] args) {\n    System.out.println("Hello from Mythic AI Code Workspace!");\n  }\n}\n' },
+    javascript: { label: 'Node.js',    ext: 'js',  starter: 'console.log("Hello from Mythic AI Code Workspace!");\n' },
+    typescript: { label: 'TypeScript', ext: 'ts',  starter: 'const message: string = "Hello from Mythic AI Code Workspace!";\nconsole.log(message);\n' },
+    go:         { label: 'Go',         ext: 'go',  starter: 'package main\n\nimport "fmt"\n\nfunc main() {\n  fmt.Println("Hello from Mythic AI Code Workspace!")\n}\n' },
+    ruby:       { label: 'Ruby',       ext: 'rb',  starter: 'puts "Hello from Mythic AI Code Workspace!"\n' },
+  };
+
+  let currentLang = 'web';
+  const singleCode = {}; // language -> code, populated lazily from LANGS starters
 
   const STORE_KEY = 'mythic_code_workspace';
   function saveDraft() {
     try {
+      if (currentLang !== 'web') singleCode[currentLang] = singleEditor.value;
       localStorage.setItem(STORE_KEY, JSON.stringify({
         html: editors.html.value, css: editors.css.value, js: editors.js.value,
         name: projectNameInput.value,
+        lang: currentLang,
+        singleCode,
+        stdin: stdinBox.value,
       }));
     } catch {}
   }
@@ -7595,10 +7666,54 @@ renderRecentSearches();
         editors.css.value  = saved.css  ?? editors.css.value;
         editors.js.value   = saved.js   ?? editors.js.value;
         projectNameInput.value = saved.name || 'my-project';
+        Object.assign(singleCode, saved.singleCode || {});
+        stdinBox.value = saved.stdin || '';
+        if (saved.lang && saved.lang !== 'web') switchLang(saved.lang, /*skipSave*/ true);
       }
     } catch {}
   }
-  loadDraft();
+
+  function switchLang(lang, skipSave) {
+    if (lang === currentLang) return;
+    if (currentLang !== 'web') singleCode[currentLang] = singleEditor.value;
+    currentLang = lang;
+
+    langBtns.forEach(b => {
+      const active = b.dataset.lang === lang;
+      b.classList.toggle('active', active);
+      b.style.background = active ? 'var(--accent-dim)' : 'none';
+      b.style.color = active ? 'var(--accent)' : 'var(--muted)';
+      b.style.borderColor = active ? 'var(--accent)' : 'var(--border)';
+    });
+
+    if (lang === 'web') {
+      webTabs.style.display = 'flex';
+      singleTabLabel.style.display = 'none';
+      singleEditor.style.display = 'none';
+      stdinBox.style.display = 'none';
+      tabs.forEach(t => { if (t.classList.contains('active')) document.getElementById(t.dataset.target).style.display = 'block'; });
+      previewLabel.textContent = 'Live Preview';
+      previewFrame.style.display = 'block';
+      outputConsole.style.display = 'none';
+      runPreview();
+    } else {
+      webTabs.style.display = 'none';
+      Object.values(editors).forEach(ed => ed.style.display = 'none');
+      singleTabLabel.style.display = 'block';
+      singleTabLabel.textContent = LANGS[lang].label + ' — main.' + LANGS[lang].ext;
+      singleEditor.style.display = 'block';
+      singleEditor.value = singleCode[lang] ?? LANGS[lang].starter;
+      stdinBox.style.display = 'block';
+      previewLabel.textContent = 'Output';
+      previewFrame.style.display = 'none';
+      outputConsole.style.display = 'block';
+      outputConsole.textContent = 'Hit ▶ Run to execute this in ' + LANGS[lang].label + '.';
+      outputConsole.style.color = '#8b949e';
+    }
+    if (!skipSave) saveDraft();
+  }
+
+  langBtns.forEach(b => b.addEventListener('click', () => switchLang(b.dataset.lang)));
 
   tabs.forEach(tab => {
     tab.addEventListener('click', () => {
@@ -7614,7 +7729,7 @@ renderRecentSearches();
   });
 
   // Tab-key inserts 2 spaces instead of moving focus, standard editor behavior
-  Object.values(editors).forEach(ed => {
+  [...Object.values(editors), singleEditor].forEach(ed => {
     ed.addEventListener('keydown', (e) => {
       if (e.key === 'Tab') {
         e.preventDefault();
@@ -7645,33 +7760,100 @@ ${editors.html.value}
     saveDraft();
   }
 
+  async function runSingleLang() {
+    const lang = currentLang;
+    const code = singleEditor.value;
+    singleCode[lang] = code;
+    saveDraft();
+
+    outputConsole.style.color = '#c9d1d9';
+    outputConsole.textContent = '⏳ Running ' + LANGS[lang].label + '…';
+    runBtn.disabled = true;
+    const origLabel = runBtn.textContent;
+    runBtn.textContent = '⏳ Running…';
+
+    try {
+      const res = await fetch('/api/code/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ language: lang, code, stdin: stdinBox.value }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        outputConsole.style.color = '#f85149';
+        outputConsole.textContent = '✕ ' + (data.error || 'Something went wrong running your code.');
+        return;
+      }
+      let out = '';
+      if (data.compile_output) out += data.compile_output.trimEnd() + '\n';
+      if (data.stdout) out += data.stdout;
+      if (data.stderr) out += (out && !out.endsWith('\n') ? '\n' : '') + data.stderr;
+      if (!out.trim()) out = '(no output)';
+      const meta = `\n\n— ${data.status}` + (data.time ? `, ${data.time}s` : '') + (data.memory ? `, ${Math.round(data.memory/1024)}MB` : '') + ' —';
+      const ok = /accepted/i.test(data.status || '');
+      outputConsole.style.color = ok ? '#c9d1d9' : '#f0b429';
+      outputConsole.textContent = out + meta;
+    } catch (e) {
+      outputConsole.style.color = '#f85149';
+      outputConsole.textContent = '✕ Network error: ' + e.message;
+    } finally {
+      runBtn.disabled = false;
+      runBtn.textContent = origLabel;
+    }
+  }
+
+  function runCurrent() {
+    if (currentLang === 'web') runPreview();
+    else runSingleLang();
+  }
+
   codeBtn.addEventListener('click', () => {
     codeModal.style.display = 'flex';
-    runPreview();
+    loadDraft();
+    runCurrent();
   });
   closeBtn.addEventListener('click', () => { codeModal.style.display = 'none'; });
   codeModal.addEventListener('click', (e) => { if (e.target === codeModal) codeModal.style.display = 'none'; });
-  runBtn.addEventListener('click', runPreview);
+  runBtn.addEventListener('click', runCurrent);
 
   downloadBtn.addEventListener('click', () => {
     const name = (projectNameInput.value || 'my-project').replace(/[^a-z0-9_-]/gi, '-');
-    const blob = new Blob([buildDocument()], { type: 'text/html;charset=utf-8' });
+    let blob, filename;
+    if (currentLang === 'web') {
+      blob = new Blob([buildDocument()], { type: 'text/html;charset=utf-8' });
+      filename = name + '.html';
+    } else {
+      const meta = LANGS[currentLang];
+      blob = new Blob([singleEditor.value], { type: 'text/plain;charset=utf-8' });
+      filename = (currentLang === 'java' ? 'Main' : name) + '.' + meta.ext;
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = name + '.html';
+    a.href = url; a.download = filename;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   });
 
   fullscreenBtn.addEventListener('click', () => {
-    const win = window.open('', '_blank');
-    if (win) { win.document.write(buildDocument()); win.document.close(); }
+    if (currentLang === 'web') {
+      const win = window.open('', '_blank');
+      if (win) { win.document.write(buildDocument()); win.document.close(); }
+    } else {
+      const win = window.open('', '_blank');
+      if (win) {
+        win.document.write('<pre style="background:#0d1117;color:#c9d1d9;padding:20px;font-family:monospace;white-space:pre-wrap;word-break:break-word;">' +
+          outputConsole.textContent.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>');
+        win.document.close();
+      }
+    }
   });
 
-  // Ctrl+Enter inside the modal re-runs the preview, like most code sandboxes
+  // Ctrl+Enter inside the modal re-runs, like most code sandboxes
   codeModal.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runPreview(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runCurrent(); }
   });
+
+  loadDraft();
 })();
 messagesEl.addEventListener('click', async (e) => {
   const btn = e.target.closest('.code-copy-btn');
@@ -12191,6 +12373,78 @@ def api_vip_unlock():
         session.permanent = True
         return jsonify({"success": True})
     return jsonify({"success": False})
+
+
+@app.route("/api/code/run", methods=["POST"])
+@login_required
+def api_code_run():
+    """Runs a snippet in Code Workspace for any non-web language (Python,
+    C++, C, Java, Node.js, TypeScript, Go, Ruby) via the Judge0 execution
+    engine and returns stdout/stderr/compile output. See JUDGE0_API_KEY
+    above for how to point this at a more reliable host."""
+    data = request.get_json(silent=True) or {}
+    lang = (data.get("language") or "").strip().lower()
+    code = data.get("code") or ""
+    stdin = data.get("stdin") or ""
+
+    lang_id = JUDGE0_LANGUAGE_IDS.get(lang)
+    if lang_id is None:
+        return jsonify({"error": f"Unsupported language: {lang or '(none)'}"}), 400
+    if not code.strip():
+        return jsonify({"error": "There's no code to run yet."}), 400
+    if len(code) > 60000:
+        return jsonify({"error": "That's too much code for the online runner — trim it down a bit."}), 400
+
+    headers = {"Content-Type": "application/json"}
+    if JUDGE0_API_KEY:
+        headers["X-RapidAPI-Key"] = JUDGE0_API_KEY
+        headers["X-RapidAPI-Host"] = JUDGE0_API_HOST
+
+    payload = {
+        "language_id": lang_id,
+        "source_code": base64.b64encode(code.encode("utf-8")).decode("ascii"),
+        "stdin": base64.b64encode(stdin.encode("utf-8")).decode("ascii") if stdin else "",
+    }
+
+    try:
+        resp = requests.post(
+            f"{JUDGE0_BASE_URL}/submissions",
+            params={"base64_encoded": "true", "wait": "true"},
+            headers=headers, json=payload, timeout=25,
+        )
+    except requests.exceptions.RequestException:
+        return jsonify({"error": "The code runner is unreachable right now. Please try again in a moment."}), 502
+
+    if resp.status_code == 401 or resp.status_code == 403:
+        return jsonify({"error": "Code runner authorization failed. If you're using RapidAPI, double-check JUDGE0_API_KEY."}), 502
+    if resp.status_code == 429:
+        return jsonify({"error": "The code runner is rate-limited right now — wait a few seconds and try again."}), 429
+    if not resp.ok:
+        return jsonify({"error": f"Code runner returned an error (HTTP {resp.status_code})."}), 502
+
+    try:
+        result = resp.json()
+    except ValueError:
+        return jsonify({"error": "Code runner returned an invalid response."}), 502
+
+    def _decode(s):
+        if not s:
+            return ""
+        try:
+            return base64.b64decode(s).decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    status = (result.get("status") or {}).get("description", "Unknown")
+    return jsonify({
+        "stdout": _decode(result.get("stdout")),
+        "stderr": _decode(result.get("stderr")),
+        "compile_output": _decode(result.get("compile_output")),
+        "message": _decode(result.get("message")),
+        "status": status,
+        "time": result.get("time"),
+        "memory": result.get("memory"),
+    })
 
 
 @app.route("/api/streak", methods=["GET"])
