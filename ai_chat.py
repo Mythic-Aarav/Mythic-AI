@@ -9258,11 +9258,31 @@ def _make_mythic_icon_png(size=192):
     """Returns the official Mythic AI logo (the 3D 'M' mark) resized to
     size×size, as PNG bytes. Falls back to the old programmatically-drawn
     placeholder mark only if Pillow isn't installed or the embedded logo
-    fails to decode for some reason."""
+    fails to decode for some reason.
+
+    The source artwork is a 512×512 square with the circular badge sitting
+    well inset from the edges (room for the "MYTHIC AI" wordmark below it).
+    That's fine at large sizes, but once it's shrunk down to a 16-32px
+    favicon, that inset reads as a thick ring of blank white space around a
+    tiny badge. So before resizing, we crop tightly around the circular
+    badge itself (roughly centered at (259,258) with radius ~232 in the
+    512×512 source, plus a small pad) — this crops out the wordmark/tagline
+    entirely and lets the badge fill the icon edge-to-edge at every size."""
     if _WATERMARK_AVAILABLE:
         try:
             import io
-            im = _get_logo_source_image().resize((size, size), Image.LANCZOS)
+            src = _get_logo_source_image()
+            sw, sh = src.size
+            # Crop box below is expressed as fractions of the known 512×512
+            # source so it still works if the embedded asset is ever swapped
+            # for a different resolution.
+            cx, cy, radius, pad = 259/512*sw, 258/512*sh, 232/512*min(sw, sh), 6/512*min(sw, sh)
+            half = radius + pad
+            box = (
+                max(0, int(cx - half)), max(0, int(cy - half)),
+                min(sw, int(cx + half)), min(sh, int(cy + half)),
+            )
+            im = src.crop(box).resize((size, size), Image.LANCZOS)
             buf = io.BytesIO()
             im.save(buf, format="PNG", optimize=True)
             return buf.getvalue()
