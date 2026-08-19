@@ -360,7 +360,7 @@ def _random_notification_body(category: str) -> str:
 
 
 # --- Model names -------------------------------------------------------------
-GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "llama-3.1-8b-instant")
+GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "openai/gpt-oss-20b")
 HF_MODEL          = os.environ.get("HF_MODEL",          "mistralai/Mistral-7B-Instruct-v0.3")
 CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "gpt-oss-120b")
 # Vision-capable model — powers Video Call, Screen Share, and regular image
