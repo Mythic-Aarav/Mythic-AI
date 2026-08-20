@@ -2851,6 +2851,18 @@ PAGE = r"""<!DOCTYPE html>
     -webkit-tap-highlight-color:transparent; }
   .msg-actions button:hover { background:var(--panel); color:var(--text); }
   .msg-timestamp { font-size:10.5px; color:var(--muted); margin-top:2px; }
+  .edit-box { display:flex; flex-direction:column; gap:8px; min-width:220px; width:100%; }
+  .edit-textarea { width:100%; box-sizing:border-box; resize:none; background:var(--bg);
+    border:1px solid var(--accent); border-radius:8px; color:var(--text); font-family:inherit;
+    font-size:14.5px; line-height:1.4; padding:8px 10px; outline:none; max-height:200px; }
+  .edit-controls { display:flex; gap:8px; justify-content:flex-end; }
+  .edit-save-btn, .edit-cancel-btn { border:none; border-radius:8px; padding:6px 14px;
+    font-size:12.5px; font-weight:600; cursor:pointer; font-family:inherit;
+    touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+  .edit-save-btn { background:var(--accent); color:#fff; }
+  .edit-save-btn:disabled { opacity:.6; cursor:not-allowed; }
+  .edit-cancel-btn { background:none; border:1px solid var(--border); color:var(--muted); }
+  .edit-cancel-btn:hover { color:var(--text); }
   .empty-state { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
     text-align:center; color:var(--muted); }
   .empty-state h2 { font-size:25px; font-weight:700; color:var(--accent); margin-bottom:8px; }
@@ -3911,6 +3923,7 @@ let activeConvId = null;
 let pendingFile  = null;
 let recognition  = null;
 let currentUtterance = null;
+let _pendingUndoSend = false; // true while a just-sent message is still in its undo window
 
 messagesWrap.addEventListener('scroll', () => {
   const nearBottom = messagesWrap.scrollHeight - messagesWrap.scrollTop - messagesWrap.clientHeight < 120;
@@ -3937,6 +3950,14 @@ let addMessage = function(role, text, attachment) {
   clearEmptyState();
   const row = document.createElement('div');
   row.className = 'msg-row ' + role;
+  // Note: row.dataset.msgIndex is set later, in buildMsgActions() below
+  // (see the bookmark-feature monkey-patch further down the file, which
+  // owns _msgIndexCounter) — kept as the single source of truth for a
+  // message's position in the server's conv["messages"] array so the
+  // bookmark feature and the edit/branch feature below both read the same
+  // index. It's reset to 0 in openConversation()/startNewChat() and
+  // adjusted by regenerateLast()/startEditingMessage() to stay in sync
+  // whenever a message is replaced in place rather than appended.
 
   const div = document.createElement('div');
   div.className = 'msg ' + role;
@@ -4008,8 +4029,101 @@ let buildMsgActions = function(row, textNode, role) {
     fileBtn.addEventListener('click', () => openFileModalWithContent(textNode.textContent || textNode.innerText || ''));
     actions.appendChild(fileBtn);
   }
+
+  if (role === 'user') {
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'edit-btn';
+    editBtn.title = 'Edit message';
+    editBtn.textContent = '✏️';
+    editBtn.addEventListener('click', () => startEditingMessage(row, textNode));
+    actions.appendChild(editBtn);
+  }
   return actions;
 };
+
+// Turns a sent user message into an editable textarea in place. Saving
+// calls /api/conversations/<id>/edit-message to truncate + rewrite server
+// history, then re-adds the edited message and streams a fresh reply via
+// the EXISTING regenerate path — no chat/streaming logic is duplicated or
+// modified here, only conversation history.
+function startEditingMessage(row, textNode) {
+  if (isGenerating) return;
+  if (!activeConvId) return; // nothing saved server-side yet to branch from
+  if (row.querySelector('.edit-box')) return; // already editing
+
+  const msgIndex = row.dataset.msgIndex;
+  const originalText = textNode.textContent;
+  const bubble = row.querySelector('.msg');
+
+  const box = document.createElement('div');
+  box.className = 'edit-box';
+  const ta = document.createElement('textarea');
+  ta.className = 'edit-textarea';
+  ta.value = originalText;
+  const controls = document.createElement('div');
+  controls.className = 'edit-controls';
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button'; saveBtn.className = 'edit-save-btn'; saveBtn.textContent = 'Save & submit';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button'; cancelBtn.className = 'edit-cancel-btn'; cancelBtn.textContent = 'Cancel';
+  controls.appendChild(saveBtn);
+  controls.appendChild(cancelBtn);
+  box.appendChild(ta);
+  box.appendChild(controls);
+
+  textNode.style.display = 'none';
+  bubble.appendChild(box);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+  ta.addEventListener('input', () => {
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+  });
+
+  function cancelEdit() {
+    box.remove();
+    textNode.style.display = '';
+  }
+  ta.addEventListener('keydown', e => {
+    if (e.key === 'Escape') cancelEdit();
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveBtn.click(); }
+  });
+  cancelBtn.addEventListener('click', cancelEdit);
+
+  saveBtn.addEventListener('click', async () => {
+    const newText = ta.value.trim();
+    if (!newText || newText === originalText) { cancelEdit(); return; }
+    saveBtn.disabled = true; cancelBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/conversations/' + activeConvId + '/edit-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_index: parseInt(msgIndex, 10), new_text: newText })
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || ('HTTP ' + r.status));
+      }
+      // Drop this row and every row after it (the old reply + anything
+      // beyond), then roll the index counter back to this slot so the
+      // re-added message and its new AI reply get the same indices the
+      // server just assigned them.
+      let sib = row.nextSibling;
+      while (sib) { const next = sib.nextSibling; sib.remove(); sib = next; }
+      row.remove();
+      _msgIndexCounter = parseInt(msgIndex, 10);
+      addMessage('user', newText);
+      streamReply({ regenerate: true });
+    } catch (err) {
+      cancelEdit();
+      addMessage('error', 'Could not save the edit: ' + (err.message || 'unknown error'));
+    }
+  });
+}
 
 function addImageMessage(role, base64, caption) {
   clearEmptyState();
@@ -4667,6 +4781,7 @@ async function openConversation(convId, opts) {
     if (!r.ok) return;
     const d = await r.json();
     messagesEl.innerHTML = '';
+    _msgIndexCounter = 0;
     (d.messages || []).forEach(m => addMessage(m.role, m.text, m.attachment));
     loadConversationList();
   } catch {}
@@ -4677,6 +4792,7 @@ async function openConversation(convId, opts) {
 function startNewChat(opts) {
   activeConvId = null;
   messagesEl.innerHTML = '';
+  _msgIndexCounter = 0;
   showEmptyState();
   refreshShareBtnState();
   if (!opts || opts.updateUrl !== false) {
@@ -4889,6 +5005,11 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
 
 function regenerateLast(row) {
   if (isGenerating) return;
+  // The row being removed occupied one index slot; the server's regenerate
+  // path pops the old reply and appends a new one at that same slot (array
+  // length unchanged), so roll the counter back one to keep addMessage()'s
+  // next index aligned with the server instead of drifting upward forever.
+  if (row.dataset.msgIndex !== undefined) _msgIndexCounter--;
   row.remove();
   streamReply({ regenerate: true });
 }
@@ -11732,6 +11853,56 @@ def api_rename_conversation(conv_id):
 
     save_conversation(username, conv_id, conv)
     return jsonify({"status": "updated", **changed})
+
+
+@app.route("/api/conversations/<conv_id>/edit-message", methods=["POST"])
+@login_required
+def api_edit_message(conv_id):
+    """Edits a previously-sent USER message and branches the conversation
+    from that point: every message at or after message_index (the edited
+    message itself, its old AI reply, and anything after) is dropped, then
+    a fresh user entry with the new text is appended in its place.
+
+    Deliberately does NOT touch the streaming/model logic at all — the
+    frontend follows this call with the existing regenerate=True request to
+    /api/chat, which already knows how to stream a reply for "last message
+    is a user message with no reply yet". This endpoint only rewrites
+    history; /api/chat (unchanged) does the actual generation."""
+    data = request.get_json(force=True) or {}
+    username = current_username()
+    conv = load_conversation(username, conv_id)
+    if conv is None:
+        return jsonify({"error": "not found"}), 404
+
+    try:
+        message_index = int(data.get("message_index"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "message_index must be an integer"}), 400
+    new_text = (data.get("new_text") or "").strip()
+    if not new_text:
+        return jsonify({"error": "new_text cannot be empty"}), 400
+
+    messages = conv.get("messages", [])
+    if not (0 <= message_index < len(messages)):
+        return jsonify({"error": "message_index out of range"}), 400
+    original = messages[message_index]
+    if original.get("role") != "user":
+        return jsonify({"error": "message_index does not point to a user message"}), 400
+
+    # Preserve any non-text parts (e.g. an attached image's inline_data) from
+    # the original message so editing the caption doesn't silently drop the
+    # attachment — only the text itself changes.
+    new_parts = [{"text": new_text}]
+    for part in original.get("parts", []):
+        if "inline_data" in part:
+            new_parts.append(part)
+    new_entry = {"role": "user", "parts": new_parts}
+    if "attachment_meta" in original:
+        new_entry["attachment_meta"] = original["attachment_meta"]
+
+    conv["messages"] = messages[:message_index] + [new_entry]
+    save_conversation(username, conv_id, conv)
+    return jsonify({"status": "ok", "message_index": message_index})
 
 
 @app.route("/api/conversations/<conv_id>/duplicate", methods=["POST"])
