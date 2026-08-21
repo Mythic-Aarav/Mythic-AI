@@ -449,6 +449,24 @@ def get_public_origin():
     return origin
 
 
+# The ONE domain that should show up in Google Search. Every SEO signal
+# (canonical link, og:url, JSON-LD @id/url) points here REGARDLESS of which
+# domain actually served the request, so Google consolidates all ranking
+# signal onto this single URL instead of splitting it across Render+Vercel
+# mirrors of the same app. Update this if the Vercel domain changes.
+PREFERRED_PUBLIC_ORIGIN = "https://mythic-ai.vercel.app"
+
+
+def _is_deindexed_host():
+    """Hosts that should NEVER show up in search results — currently any
+    Render deployment domain, since Vercel (PREFERRED_PUBLIC_ORIGIN) is the
+    one and only domain meant to be public-facing in Google. Render domains
+    always end in onrender.com unless a custom domain is mapped to Render
+    specifically (not the case here)."""
+    host = request.host.split(":")[0].lower()
+    return host.endswith(".onrender.com")
+
+
 
 # ── Reasoning/task modes — pure prompt-engineering, no extra APIs needed ────
 # Selected client-side and sent as `mode` with each /api/chat call; appended
@@ -8924,7 +8942,14 @@ def robots_txt():
     """Tells search engine crawlers what to index. Everything under /api/,
     per-account invite links, and internal admin/dashboard pages are
     disallowed since they're either private (unique to one account) or not
-    meaningful search results — only the public home page should be indexed."""
+    meaningful search results — only the public home page should be indexed.
+
+    On Render specifically: disallow EVERYTHING. Vercel (PREFERRED_PUBLIC_ORIGIN)
+    is the only domain meant to show up in Google — Render is treated purely
+    as a backend deployment target, not a public search result."""
+    if _is_deindexed_host():
+        return Response("User-agent: *\nDisallow: /\n", mimetype="text/plain")
+
     origin = get_public_origin()
     lines = [
         "User-agent: *",
@@ -8948,8 +8973,12 @@ def sitemap_xml():
     """Minimal sitemap — this is a single-page chat app behind an anonymous
     session, so there's really only one meaningful public URL (the home
     page) worth listing for crawlers. lastmod is set to "today" on every
-    request since the app's content is dynamic/always current."""
-    origin = get_public_origin()
+    request since the app's content is dynamic/always current.
+
+    Always lists PREFERRED_PUBLIC_ORIGIN (Vercel), even if fetched from
+    Render, so a crawler that finds this file on Render is pointed straight
+    back at the Vercel URL rather than sitemap-ing itself."""
+    origin = PREFERRED_PUBLIC_ORIGIN
     lastmod = datetime.date.today().isoformat()
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -10626,12 +10655,24 @@ def pwa_screenshot_narrow():
 
 
 def render_page():
-    """Serves PAGE with the canonical-URL placeholders filled in from the
-    current request's host — shared by every route that returns the main
-    app shell (/, /invite/<token>, /legacy-invite/<code>) so SEO tags never
-    leak the literal __CANONICAL_URL__ placeholder text."""
-    origin = get_public_origin()
+    """Serves PAGE with the canonical-URL placeholders filled in — shared by
+    every route that returns the main app shell (/, /invite/<token>,
+    /legacy-invite/<code>) so SEO tags never leak the literal
+    __CANONICAL_URL__ placeholder text.
+
+    Canonical/OG/JSON-LD URLs always point at PREFERRED_PUBLIC_ORIGIN
+    (Vercel), even when the page is actually being served from Render —
+    that's what tells Google "this Render copy and the Vercel copy are the
+    same page, treat the Vercel one as canonical." On top of that, Render
+    itself gets a hard noindex,nofollow so it's excluded from search
+    entirely rather than just de-prioritized."""
+    origin = PREFERRED_PUBLIC_ORIGIN
     html = PAGE.replace("__CANONICAL_URL__", origin + "/").replace("__CANONICAL_ORIGIN__", origin)
+    if _is_deindexed_host():
+        html = html.replace(
+            '<meta name="robots" content="index, follow">',
+            '<meta name="robots" content="noindex, nofollow">',
+        )
     return Response(html, mimetype="text/html")
 
 
@@ -11922,6 +11963,238 @@ def api_duplicate_conversation(conv_id):
     }
     save_conversation(username, new_id, new_conv)
     return jsonify({"status": "duplicated", "id": new_id, "title": new_conv["title"]})
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 additions: reactions, message pins, conversation starring, drafts,
+# split/merge. All additive to the existing conversation JSON shape — no
+# existing field is renamed or removed, so old saved conversations keep
+# working unchanged (missing keys just default to empty/False on read).
+# ---------------------------------------------------------------------------
+
+_VALID_REACTIONS = {"like", "dislike", "heart"}
+_REACTION_EMOJI = {"like": "👍", "dislike": "👎", "heart": "❤️"}
+
+
+@app.route("/api/conversations/<conv_id>/messages/<int:message_index>/reaction", methods=["POST"])
+@login_required
+def api_set_message_reaction(conv_id, message_index):
+    """Sets or clears the current user's reaction on a message.
+    Body: {"reaction": "like"|"dislike"|"heart"|null}. One reaction per
+    message per user; sending the same reaction again clears it (toggle)."""
+    data = request.get_json(force=True) or {}
+    reaction = data.get("reaction")
+    if reaction is not None and reaction not in _VALID_REACTIONS:
+        return jsonify({"error": f"reaction must be one of {sorted(_VALID_REACTIONS)} or null"}), 400
+
+    username = current_username()
+    conv = load_conversation(username, conv_id)
+    if conv is None:
+        return jsonify({"error": "not found"}), 404
+    messages = conv.get("messages", [])
+    if not (0 <= message_index < len(messages)):
+        return jsonify({"error": "message_index out of range"}), 400
+
+    msg = messages[message_index]
+    if reaction is None or msg.get("reaction") == reaction:
+        msg.pop("reaction", None)
+        new_value = None
+    else:
+        msg["reaction"] = reaction
+        new_value = reaction
+
+    save_conversation(username, conv_id, conv)
+    return jsonify({"status": "ok", "message_index": message_index, "reaction": new_value,
+                     "emoji": _REACTION_EMOJI.get(new_value)})
+
+
+@app.route("/api/conversations/<conv_id>/messages/<int:message_index>/pin", methods=["POST"])
+@login_required
+def api_toggle_message_pin(conv_id, message_index):
+    """Pins/unpins a single message within a conversation (distinct from
+    conversation-level 'pinned', which is about sidebar ordering).
+    Body: {"pinned": true|false}."""
+    data = request.get_json(force=True) or {}
+    username = current_username()
+    conv = load_conversation(username, conv_id)
+    if conv is None:
+        return jsonify({"error": "not found"}), 404
+    messages = conv.get("messages", [])
+    if not (0 <= message_index < len(messages)):
+        return jsonify({"error": "message_index out of range"}), 400
+
+    pinned = bool(data.get("pinned", True))
+    if pinned:
+        messages[message_index]["pinned"] = True
+    else:
+        messages[message_index].pop("pinned", None)
+
+    save_conversation(username, conv_id, conv)
+    return jsonify({"status": "ok", "message_index": message_index, "pinned": pinned})
+
+
+@app.route("/api/conversations/<conv_id>/pinned-messages", methods=["GET"])
+@login_required
+def api_list_pinned_messages(conv_id):
+    """Returns every pinned message in the conversation, in order, for the
+    'Pinned Messages' panel. Each entry includes its index so the frontend
+    can jump back to it in the full transcript."""
+    username = current_username()
+    conv = load_conversation(username, conv_id)
+    if conv is None:
+        return jsonify({"error": "not found"}), 404
+    pinned = []
+    for i, m in enumerate(conv.get("messages", [])):
+        if m.get("pinned"):
+            text = "".join(p.get("text", "") for p in m.get("parts", []) if "text" in p)
+            pinned.append({"message_index": i, "role": m.get("role"), "text": text})
+    return jsonify({"pinned": pinned})
+
+
+@app.route("/api/conversations/<conv_id>/star", methods=["POST"])
+@login_required
+def api_toggle_star_conversation(conv_id):
+    """Stars/unstars a conversation as a favorite. Kept separate from the
+    existing 'pinned' field (which controls sidebar top-of-list ordering) so
+    the two concepts — 'keep at top' vs 'favorite' — don't collide.
+    Body: {"starred": true|false}."""
+    data = request.get_json(force=True) or {}
+    username = current_username()
+    conv = load_conversation(username, conv_id)
+    if conv is None:
+        return jsonify({"error": "not found"}), 404
+    conv["starred"] = bool(data.get("starred", True))
+    save_conversation(username, conv_id, conv)
+    return jsonify({"status": "ok", "starred": conv["starred"]})
+
+
+@app.route("/api/conversations/favorites", methods=["GET"])
+@login_required
+def api_list_favorite_conversations():
+    username = current_username()
+    convs = [c for c in list_conversations(username) if c.get("starred")]
+    return jsonify({"conversations": convs})
+
+
+@app.route("/api/conversations/<conv_id>/draft", methods=["GET"])
+@login_required
+def api_get_draft(conv_id):
+    """Returns the auto-saved unsent composer text for this conversation,
+    if any. Drafts are stored on the conversation record itself, so they
+    survive navigation, refresh, and reconnects for free."""
+    username = current_username()
+    conv = load_conversation(username, conv_id)
+    if conv is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"draft": conv.get("draft", "")})
+
+
+@app.route("/api/conversations/<conv_id>/draft", methods=["PUT"])
+@login_required
+def api_save_draft(conv_id):
+    """Upserts the draft text. The frontend should debounce calls to this
+    (e.g. every 1-2s while typing, and on blur/navigation) rather than
+    calling on every keystroke. Body: {"text": "..."}."""
+    data = request.get_json(force=True) or {}
+    text = (data.get("text") or "")[:20000]
+    username = current_username()
+    conv = load_conversation(username, conv_id)
+    if conv is None:
+        return jsonify({"error": "not found"}), 404
+    if text:
+        conv["draft"] = text
+    else:
+        conv.pop("draft", None)
+    save_conversation(username, conv_id, conv)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/conversations/<conv_id>/split", methods=["POST"])
+@login_required
+def api_split_conversation(conv_id):
+    """Creates a new conversation containing messages from message_index
+    onward, leaving the original conversation completely untouched.
+    Body: {"message_index": int}."""
+    data = request.get_json(force=True) or {}
+    username = current_username()
+    conv = load_conversation(username, conv_id)
+    if conv is None:
+        return jsonify({"error": "not found"}), 404
+    try:
+        message_index = int(data.get("message_index"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "message_index must be an integer"}), 400
+    messages = conv.get("messages", [])
+    if not (0 <= message_index < len(messages)):
+        return jsonify({"error": "message_index out of range"}), 400
+
+    new_id = str(uuid.uuid4())
+    new_conv = {
+        "title": (conv.get("title") or "New chat") + " (split)",
+        "messages": json.loads(json.dumps(messages[message_index:])),
+        "folder": conv.get("folder"),
+        "split_from": conv_id,
+    }
+    save_conversation(username, new_id, new_conv)
+    return jsonify({"status": "ok", "id": new_id, "title": new_conv["title"]})
+
+
+@app.route("/api/conversations/merge", methods=["POST"])
+@login_required
+def api_merge_conversations():
+    """Merges two conversations into a NEW conversation, ordered by each
+    message's original position (both source conversations are left
+    intact). Exact duplicate consecutive user+reply pairs from the second
+    conversation that also appear in the first are skipped on a best-effort
+    text-match basis. Body: {"conv_id_a": "...", "conv_id_b": "..."}."""
+    data = request.get_json(force=True) or {}
+    username = current_username()
+    id_a, id_b = data.get("conv_id_a"), data.get("conv_id_b")
+    conv_a = load_conversation(username, id_a) if id_a else None
+    conv_b = load_conversation(username, id_b) if id_b else None
+    if conv_a is None or conv_b is None:
+        return jsonify({"error": "one or both conversations not found"}), 404
+
+    def _msg_text(m):
+        return "".join(p.get("text", "") for p in m.get("parts", []) if "text" in p).strip()
+
+    msgs_a = conv_a.get("messages", [])
+    seen_texts = {_msg_text(m) for m in msgs_a if _msg_text(m)}
+    merged = list(msgs_a)
+    skipped = 0
+    for m in conv_b.get("messages", []):
+        t = _msg_text(m)
+        if t and t in seen_texts:
+            skipped += 1
+            continue
+        merged.append(m)
+
+    new_id = str(uuid.uuid4())
+    new_title = f'{conv_a.get("title", "Chat")} + {conv_b.get("title", "Chat")}'[:120]
+    new_conv = {"title": new_title, "messages": merged, "merged_from": [id_a, id_b]}
+    save_conversation(username, new_id, new_conv)
+    return jsonify({"status": "ok", "id": new_id, "title": new_title,
+                     "message_count": len(merged), "duplicates_skipped": skipped})
+
+
+@app.route("/api/conversations/<conv_id>/messages/<int:message_index>/undo-send", methods=["POST"])
+@login_required
+def api_undo_send(conv_id, message_index):
+    """Deletes a just-sent message (and any reply after it) within the
+    undo grace period. The frontend enforces the grace-period countdown
+    (e.g. 5s) client-side and only calls this if the user taps Undo in
+    time; server just does the deletion of everything from that index on,
+    same mechanics as edit-message's history trim."""
+    username = current_username()
+    conv = load_conversation(username, conv_id)
+    if conv is None:
+        return jsonify({"error": "not found"}), 404
+    messages = conv.get("messages", [])
+    if not (0 <= message_index < len(messages)):
+        return jsonify({"error": "message_index out of range"}), 400
+    conv["messages"] = messages[:message_index]
+    save_conversation(username, conv_id, conv)
+    return jsonify({"status": "ok", "removed_from": message_index})
 
 
 def _share_url_for(share_id):
