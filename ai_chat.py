@@ -11861,8 +11861,9 @@ def api_delete_conversation(conv_id):
 @app.route("/api/conversations/<conv_id>", methods=["PATCH"])
 @login_required
 def api_rename_conversation(conv_id):
-    """Updates one or more of: title, folder, pinned, archived. At least one
-    field must be present; unspecified fields are left unchanged."""
+    """Updates one or more of: title, folder, pinned, archived, persona_id,
+    custom_instructions. At least one field must be present; unspecified
+    fields are left unchanged."""
     data = request.get_json(force=True) or {}
     username = current_username()
     conv = load_conversation(username, conv_id)
@@ -11887,10 +11888,21 @@ def api_rename_conversation(conv_id):
     if "archived" in data:
         conv["archived"] = bool(data.get("archived"))
         changed["archived"] = conv["archived"]
+    if "persona_id" in data:
+        # null/empty clears the persona back to the default assistant.
+        pid = data.get("persona_id") or None
+        if pid and not get_persona_for(username, pid):
+            return jsonify({"error": "persona not found"}), 404
+        conv["persona_id"] = pid
+        changed["persona_id"] = pid
+    if "custom_instructions" in data:
+        instructions = (data.get("custom_instructions") or "").strip()[:2000]
+        conv["custom_instructions"] = instructions
+        changed["custom_instructions"] = instructions
 
     if not changed:
         return jsonify({"error": "no recognized fields to update "
-                                  "(expected title/folder/pinned/archived)"}), 400
+                                  "(expected title/folder/pinned/archived/persona_id/custom_instructions)"}), 400
 
     save_conversation(username, conv_id, conv)
     return jsonify({"status": "updated", **changed})
@@ -13837,6 +13849,25 @@ def chat():
             "thorough than usual when it's helpful, without padding for its own sake."
         )
 
+    # Feature 15 — per-conversation custom system prompt/instructions, kept
+    # on the conversation record itself (separate from global settings) so
+    # it only affects this one chat.
+    conv_custom_instructions = (conv.get("custom_instructions") or "").strip()
+    if conv_custom_instructions:
+        effective_system_prompt += "\n\nCustom instructions for this conversation:\n" + conv_custom_instructions
+
+    # Features 49-50 — active persona for this conversation, if any.
+    persona = get_persona_for(username, conv.get("persona_id"))
+    if persona and persona.get("instructions"):
+        effective_system_prompt += (
+            f"\n\nYou are currently acting as the persona \"{persona['name']}\" — "
+            f"follow these persona instructions: {persona['instructions']}"
+        )
+
+    # Feature 14 — long-term memory (no-op string if disabled/empty).
+    effective_system_prompt += get_memory_context_block(username)
+
+
     # Live news grounding — only kicks in when the message actually looks
     # like a news request (see _NEWS_INTENT_RE). Fetches real current
     # headlines via Google News RSS and hands them to the model as context,
@@ -14316,6 +14347,241 @@ def _save_reminders(data):
                 json.dump(data, f)
         except Exception as e:
             print(f"[reminders] failed to save: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Long-term memory (feature 14). Same file-backed pattern as
+# reminders above — one JSON file, keyed by a random id, each row tagged
+# with the owning username. A user's "memory enabled" toggle lives in the
+# same file under a special key so it survives without a separate store.
+# ---------------------------------------------------------------------------
+_MEMORY_FILE = _os.path.join(_DATA_DIR, "memories.json")
+_memory_lock = threading.Lock()
+
+def _load_memory_store():
+    with _memory_lock:
+        if _os.path.exists(_MEMORY_FILE):
+            try:
+                with open(_MEMORY_FILE, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {"entries": {}, "settings": {}}
+
+def _save_memory_store(store):
+    with _memory_lock:
+        try:
+            with open(_MEMORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(store, f)
+        except Exception as e:
+            print(f"[memory] failed to save: {e}")
+
+
+def memory_enabled_for(username):
+    store = _load_memory_store()
+    return store.get("settings", {}).get(username, {}).get("enabled", True)
+
+
+def get_memory_context_block(username, max_chars=1500):
+    """Builds the block of remembered facts to splice into the system
+    prompt for this user's next chat request. Returns "" if memory is
+    disabled or there's nothing saved yet, so callers can unconditionally
+    append the result without an extra branch."""
+    if not memory_enabled_for(username):
+        return ""
+    store = _load_memory_store()
+    mine = [m for m in store.get("entries", {}).values() if m.get("username") == username]
+    if not mine:
+        return ""
+    mine.sort(key=lambda m: m.get("created_at", 0))
+    lines = [f"- {m['text']}" for m in mine]
+    block = "\n".join(lines)
+    if len(block) > max_chars:
+        block = block[:max_chars] + "…"
+    return (
+        "\n\nThe user has asked you to remember these facts/preferences about "
+        "them from past conversations — use them naturally where relevant, "
+        "don't just recite the list back:\n" + block
+    )
+
+
+@app.route("/api/memory", methods=["GET"])
+@login_required
+def api_list_memory():
+    """Optional ?q=... does a simple case-insensitive substring search."""
+    username = current_username()
+    q = (request.args.get("q") or "").strip().lower()
+    store = _load_memory_store()
+    mine = [m for m in store.get("entries", {}).values() if m.get("username") == username]
+    if q:
+        mine = [m for m in mine if q in m["text"].lower()]
+    mine.sort(key=lambda m: m.get("created_at", 0), reverse=True)
+    return jsonify({"memories": mine, "enabled": memory_enabled_for(username)})
+
+
+@app.route("/api/memory", methods=["POST"])
+@login_required
+def api_add_memory():
+    data = request.get_json(force=True) or {}
+    text = (data.get("text") or "").strip()[:500]
+    if not text:
+        return jsonify({"error": "'text' is required"}), 400
+    # Never silently save anything that looks like a password, card number,
+    # or other secret — memory is meant for preferences, not credentials.
+    lowered = text.lower()
+    if any(w in lowered for w in ("password", "credit card", "card number", "cvv", "ssn", "social security")):
+        return jsonify({"error": "This looks like sensitive/credential information — "
+                                  "Mythic AI won't store that in long-term memory."}), 400
+    mid = uuid.uuid4().hex[:12]
+    username = current_username()
+    store = _load_memory_store()
+    store.setdefault("entries", {})[mid] = {
+        "id": mid, "username": username, "text": text, "created_at": time.time(),
+    }
+    _save_memory_store(store)
+    return jsonify({"memory": store["entries"][mid]})
+
+
+@app.route("/api/memory/<mid>", methods=["PUT"])
+@login_required
+def api_edit_memory(mid):
+    data = request.get_json(force=True) or {}
+    text = (data.get("text") or "").strip()[:500]
+    if not text:
+        return jsonify({"error": "'text' is required"}), 400
+    username = current_username()
+    store = _load_memory_store()
+    entry = store.get("entries", {}).get(mid)
+    if not entry or entry.get("username") != username:
+        return jsonify({"error": "not found"}), 404
+    entry["text"] = text
+    entry["updated_at"] = time.time()
+    _save_memory_store(store)
+    return jsonify({"memory": entry})
+
+
+@app.route("/api/memory/<mid>", methods=["DELETE"])
+@login_required
+def api_delete_memory(mid):
+    username = current_username()
+    store = _load_memory_store()
+    entry = store.get("entries", {}).get(mid)
+    if not entry or entry.get("username") != username:
+        return jsonify({"error": "not found"}), 404
+    del store["entries"][mid]
+    _save_memory_store(store)
+    return jsonify({"status": "deleted"})
+
+
+@app.route("/api/memory/settings", methods=["POST"])
+@login_required
+def api_set_memory_enabled():
+    """Body: {"enabled": true|false} — global on/off switch. When off,
+    get_memory_context_block() returns "" so /api/chat stops injecting any
+    saved memories, without deleting them (an easy re-enable later)."""
+    data = request.get_json(force=True) or {}
+    username = current_username()
+    store = _load_memory_store()
+    store.setdefault("settings", {})[username] = {"enabled": bool(data.get("enabled", True))}
+    _save_memory_store(store)
+    return jsonify({"enabled": store["settings"][username]["enabled"]})
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Personas (features 49-50). A saved persona is a name + avatar
+# emoji + instructions the user can attach to any conversation; selecting
+# one just appends its instructions to that conversation's system prompt.
+# ---------------------------------------------------------------------------
+_PERSONAS_FILE = _os.path.join(_DATA_DIR, "personas.json")
+_personas_lock = threading.Lock()
+
+def _load_personas_store():
+    with _personas_lock:
+        if _os.path.exists(_PERSONAS_FILE):
+            try:
+                with open(_PERSONAS_FILE, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+def _save_personas_store(data):
+    with _personas_lock:
+        try:
+            with open(_PERSONAS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"[personas] failed to save: {e}")
+
+
+def get_persona_for(username, persona_id):
+    if not persona_id:
+        return None
+    all_p = _load_personas_store()
+    p = all_p.get(persona_id)
+    if p and p.get("username") == username:
+        return p
+    return None
+
+
+@app.route("/api/personas", methods=["GET"])
+@login_required
+def api_list_personas():
+    username = current_username()
+    all_p = _load_personas_store()
+    mine = [p for p in all_p.values() if p.get("username") == username]
+    mine.sort(key=lambda p: p.get("created_at", 0))
+    return jsonify({"personas": mine})
+
+
+@app.route("/api/personas", methods=["POST"])
+@login_required
+def api_create_persona():
+    data = request.get_json(force=True) or {}
+    name = (data.get("name") or "").strip()[:60]
+    if not name:
+        return jsonify({"error": "'name' is required"}), 400
+    pid = uuid.uuid4().hex[:12]
+    username = current_username()
+    all_p = _load_personas_store()
+    all_p[pid] = {
+        "id": pid, "username": username, "name": name,
+        "avatar": (data.get("avatar") or "🤖")[:8],
+        "description": (data.get("description") or "").strip()[:200],
+        "instructions": (data.get("instructions") or "").strip()[:2000],
+        "created_at": time.time(),
+    }
+    _save_personas_store(all_p)
+    return jsonify({"persona": all_p[pid]})
+
+
+@app.route("/api/personas/<pid>", methods=["PUT"])
+@login_required
+def api_update_persona(pid):
+    data = request.get_json(force=True) or {}
+    username = current_username()
+    all_p = _load_personas_store()
+    p = all_p.get(pid)
+    if not p or p.get("username") != username:
+        return jsonify({"error": "not found"}), 404
+    for field, cap in (("name", 60), ("avatar", 8), ("description", 200), ("instructions", 2000)):
+        if field in data:
+            p[field] = (data.get(field) or "").strip()[:cap]
+    _save_personas_store(all_p)
+    return jsonify({"persona": p})
+
+
+@app.route("/api/personas/<pid>", methods=["DELETE"])
+@login_required
+def api_delete_persona(pid):
+    username = current_username()
+    all_p = _load_personas_store()
+    p = all_p.get(pid)
+    if not p or p.get("username") != username:
+        return jsonify({"error": "not found"}), 404
+    del all_p[pid]
+    _save_personas_store(all_p)
+    return jsonify({"status": "deleted"})
 
 
 @app.route("/api/reminders", methods=["GET"])
