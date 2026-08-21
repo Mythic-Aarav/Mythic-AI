@@ -1054,7 +1054,14 @@ def _save_users_store(store):
             print(f"[users] failed to save: {e}")
 
 
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Email validation — intentionally provider-agnostic. Accepts any syntactically
+# valid address regardless of domain: Gmail, Yahoo, Outlook, iCloud, Proton,
+# Zoho, custom business/school domains, .in, .edu, .co.uk — everything.
+# No domain allowlist is used; the regex only rejects obviously malformed input
+# (no @, multiple @, whitespace inside, missing domain/TLD).
+_EMAIL_RE = re.compile(
+    r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$"
+)
 
 
 def _pending_local_id():
@@ -1104,30 +1111,63 @@ def api_auth_logout():
     return jsonify({"status": "ok"})
 
 
+def _sb_upsert_user(user_record: dict):
+    """Sync a user record to Supabase `users` table (best-effort — never
+    crashes the caller if Supabase is down or not configured)."""
+    if not SUPABASE_URL:
+        return
+    try:
+        payload = {
+            "user_id":       user_record.get("user_id"),
+            "email":         user_record.get("email"),
+            "name":          user_record.get("name"),
+            "picture":       user_record.get("picture"),
+            "google_sub":    user_record.get("google_sub"),
+            "created_at":    user_record.get("created_at"),
+            # Never store the raw hash in Supabase — use the local file for
+            # local-auth credential checks; Supabase row is profile-only.
+        }
+        hdrs = dict(sb_headers())
+        hdrs["Prefer"] = "resolution=merge-duplicates,return=minimal"
+        requests.post(sb("users"), headers=hdrs, json=payload, timeout=8)
+    except Exception as e:
+        print(f"[Supabase] _sb_upsert_user failed (non-fatal): {e}")
+
+
 @app.route("/api/auth/signup", methods=["POST"])
 def api_auth_signup():
     data = request.get_json(force=True) or {}
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
+    confirm = data.get("confirm_password") or ""
     name = (data.get("name") or "").strip()[:80] or email.split("@")[0]
 
+    # --- Validation ---
+    if not email:
+        return jsonify({"error": "Please enter your email address."}), 400
     if not _EMAIL_RE.match(email):
-        return jsonify({"error": "Enter a valid email address."}), 400
+        return jsonify({"error": "Please enter a valid email address."}), 400
     if len(password) < 8:
         return jsonify({"error": "Password must be at least 8 characters."}), 400
+    # Only enforce confirm_password when the client sends it (signup form always
+    # sends it; API callers that omit it skip this check for backwards compat).
+    if confirm and confirm != password:
+        return jsonify({"error": "Passwords do not match."}), 400
 
     store = _load_users_store()
     if email in store["by_email"]:
-        return jsonify({"error": "An account with that email already exists. Try logging in instead."}), 409
+        return jsonify({"error": "An account with this email already exists. Try signing in instead."}), 409
 
     user_id = _pending_local_id()
-    store["by_id"][user_id] = {
+    user_record = {
         "user_id": user_id, "email": email, "name": name, "picture": None,
         "password_hash": generate_password_hash(password),
         "google_sub": None, "created_at": time.time(),
     }
+    store["by_id"][user_id] = user_record
     store["by_email"][email] = user_id
     _save_users_store(store)
+    _sb_upsert_user(user_record)   # sync to Supabase (non-fatal if unavailable)
     _log_user_in(user_id)
     return jsonify({"status": "ok", "email": email, "name": name})
 
@@ -1146,6 +1186,211 @@ def api_auth_login():
 
     _log_user_in(user_id)
     return jsonify({"status": "ok", "email": user["email"], "name": user["name"]})
+
+
+# --- Password reset (forgot password) ----------------------------------------
+# Stores pending reset tokens in memory + local file so they survive a single
+# worker restart. Tokens expire after 30 minutes. No email is sent by default
+# (configure RESEND_API_KEY + RESEND_FROM_EMAIL to enable actual email sending);
+# without Resend the token is returned in the JSON response for dev/testing.
+_RESET_TOKENS: dict = {}   # token -> {user_id, expires_at}
+_RESET_TOKENS_FILE = _os.path.join(_DATA_DIR, "reset_tokens.json")
+_reset_lock = threading.Lock()
+
+RESEND_API_KEY   = os.environ.get("RESEND_API_KEY", "").strip()
+RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "noreply@mythic-ai.app").strip()
+_RESET_TOKEN_TTL = 30 * 60  # 30 minutes
+
+
+def _load_reset_tokens():
+    with _reset_lock:
+        if _os.path.exists(_RESET_TOKENS_FILE):
+            try:
+                with open(_RESET_TOKENS_FILE, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+
+def _save_reset_tokens(data):
+    with _reset_lock:
+        try:
+            with open(_RESET_TOKENS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception:
+            pass
+
+
+def _send_reset_email(to_email: str, reset_url: str) -> bool:
+    """Sends password-reset email via Resend API. Returns True on success."""
+    if not RESEND_API_KEY:
+        return False
+    try:
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "from": RESEND_FROM_EMAIL,
+                "to": [to_email],
+                "subject": "Reset your Mythic AI password",
+                "html": (
+                    f"<p>Hi,</p>"
+                    f"<p>Click the link below to reset your Mythic AI password. "
+                    f"This link expires in 30 minutes.</p>"
+                    f"<p><a href='{reset_url}'>{reset_url}</a></p>"
+                    f"<p>If you didn't request this, you can ignore this email.</p>"
+                    f"<p>— Mythic AI</p>"
+                ),
+            },
+            timeout=10,
+        )
+        return resp.status_code in (200, 201)
+    except Exception as e:
+        print(f"[reset-email] failed to send to {to_email}: {e}")
+        return False
+
+
+@app.route("/api/auth/forgot-password", methods=["POST"])
+def api_auth_forgot_password():
+    """Request a password-reset link. Always returns 200 (even for unknown
+    email) so callers cannot enumerate registered accounts."""
+    data = request.get_json(force=True) or {}
+    email = (data.get("email") or "").strip().lower()
+
+    if not _EMAIL_RE.match(email):
+        return jsonify({"error": "Please enter a valid email address."}), 400
+
+    store = _load_users_store()
+    user_id = store["by_email"].get(email)
+    if not user_id:
+        # Don't reveal whether the account exists
+        return jsonify({"status": "ok", "message": "If that email is registered, a reset link has been sent."})
+
+    # Purge expired tokens, then mint a new one
+    tokens = _load_reset_tokens()
+    now = time.time()
+    tokens = {t: v for t, v in tokens.items() if v.get("expires_at", 0) > now}
+
+    token = secrets.token_urlsafe(32)
+    tokens[token] = {"user_id": user_id, "expires_at": now + _RESET_TOKEN_TTL}
+    _save_reset_tokens(tokens)
+
+    reset_url = get_public_origin() + f"/reset-password?token={token}"
+    sent = _send_reset_email(email, reset_url)
+
+    # In dev (no Resend key) return the token so it can be tested directly
+    resp = {"status": "ok", "message": "If that email is registered, a reset link has been sent."}
+    if not sent:
+        resp["_dev_reset_url"] = reset_url   # only present when email not configured
+    return jsonify(resp)
+
+
+@app.route("/api/auth/reset-password", methods=["POST"])
+def api_auth_reset_password():
+    """Consume a reset token and set a new password."""
+    data = request.get_json(force=True) or {}
+    token = (data.get("token") or "").strip()
+    new_password = data.get("password") or ""
+
+    if not token:
+        return jsonify({"error": "Reset token is missing."}), 400
+    if len(new_password) < 8:
+        return jsonify({"error": "Password must be at least 8 characters."}), 400
+
+    tokens = _load_reset_tokens()
+    entry = tokens.get(token)
+    if not entry or entry.get("expires_at", 0) < time.time():
+        return jsonify({"error": "This reset link has expired or is invalid. Please request a new one."}), 400
+
+    user_id = entry["user_id"]
+    store = _load_users_store()
+    user = store["by_id"].get(user_id)
+    if not user:
+        return jsonify({"error": "Account not found."}), 404
+
+    user["password_hash"] = generate_password_hash(new_password)
+    _save_users_store(store)
+
+    # Invalidate the token (single use)
+    del tokens[token]
+    _save_reset_tokens(tokens)
+
+    return jsonify({"status": "ok", "message": "Password updated. You can now sign in."})
+
+
+@app.route("/reset-password", methods=["GET"])
+def reset_password_page():
+    """Simple standalone page that reads ?token= and lets the user pick a
+    new password, then POSTs to /api/auth/reset-password."""
+    token = request.args.get("token", "")
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Reset password · Mythic AI</title>
+<link rel="icon" type="image/png" href="/icon.png">
+<style>
+  :root{{--bg:#0c1410;--panel:#141f19;--border:#2a3a30;--text:#f5f3ea;--muted:#9aa89e;--accent:#10a37f;}}
+  *{{box-sizing:border-box;}}
+  body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding:24px;}}
+  .card{{width:100%;max-width:380px;background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:32px 28px;}}
+  .brand{{display:flex;align-items:center;gap:10px;justify-content:center;margin-bottom:24px;}}
+  .brand img{{width:32px;height:32px;border-radius:8px;}}
+  .brand span{{font-size:20px;font-weight:700;}}
+  h1{{font-size:16px;font-weight:500;color:var(--muted);text-align:center;margin:0 0 24px;}}
+  input{{width:100%;padding:12px 14px;border-radius:10px;border:1px solid var(--border);
+    background:#0f1912;color:var(--text);font-size:14px;margin-bottom:12px;}}
+  input:focus{{outline:none;border-color:var(--accent);}}
+  button{{width:100%;padding:12px;border:none;border-radius:10px;background:var(--accent);
+    color:#06120c;font-weight:700;font-size:14px;cursor:pointer;}}
+  .msg{{border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:16px;display:none;}}
+  .err{{background:#3a1414;color:#ff9a9a;border:1px solid #5a2020;}}
+  .ok{{background:#143a1e;color:#6ef0a0;border:1px solid #205a30;}}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="brand"><img src="/icon.png" alt=""><span>Mythic AI</span></div>
+  <h1>Create new password</h1>
+  <div class="msg err" id="err"></div>
+  <div class="msg ok" id="ok"></div>
+  <input id="pw" type="password" placeholder="New password (min. 8 characters)">
+  <input id="pw2" type="password" placeholder="Confirm new password" style="margin-bottom:20px">
+  <button id="btn">Set new password</button>
+</div>
+<script>
+  const token = {json.dumps(token)};
+  document.getElementById('btn').onclick = async () => {{
+    const pw = document.getElementById('pw').value;
+    const pw2 = document.getElementById('pw2').value;
+    const err = document.getElementById('err');
+    const ok  = document.getElementById('ok');
+    err.style.display = ok.style.display = 'none';
+    if (pw.length < 8) {{ err.textContent = 'Password must be at least 8 characters.'; err.style.display = 'block'; return; }}
+    if (pw !== pw2) {{ err.textContent = 'Passwords do not match.'; err.style.display = 'block'; return; }}
+    try {{
+      const r = await fetch('/api/auth/reset-password', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{token, password: pw}}),
+      }});
+      const j = await r.json();
+      if (!r.ok) {{ err.textContent = j.error || 'Something went wrong.'; err.style.display = 'block'; return; }}
+      ok.textContent = 'Password updated! Redirecting to sign in…';
+      ok.style.display = 'block';
+      document.getElementById('btn').disabled = true;
+      setTimeout(() => window.location.href = '/login', 2000);
+    }} catch(e) {{
+      err.textContent = 'Network error — please try again.'; err.style.display = 'block';
+    }}
+  }};
+</script>
+</body>
+</html>"""
+    return Response(html, mimetype="text/html")
 
 
 @app.route("/api/auth/google/start", methods=["GET"])
@@ -1238,6 +1483,7 @@ def api_auth_google_callback():
         store["by_google_sub"][google_sub] = user_id
 
     _save_users_store(store)
+    _sb_upsert_user(store["by_id"][user_id])   # sync to Supabase (non-fatal)
     _log_user_in(user_id)
     return redirect("/")
 
@@ -1272,23 +1518,35 @@ _LOGIN_PAGE_HTML = """<!DOCTYPE html>
   .divider::before, .divider::after { content:''; flex:1; height:1px; background:var(--border); }
   input {
     width:100%; padding:12px 14px; border-radius:10px; border:1px solid var(--border);
-    background:#0f1912; color:var(--text); font-size:14px; margin-bottom:12px;
+    background:#0f1912; color:var(--text); font-size:16px; margin-bottom:12px;
   }
   input:focus { outline:none; border-color:var(--accent); }
   button.primary {
     width:100%; padding:12px; border:none; border-radius:10px; background:var(--accent);
-    color:#06120c; font-weight:700; font-size:14px; cursor:pointer;
+    color:#06120c; font-weight:700; font-size:14px; cursor:pointer; margin-top:4px;
   }
+  button.primary:disabled { opacity:.6; cursor:not-allowed; }
   .toggle { text-align:center; margin-top:16px; font-size:13px; color:var(--muted); }
   .toggle a { color:var(--accent); cursor:pointer; text-decoration:none; }
+  .forgot-wrap { text-align:right; margin-top:-6px; margin-bottom:12px; }
+  .forgot-wrap a { font-size:12px; color:var(--muted); cursor:pointer; text-decoration:none; }
+  .forgot-wrap a:hover { color:var(--accent); }
   .err { background:#3a1414; color:#ff9a9a; border:1px solid #5a2020; border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:16px; display:none; }
+  .ok  { background:#143a1e; color:#6ef0a0; border:1px solid #205a30; border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:16px; display:none; }
+  /* Forgot-password overlay */
+  .overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; align-items:center; justify-content:center; padding:24px; }
+  .overlay.active { display:flex; }
+  .overlay-card { background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:28px 24px; width:100%; max-width:340px; }
+  .overlay-card h2 { font-size:15px; font-weight:600; margin:0 0 6px; }
+  .overlay-card p { font-size:13px; color:var(--muted); margin:0 0 16px; }
 </style>
 </head>
 <body>
   <div class="card">
     <div class="brand"><img src="/icon.png" alt=""><span>Mythic AI</span></div>
-    <h1 id="mode-label">Sign in to continue</h1>
+    <h1 id="mode-label">Welcome back to Mythic AI</h1>
     <div class="err" id="err"></div>
+    <div class="ok"  id="ok"></div>
 
     <a class="google-btn" href="/api/auth/google/start" id="google-btn">
       <svg viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.1 29.5 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.7-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.9 18.9 13 24 13c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.1 29.5 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 10-2 13.5-5.3l-6.2-5.2C29.3 35.4 26.8 36 24 36c-5.2 0-9.6-3.3-11.2-7.9l-6.5 5C9.6 39.6 16.3 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.2-4.2 5.5l6.2 5.2C40.8 36 44 30.9 44 24c0-1.3-.1-2.7-.4-3.5z"/></svg>
@@ -1297,48 +1555,104 @@ _LOGIN_PAGE_HTML = """<!DOCTYPE html>
 
     <div class="divider" id="divider">or</div>
 
-    <input id="name" type="text" placeholder="Name" style="display:none">
-    <input id="email" type="email" placeholder="Email">
-    <input id="password" type="password" placeholder="Password">
+    <!-- Signup-only fields (hidden in login mode) -->
+    <input id="name" type="text" placeholder="Name" style="display:none" autocomplete="name">
+
+    <input id="email" type="email" placeholder="Email" autocomplete="email">
+    <input id="password" type="password" placeholder="Password" autocomplete="current-password">
+
+    <!-- Confirm password — shown only in signup mode -->
+    <input id="confirm-password" type="password" placeholder="Confirm password" style="display:none" autocomplete="new-password">
+
+    <!-- Forgot password link — shown only in login mode -->
+    <div class="forgot-wrap" id="forgot-wrap">
+      <a id="forgot-link">Forgot password?</a>
+    </div>
+
     <button class="primary" id="submit-btn">Sign in</button>
 
     <div class="toggle" id="toggle-signup">Don't have an account? <a id="toggle-link">Sign up</a></div>
   </div>
+
+  <!-- Forgot-password overlay -->
+  <div class="overlay" id="forgot-overlay">
+    <div class="overlay-card">
+      <h2>Reset your password</h2>
+      <p>Enter your email and we'll send you a reset link.</p>
+      <div class="err" id="fp-err"></div>
+      <div class="ok"  id="fp-ok"></div>
+      <input id="fp-email" type="email" placeholder="Email" autocomplete="email">
+      <button class="primary" id="fp-btn" style="margin-top:4px">Send reset link</button>
+      <div class="toggle" style="margin-top:12px"><a id="fp-cancel">Cancel</a></div>
+    </div>
+  </div>
+
 <script>
   let mode = 'login';
   const els = {
-    label: document.getElementById('mode-label'),
-    name: document.getElementById('name'),
-    email: document.getElementById('email'),
+    label:    document.getElementById('mode-label'),
+    name:     document.getElementById('name'),
+    email:    document.getElementById('email'),
     password: document.getElementById('password'),
-    btn: document.getElementById('submit-btn'),
-    link: document.getElementById('toggle-link'),
+    confirm:  document.getElementById('confirm-password'),
+    btn:      document.getElementById('submit-btn'),
     toggleWrap: document.getElementById('toggle-signup'),
-    err: document.getElementById('err'),
+    forgotWrap: document.getElementById('forgot-wrap'),
+    err:  document.getElementById('err'),
+    ok:   document.getElementById('ok'),
   };
+
+  function showErr(msg) { els.err.textContent = msg; els.err.style.display = 'block'; els.ok.style.display = 'none'; }
+  function showOk(msg)  { els.ok.textContent  = msg; els.ok.style.display  = 'block'; els.err.style.display = 'none'; }
+  function clearMsg()   { els.err.style.display = els.ok.style.display = 'none'; }
+
   function setMode(m) {
     mode = m;
+    clearMsg();
     if (m === 'signup') {
-      els.label.textContent = 'Create your account';
-      els.name.style.display = 'block';
-      els.btn.textContent = 'Create account';
-      els.toggleWrap.innerHTML = 'Already have an account? <a id="toggle-link">Sign in</a>';
+      els.label.textContent        = 'Create your account';
+      els.name.style.display       = 'block';
+      els.confirm.style.display    = 'block';
+      els.forgotWrap.style.display = 'none';
+      els.btn.textContent          = 'Create account';
+      els.password.autocomplete    = 'new-password';
+      els.toggleWrap.innerHTML     = 'Already have an account? <a id="toggle-link">Sign in</a>';
     } else {
-      els.label.textContent = 'Sign in to continue';
-      els.name.style.display = 'none';
-      els.btn.textContent = 'Sign in';
-      els.toggleWrap.innerHTML = 'Don\\'t have an account? <a id="toggle-link">Sign up</a>';
+      els.label.textContent        = 'Welcome back to Mythic AI';
+      els.name.style.display       = 'none';
+      els.confirm.style.display    = 'none';
+      els.forgotWrap.style.display = 'block';
+      els.btn.textContent          = 'Sign in';
+      els.password.autocomplete    = 'current-password';
+      els.toggleWrap.innerHTML     = "Don't have an account? <a id='toggle-link'>Sign up</a>";
     }
     document.getElementById('toggle-link').onclick = () => setMode(mode === 'login' ? 'signup' : 'login');
   }
   document.getElementById('toggle-link').onclick = () => setMode('signup');
 
+  // Simple client-side email format check (mirrors server _EMAIL_RE)
+  function validEmail(v) { return new RegExp('^[^ @]+@[^ @]+[.][^ @]{2,}$').test(v.trim()); }
+
   const clientId = localStorage.getItem('mythic_client_id') || '';
 
   els.btn.onclick = async () => {
-    els.err.style.display = 'none';
-    const body = { email: els.email.value.trim(), password: els.password.value };
-    if (mode === 'signup') body.name = els.name.value.trim();
+    clearMsg();
+    const email    = els.email.value.trim();
+    const password = els.password.value;
+
+    if (!email)           { showErr('Please enter your email address.'); return; }
+    if (!validEmail(email)) { showErr('Please enter a valid email address.'); return; }
+    if (!password)        { showErr('Please enter your password.'); return; }
+
+    if (mode === 'signup') {
+      if (password.length < 8) { showErr('Password must be at least 8 characters.'); return; }
+      const confirm = els.confirm.value;
+      if (confirm !== password) { showErr('Passwords do not match.'); return; }
+    }
+
+    els.btn.disabled = true;
+    const body = { email, password };
+    if (mode === 'signup') { body.name = els.name.value.trim(); body.confirm_password = els.confirm.value; }
     try {
       const r = await fetch(mode === 'signup' ? '/api/auth/signup' : '/api/auth/login', {
         method: 'POST',
@@ -1346,23 +1660,59 @@ _LOGIN_PAGE_HTML = """<!DOCTYPE html>
         body: JSON.stringify(body),
       });
       const j = await r.json();
-      if (!r.ok) { els.err.textContent = j.error || 'Something went wrong.'; els.err.style.display = 'block'; return; }
+      if (!r.ok) { showErr(j.error || 'Something went wrong.'); els.btn.disabled = false; return; }
       window.location.href = '/';
     } catch (e) {
-      els.err.textContent = 'Network error — please try again.';
-      els.err.style.display = 'block';
+      showErr('Network error — please try again.');
+      els.btn.disabled = false;
+    }
+  };
+
+  // Allow Enter key to submit
+  document.addEventListener('keydown', e => { if (e.key === 'Enter') els.btn.click(); });
+
+  // Forgot-password flow
+  document.getElementById('forgot-link').onclick = () => {
+    document.getElementById('fp-email').value = els.email.value;
+    document.getElementById('fp-err').style.display = 'none';
+    document.getElementById('fp-ok').style.display  = 'none';
+    document.getElementById('forgot-overlay').classList.add('active');
+  };
+  document.getElementById('fp-cancel').onclick = () =>
+    document.getElementById('forgot-overlay').classList.remove('active');
+
+  document.getElementById('fp-btn').onclick = async () => {
+    const fpEmail = document.getElementById('fp-email').value.trim();
+    const fpErr   = document.getElementById('fp-err');
+    const fpOk    = document.getElementById('fp-ok');
+    fpErr.style.display = fpOk.style.display = 'none';
+    if (!validEmail(fpEmail)) { fpErr.textContent = 'Please enter a valid email address.'; fpErr.style.display = 'block'; return; }
+    const btn = document.getElementById('fp-btn');
+    btn.disabled = true;
+    try {
+      const r = await fetch('/api/auth/forgot-password', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({email: fpEmail}),
+      });
+      const j = await r.json();
+      if (!r.ok) { fpErr.textContent = j.error || 'Something went wrong.'; fpErr.style.display = 'block'; btn.disabled = false; return; }
+      fpOk.textContent = j.message || 'Reset link sent — check your inbox.';
+      fpOk.style.display = 'block';
+      // In dev, if the server returned a direct URL, show it
+      if (j._dev_reset_url) {
+        fpOk.innerHTML += '<br><small style="word-break:break-all">(dev) <a href="' + j._dev_reset_url + '" style="color:inherit">' + j._dev_reset_url + '</a></small>';
+      }
+      btn.textContent = 'Sent';
+    } catch(e) {
+      fpErr.textContent = 'Network error — please try again.'; fpErr.style.display = 'block'; btn.disabled = false;
     }
   };
 
   const params = new URLSearchParams(window.location.search);
-  if (params.get('error')) {
-    els.err.textContent = 'Google sign-in failed — please try again.';
-    els.err.style.display = 'block';
-  }
+  if (params.get('error')) { showErr('Google sign-in failed — please try again.'); }
+  if (params.get('mode') === 'signup') { setMode('signup'); }
 
   // Hide the Google button (and the "or" divider) entirely if the server
-  // doesn't have GOOGLE_CLIENT_ID/SECRET configured yet, instead of
-  // showing a button that just leads to an error page.
+  // doesn't have GOOGLE_CLIENT_ID/SECRET configured yet.
   fetch('/api/auth/config').then(r => r.json()).then(cfg => {
     if (!cfg.google_enabled) {
       document.getElementById('google-btn').style.display = 'none';
