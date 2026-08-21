@@ -104,8 +104,9 @@ except ImportError:
 _FLIPBOOK_OCR_AVAILABLE = _PLAYWRIGHT_AVAILABLE and _OCR_AVAILABLE and _WATERMARK_AVAILABLE  # needs PIL too
 from flask import (
     Flask, request, jsonify, Response, session,
-    stream_with_context
+    stream_with_context, redirect
 )
+from werkzeug.security import generate_password_hash, check_password_hash
 
 PROVIDER = os.environ.get("AI_PROVIDER", "auto").strip().lower()
 # "auto"  = Groq first, silently falls back to Cerebras on any failure (rate limit,
@@ -118,6 +119,14 @@ PROVIDER = os.environ.get("AI_PROVIDER", "auto").strip().lower()
 # Set these as environment variables on Render instead.
 GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "")
 CEREBRAS_API_KEY  = os.environ.get("CEREBRAS_API_KEY",  "")
+# --- Google Sign-In (OAuth 2.0) ------------------------------------------
+# Create these at https://console.cloud.google.com/apis/credentials
+# (OAuth client ID, type "Web application"). Add BOTH of your live domains'
+# callback URLs as Authorized redirect URIs, e.g.:
+#   https://mythic-ai.vercel.app/api/auth/google/callback
+#   https://<your-render-app>.onrender.com/api/auth/google/callback
+GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 # HF is kept ONLY as a text-to-image fallback for /api/generate-image when
 # NanoBanana isn't configured — it is NOT used as a chat/text provider.
 HF_API_KEY        = os.environ.get("HF_API_KEY",        "")
@@ -693,37 +702,27 @@ def sb(path):
 # --- User accounts (Supabase: users table) -----------------------------------
 
 def current_username():
-    """Each visitor gets a unique anonymous ID, normally stored in their
-    browser session cookie. No login required — conversations are private
-    per browser/device.
-
-    Resilience: the frontend also keeps a copy of this id in localStorage
-    and sends it as the X-Client-Id header on every /api/ request. If the
-    session cookie ever gets dropped (cookie banner blocking, a browser
-    setting, an intermediate proxy stripping it, etc.) but localStorage
-    still has the id, we reseed the session from that header instead of
-    silently generating a brand new random user and "losing" the chat
-    history. A client-supplied id is only accepted if it looks like a
-    valid UUID, so this can't be abused to guess/hijack another user's id.
-    """
-    if "user_id" not in session:
-        client_id = request.headers.get("X-Client-Id", "").strip()
-        if client_id:
-            try:
-                uuid.UUID(client_id)
-                session["user_id"] = client_id
-            except (ValueError, AttributeError):
-                session["user_id"] = str(uuid.uuid4())
-        else:
-            session["user_id"] = str(uuid.uuid4())
-        session.permanent = True
-    return session["user_id"]
+    """Returns the id of the currently AUTHENTICATED account. Only ever
+    called from inside a @login_required view, which guarantees
+    session["user_id"] + session["authenticated"] are already set — see
+    login_required below, which is the actual gate."""
+    return session.get("user_id")
 
 
 def login_required(view):
-    """No-op decorator kept so all @login_required routes still work unchanged."""
+    """Real auth gate. Unauthenticated visitors get:
+      - redirected to /login for normal page routes
+      - a 401 JSON error for /api/... routes (so frontend fetch calls can
+        detect it and redirect client-side instead of rendering raw HTML)
+    A request is considered authenticated once session["authenticated"] is
+    True — set by email/password login, Google sign-in, an /invite/<token>
+    link, or /claim-owner/<secret>, all of which are equivalent proof of
+    "this browser is allowed into this specific account"."""
     def wrapped(*args, **kwargs):
-        current_username()  # ensure session id is set
+        if not session.get("authenticated") or not session.get("user_id"):
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "authentication required", "login_url": "/login"}), 401
+            return redirect("/login")
         return view(*args, **kwargs)
     wrapped.__name__ = view.__name__
     return wrapped
@@ -1028,6 +1027,367 @@ def resolve_account_token(token):
             print(f"[account-token] Supabase resolve failed: {e} — falling back to local file.")
     tokens = _load_account_tokens()
     return tokens.get(token)
+
+
+# --- User accounts: email/password + Google Sign-In --------------------------
+_USERS_FILE = _os.path.join(_DATA_DIR, "users.json")
+_users_lock = threading.Lock()
+
+
+def _load_users_store():
+    with _users_lock:
+        if _os.path.exists(_USERS_FILE):
+            try:
+                with open(_USERS_FILE, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {"by_id": {}, "by_email": {}, "by_google_sub": {}}
+
+
+def _save_users_store(store):
+    with _users_lock:
+        try:
+            with open(_USERS_FILE, "w", encoding="utf-8") as f:
+                json.dump(store, f)
+        except Exception as e:
+            print(f"[users] failed to save: {e}")
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _pending_local_id():
+    """If this browser already has a locally-known id (from before this
+    login gate existed, or from an in-progress OAuth redirect), returns it
+    so a brand-new signup can adopt it as the account's permanent id —
+    meaning any conversations/memories/personas already saved under that id
+    keep working immediately instead of starting empty. Falls back to a
+    fresh uuid if there's nothing to adopt."""
+    candidate = session.get("pending_anon_id") or request.headers.get("X-Client-Id", "").strip()
+    if candidate:
+        try:
+            uuid.UUID(candidate)
+            return candidate
+        except (ValueError, AttributeError):
+            pass
+    return str(uuid.uuid4())
+
+
+def _log_user_in(user_id):
+    session["user_id"] = user_id
+    session["authenticated"] = True
+    session.permanent = True
+    session.pop("pending_anon_id", None)
+
+
+@app.route("/api/auth/me", methods=["GET"])
+def api_auth_me():
+    """Lets the frontend check auth status without triggering the redirect
+    login_required would do — used to decide whether to show the login
+    screen or the app shell."""
+    if not session.get("authenticated") or not session.get("user_id"):
+        return jsonify({"authenticated": False})
+    store = _load_users_store()
+    u = store["by_id"].get(session["user_id"], {})
+    return jsonify({
+        "authenticated": True,
+        "email": u.get("email"),
+        "name": u.get("name"),
+        "picture": u.get("picture"),
+    })
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_auth_logout():
+    session.clear()
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/auth/signup", methods=["POST"])
+def api_auth_signup():
+    data = request.get_json(force=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    name = (data.get("name") or "").strip()[:80] or email.split("@")[0]
+
+    if not _EMAIL_RE.match(email):
+        return jsonify({"error": "Enter a valid email address."}), 400
+    if len(password) < 8:
+        return jsonify({"error": "Password must be at least 8 characters."}), 400
+
+    store = _load_users_store()
+    if email in store["by_email"]:
+        return jsonify({"error": "An account with that email already exists. Try logging in instead."}), 409
+
+    user_id = _pending_local_id()
+    store["by_id"][user_id] = {
+        "user_id": user_id, "email": email, "name": name, "picture": None,
+        "password_hash": generate_password_hash(password),
+        "google_sub": None, "created_at": time.time(),
+    }
+    store["by_email"][email] = user_id
+    _save_users_store(store)
+    _log_user_in(user_id)
+    return jsonify({"status": "ok", "email": email, "name": name})
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_auth_login():
+    data = request.get_json(force=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+
+    store = _load_users_store()
+    user_id = store["by_email"].get(email)
+    user = store["by_id"].get(user_id) if user_id else None
+    if not user or not user.get("password_hash") or not check_password_hash(user["password_hash"], password):
+        return jsonify({"error": "Incorrect email or password."}), 401
+
+    _log_user_in(user_id)
+    return jsonify({"status": "ok", "email": user["email"], "name": user["name"]})
+
+
+@app.route("/api/auth/google/start", methods=["GET"])
+def api_auth_google_start():
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        return Response(
+            "Google sign-in isn't configured yet — the server is missing "
+            "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET environment variables.",
+            mimetype="text/plain"), 500
+
+    state = secrets.token_urlsafe(24)
+    session["oauth_state"] = state
+    # Preserve any pre-existing local/anon id across the redirect so a NEW
+    # Google signup can still adopt it (see _pending_local_id above).
+    session["pending_anon_id"] = request.headers.get("X-Client-Id", "").strip() or None
+    redirect_uri = get_public_origin() + "/api/auth/google/callback"
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "access_type": "online",
+        "prompt": "select_account",
+    }
+    return redirect("https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params))
+
+
+@app.route("/api/auth/google/callback", methods=["GET"])
+def api_auth_google_callback():
+    error = request.args.get("error")
+    if error:
+        return redirect("/login?error=" + urllib.parse.quote(error))
+
+    state = request.args.get("state", "")
+    if not state or state != session.get("oauth_state"):
+        return redirect("/login?error=invalid_state")
+    code = request.args.get("code", "")
+    if not code:
+        return redirect("/login?error=missing_code")
+
+    redirect_uri = get_public_origin() + "/api/auth/google/callback"
+    try:
+        token_resp = requests.post("https://oauth2.googleapis.com/token", data={
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        }, timeout=10)
+        token_resp.raise_for_status()
+        access_token = token_resp.json()["access_token"]
+
+        profile_resp = requests.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"}, timeout=10,
+        )
+        profile_resp.raise_for_status()
+        profile = profile_resp.json()
+    except Exception as e:
+        print(f"[google-oauth] callback exchange failed: {e}")
+        return redirect("/login?error=google_exchange_failed")
+
+    google_sub = profile.get("sub")
+    email = (profile.get("email") or "").strip().lower()
+    if not google_sub or not email:
+        return redirect("/login?error=incomplete_google_profile")
+
+    store = _load_users_store()
+    user_id = store["by_google_sub"].get(google_sub) or store["by_email"].get(email)
+
+    if user_id and user_id in store["by_id"]:
+        # Existing account (signed up with Google before, or previously
+        # with email/password using the same address) — link if needed.
+        user = store["by_id"][user_id]
+        if not user.get("google_sub"):
+            user["google_sub"] = google_sub
+            store["by_google_sub"][google_sub] = user_id
+        user["picture"] = profile.get("picture") or user.get("picture")
+        user["name"] = user.get("name") or profile.get("name") or email.split("@")[0]
+    else:
+        user_id = _pending_local_id()
+        store["by_id"][user_id] = {
+            "user_id": user_id, "email": email,
+            "name": profile.get("name") or email.split("@")[0],
+            "picture": profile.get("picture"), "password_hash": None,
+            "google_sub": google_sub, "created_at": time.time(),
+        }
+        store["by_email"][email] = user_id
+        store["by_google_sub"][google_sub] = user_id
+
+    _save_users_store(store)
+    _log_user_in(user_id)
+    return redirect("/")
+
+
+_LOGIN_PAGE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign in · Mythic AI</title>
+<link rel="icon" type="image/png" href="/icon.png">
+<style>
+  :root { --bg:#0c1410; --panel:#141f19; --border:#2a3a30; --text:#f5f3ea; --muted:#9aa89e; --accent:#10a37f; }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+    background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    padding:24px;
+  }
+  .card { width:100%; max-width:380px; background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:32px 28px; }
+  .brand { display:flex; align-items:center; gap:10px; justify-content:center; margin-bottom:24px; }
+  .brand img { width:32px; height:32px; border-radius:8px; }
+  .brand span { font-size:20px; font-weight:700; }
+  h1 { font-size:16px; font-weight:500; color:var(--muted); text-align:center; margin:0 0 24px; }
+  .google-btn {
+    width:100%; display:flex; align-items:center; justify-content:center; gap:10px;
+    background:#fff; color:#1f1f1f; border:none; border-radius:10px; padding:12px; font-size:15px;
+    font-weight:600; cursor:pointer; text-decoration:none;
+  }
+  .google-btn svg { width:18px; height:18px; }
+  .divider { display:flex; align-items:center; gap:12px; margin:20px 0; color:var(--muted); font-size:13px; }
+  .divider::before, .divider::after { content:''; flex:1; height:1px; background:var(--border); }
+  input {
+    width:100%; padding:12px 14px; border-radius:10px; border:1px solid var(--border);
+    background:#0f1912; color:var(--text); font-size:14px; margin-bottom:12px;
+  }
+  input:focus { outline:none; border-color:var(--accent); }
+  button.primary {
+    width:100%; padding:12px; border:none; border-radius:10px; background:var(--accent);
+    color:#06120c; font-weight:700; font-size:14px; cursor:pointer;
+  }
+  .toggle { text-align:center; margin-top:16px; font-size:13px; color:var(--muted); }
+  .toggle a { color:var(--accent); cursor:pointer; text-decoration:none; }
+  .err { background:#3a1414; color:#ff9a9a; border:1px solid #5a2020; border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:16px; display:none; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand"><img src="/icon.png" alt=""><span>Mythic AI</span></div>
+    <h1 id="mode-label">Sign in to continue</h1>
+    <div class="err" id="err"></div>
+
+    <a class="google-btn" href="/api/auth/google/start" id="google-btn">
+      <svg viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.1 29.5 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.7-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.9 18.9 13 24 13c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.1 29.5 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 10-2 13.5-5.3l-6.2-5.2C29.3 35.4 26.8 36 24 36c-5.2 0-9.6-3.3-11.2-7.9l-6.5 5C9.6 39.6 16.3 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.2-4.2 5.5l6.2 5.2C40.8 36 44 30.9 44 24c0-1.3-.1-2.7-.4-3.5z"/></svg>
+      Continue with Google
+    </a>
+
+    <div class="divider" id="divider">or</div>
+
+    <input id="name" type="text" placeholder="Name" style="display:none">
+    <input id="email" type="email" placeholder="Email">
+    <input id="password" type="password" placeholder="Password">
+    <button class="primary" id="submit-btn">Sign in</button>
+
+    <div class="toggle" id="toggle-signup">Don't have an account? <a id="toggle-link">Sign up</a></div>
+  </div>
+<script>
+  let mode = 'login';
+  const els = {
+    label: document.getElementById('mode-label'),
+    name: document.getElementById('name'),
+    email: document.getElementById('email'),
+    password: document.getElementById('password'),
+    btn: document.getElementById('submit-btn'),
+    link: document.getElementById('toggle-link'),
+    toggleWrap: document.getElementById('toggle-signup'),
+    err: document.getElementById('err'),
+  };
+  function setMode(m) {
+    mode = m;
+    if (m === 'signup') {
+      els.label.textContent = 'Create your account';
+      els.name.style.display = 'block';
+      els.btn.textContent = 'Create account';
+      els.toggleWrap.innerHTML = 'Already have an account? <a id="toggle-link">Sign in</a>';
+    } else {
+      els.label.textContent = 'Sign in to continue';
+      els.name.style.display = 'none';
+      els.btn.textContent = 'Sign in';
+      els.toggleWrap.innerHTML = 'Don\\'t have an account? <a id="toggle-link">Sign up</a>';
+    }
+    document.getElementById('toggle-link').onclick = () => setMode(mode === 'login' ? 'signup' : 'login');
+  }
+  document.getElementById('toggle-link').onclick = () => setMode('signup');
+
+  const clientId = localStorage.getItem('mythic_client_id') || '';
+
+  els.btn.onclick = async () => {
+    els.err.style.display = 'none';
+    const body = { email: els.email.value.trim(), password: els.password.value };
+    if (mode === 'signup') body.name = els.name.value.trim();
+    try {
+      const r = await fetch(mode === 'signup' ? '/api/auth/signup' : '/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Client-Id': clientId },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (!r.ok) { els.err.textContent = j.error || 'Something went wrong.'; els.err.style.display = 'block'; return; }
+      window.location.href = '/';
+    } catch (e) {
+      els.err.textContent = 'Network error — please try again.';
+      els.err.style.display = 'block';
+    }
+  };
+
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('error')) {
+    els.err.textContent = 'Google sign-in failed — please try again.';
+    els.err.style.display = 'block';
+  }
+
+  // Hide the Google button (and the "or" divider) entirely if the server
+  // doesn't have GOOGLE_CLIENT_ID/SECRET configured yet, instead of
+  // showing a button that just leads to an error page.
+  fetch('/api/auth/config').then(r => r.json()).then(cfg => {
+    if (!cfg.google_enabled) {
+      document.getElementById('google-btn').style.display = 'none';
+      document.getElementById('divider').style.display = 'none';
+    }
+  }).catch(() => {});
+</script>
+</body>
+</html>"""
+
+
+@app.route("/api/auth/config", methods=["GET"])
+def api_auth_config():
+    """Public, unauthenticated — lets the login page know whether to show
+    the Google button at all, instead of showing one that just errors out
+    when GOOGLE_CLIENT_ID/SECRET aren't set yet."""
+    return jsonify({"google_enabled": bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)})
+
+
+@app.route("/login", methods=["GET"])
+def login_page():
+    if session.get("authenticated") and session.get("user_id"):
+        return redirect("/")
+    return Response(_LOGIN_PAGE_HTML, mimetype="text/html")
+
 
 # --- Public API keys ("aarav-...") --------------------------------------------
 # Lets other apps/people call YOUR Mythic AI like a hosted API (OpenAI-style),
@@ -3774,7 +4134,16 @@ button {
         init.headers = new Headers(init.headers || {});
         init.headers.set('X-Client-Id', cid);
       }
-      return _origFetch(input, init);
+      return _origFetch(input, init).then(resp => {
+        // Session isn't authenticated (expired, logged out elsewhere, etc.)
+        // — bounce to the login screen instead of leaving the app stuck on
+        // a silent 401. Skip this for the auth endpoints themselves so the
+        // login page's own fetch calls can show its own inline error UI.
+        if (resp.status === 401 && url.startsWith('/api/') && !url.startsWith('/api/auth/')) {
+          window.location.href = '/login';
+        }
+        return resp;
+      });
     };
   } catch (e) {
     // localStorage unavailable (rare, e.g. some locked-down browser modes) —
@@ -10698,14 +11067,14 @@ def api_invite_link():
 def account_link_landing(token):
     # Opens the ONE specific account this token belongs to — created the
     # first time that account visited /api/invite-link. Unknown/invalid
-    # tokens just fall through to a normal fresh anonymous session rather
-    # than erroring, so a broken/copied-wrong link still lands somewhere
-    # usable instead of a dead page.
+    # tokens fall through to the login page rather than erroring.
     user_id = resolve_account_token(token)
     if user_id:
         session["user_id"] = user_id
+        session["authenticated"] = True
         session.permanent = True
-    return render_page()
+        return render_page()
+    return redirect("/login")
 
 
 @app.route("/legacy-invite/<code>")
@@ -10715,6 +11084,7 @@ def invite_landing(code):
     # but no longer surfaced anywhere in the UI. The 🔗 button now issues
     # the per-account /invite/<token> links above instead.
     session["user_id"] = get_or_create_owner_id()
+    session["authenticated"] = True
     session.permanent = True
     return render_page()
 
@@ -10754,6 +11124,7 @@ def claim_owner(secret):
             "too (any fixed string, e.g. a UUID), then reload this page.",
             mimetype="text/plain"), 400
     session["user_id"] = _OWNER_USER_ID_ENV
+    session["authenticated"] = True
     session.permanent = True
     return Response(
         "You're now recognized as the account owner on this browser. "
