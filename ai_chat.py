@@ -3819,13 +3819,20 @@ PAGE = r"""<!DOCTYPE html>
         <button id="bookmarks-btn">🔖 Bookmarks</button>
         <button id="stats-btn">📊 Stats</button>
       </div>
-      <button id="sidebar-profile" type="button" title="Your profile — click to edit">
-        <span id="sidebar-profile-avatar" aria-hidden="true"></span>
-        <span id="sidebar-profile-text">
-          <span id="sidebar-profile-name">Guest</span>
-          <span id="sidebar-profile-sub">Your profile</span>
-        </span>
-      </button>
+      <div id="sidebar-profile-row" style="display:flex;align-items:center;gap:6px;width:100%;">
+        <button id="sidebar-profile" type="button" title="Your profile — click to edit" style="flex:1;min-width:0;">
+          <span id="sidebar-profile-avatar" aria-hidden="true"></span>
+          <span id="sidebar-profile-text">
+            <span id="sidebar-profile-name">Guest</span>
+            <span id="sidebar-profile-sub" style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;max-width:140px;">Your profile</span>
+          </span>
+        </button>
+        <button id="sidebar-logout-btn" title="Sign out" style="
+          flex-shrink:0;background:none;border:1px solid var(--border);border-radius:8px;
+          padding:7px 9px;cursor:pointer;color:var(--muted);font-size:13px;line-height:1;
+          display:none;transition:background .15s,color .15s;
+        " aria-label="Sign out">⎋</button>
+      </div>
       <div id="sidebar-byline">Mythic AI &middot; by Aarav Singh</div>
     </div>
   </div>
@@ -5963,15 +5970,30 @@ if (!localStorage.getItem('mythic_name_prompted')) {
 // ── Sidebar profile row (bottom of sidebar) ─────────────────────────────
 // Source of truth: getUserName() / mythic_user_name and getUserAvatar() /
 // mythic_user_avatar in localStorage — same values shown in the profile modal.
+// Auth email is fetched from /api/auth/me and shown as the sub-label.
 const sidebarProfileBtn    = document.getElementById('sidebar-profile');
 const sidebarProfileAvatar = document.getElementById('sidebar-profile-avatar');
 const sidebarProfileName   = document.getElementById('sidebar-profile-name');
+const sidebarProfileSub    = document.getElementById('sidebar-profile-sub');
+const sidebarLogoutBtn     = document.getElementById('sidebar-logout-btn');
 
-function _renderSidebarProfile() {
+function _renderSidebarProfile(authEmail) {
   if (!sidebarProfileAvatar || !sidebarProfileName) return;
   const name = getUserName();
   const display = name || 'Guest';
   sidebarProfileName.textContent = display;
+
+  // Show email as sub-label when logged in
+  if (sidebarProfileSub) {
+    sidebarProfileSub.textContent = authEmail || 'Your profile';
+    sidebarProfileSub.title = authEmail || '';
+  }
+
+  // Show logout button only when authenticated
+  if (sidebarLogoutBtn) {
+    sidebarLogoutBtn.style.display = authEmail ? 'flex' : 'none';
+  }
+
   const photo = getUserAvatar();
   if (photo) {
     sidebarProfileAvatar.innerHTML = '<img src="' + photo + '" alt="">';
@@ -5982,8 +6004,50 @@ function _renderSidebarProfile() {
   sidebarProfileAvatar.setAttribute('role', 'img');
   sidebarProfileAvatar.setAttribute('aria-label', display + "'s avatar");
 }
+
+// Fetch logged-in user info from server and populate profile row
+(async function _initAuthProfile() {
+  try {
+    const r = await fetch('/api/auth/me');
+    if (!r.ok) { _renderSidebarProfile(null); return; }
+    const u = await r.json();
+    if (u.authenticated) {
+      // If server knows the name and local storage is empty, pre-fill it
+      if (u.name && !getUserName()) {
+        localStorage.setItem('mythic_user_name', u.name);
+      }
+      _renderSidebarProfile(u.email || null);
+    } else {
+      _renderSidebarProfile(null);
+    }
+  } catch(e) {
+    _renderSidebarProfile(null);
+  }
+})();
+
+// Logout button
+if (sidebarLogoutBtn) {
+  sidebarLogoutBtn.addEventListener('mouseenter', () => {
+    sidebarLogoutBtn.style.background = 'rgba(239,68,68,.12)';
+    sidebarLogoutBtn.style.color = '#ef4444';
+    sidebarLogoutBtn.style.borderColor = '#ef4444';
+  });
+  sidebarLogoutBtn.addEventListener('mouseleave', () => {
+    sidebarLogoutBtn.style.background = 'none';
+    sidebarLogoutBtn.style.color = 'var(--muted)';
+    sidebarLogoutBtn.style.borderColor = 'var(--border)';
+  });
+  sidebarLogoutBtn.addEventListener('click', async () => {
+    sidebarLogoutBtn.textContent = '…';
+    sidebarLogoutBtn.disabled = true;
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch(e) {}
+    window.location.href = '/login';
+  });
+}
+
 if (sidebarProfileBtn) sidebarProfileBtn.addEventListener('click', openNameModal);
-_renderSidebarProfile();
 
 if (isMobile()) sidebar.classList.add('hidden');
 newChatBtn.addEventListener('click', startNewChat);
