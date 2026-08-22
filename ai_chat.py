@@ -1292,16 +1292,24 @@ def _get_otp_row(email):
 
 
 def _upsert_otp_row(row):
+    """Returns True/False so the caller can tell the requester if the code
+    genuinely got saved, instead of always claiming success even when the
+    Supabase write silently failed (e.g. missing table grants)."""
     if SUPABASE_URL:
         try:
             headers = {**sb_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"}
-            requests.post(sb("otp_codes"), headers=headers, json=row, timeout=10)
+            r = requests.post(sb("otp_codes"), headers=headers, json=row, timeout=10)
+            if r.status_code not in (200, 201, 204):
+                print(f"[Supabase] upsert_otp_row failed: HTTP {r.status_code} — {r.text[:300]}")
+                return False
+            return True
         except Exception as e:
-            print(f"[Supabase] upsert_otp_row failed: {e}")
-        return
+            print(f"[Supabase] upsert_otp_row exception: {e}")
+            return False
     store = _load_otp_store_file()
     store[row["email"]] = row
     _save_otp_store_file(store)
+    return True
 
 
 def _delete_otp_row(email):
@@ -1353,16 +1361,22 @@ def api_auth_otp_request():
         return jsonify({"error": f"Please wait {wait}s before requesting another code."}), 429
 
     code = f"{secrets.randbelow(1000000):06d}"
+
+    saved = _upsert_otp_row({
+        "email": email, "code": code,
+        "expires_at": now + _OTP_TTL_SECONDS,
+        "attempts": 0, "last_sent_at": now,
+    })
+    if not saved:
+        return jsonify({"error": "The server couldn't save the code (storage error). "
+                                  "If this keeps happening, the site owner needs to check "
+                                  "the database configuration."}), 500
+
     if not _send_otp_email(email, code):
         return jsonify({"error": "Couldn't send the code — email sending isn't configured on "
                                   "the server yet. Try 'Continue with Google' instead, or "
                                   "contact the site owner."}), 500
 
-    _upsert_otp_row({
-        "email": email, "code": code,
-        "expires_at": now + _OTP_TTL_SECONDS,
-        "attempts": 0, "last_sent_at": now,
-    })
     return jsonify({"status": "sent"})
 
 
