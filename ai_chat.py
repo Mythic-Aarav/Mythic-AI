@@ -1034,7 +1034,7 @@ _USERS_FILE = _os.path.join(_DATA_DIR, "users.json")
 _users_lock = threading.Lock()
 
 
-def _load_users_store():
+def _load_users_store_file():
     with _users_lock:
         if _os.path.exists(_USERS_FILE):
             try:
@@ -1045,7 +1045,7 @@ def _load_users_store():
         return {"by_id": {}, "by_email": {}, "by_google_sub": {}}
 
 
-def _save_users_store(store):
+def _save_users_store_file(store):
     with _users_lock:
         try:
             with open(_USERS_FILE, "w", encoding="utf-8") as f:
@@ -1054,14 +1054,114 @@ def _save_users_store(store):
             print(f"[users] failed to save: {e}")
 
 
-# Email validation — intentionally provider-agnostic. Accepts any syntactically
-# valid address regardless of domain: Gmail, Yahoo, Outlook, iCloud, Proton,
-# Zoho, custom business/school domains, .in, .edu, .co.uk — everything.
-# No domain allowlist is used; the regex only rejects obviously malformed input
-# (no @, multiple @, whitespace inside, missing domain/TLD).
-_EMAIL_RE = re.compile(
-    r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$"
-)
+# --- Users: Supabase-backed when configured, local JSON file otherwise ------
+# IMPORTANT: on Vercel specifically, the local-file fallback does NOT persist
+# reliably (see IS_SERVERLESS notes above — /tmp is wiped on every cold start
+# and isn't shared across instances). Now that accounts hold real passwords,
+# set SUPABASE_URL + SUPABASE_KEY and create this table before relying on
+# Vercel in production:
+#
+#   create table users (
+#     user_id text primary key,
+#     email text unique not null,
+#     name text,
+#     picture text,
+#     password_hash text,
+#     google_sub text unique,
+#     created_at double precision
+#   );
+#
+# (Supabase's REST API — PostgREST — is what sb()/sb_headers() below talk to;
+# no extra Python client library needed.)
+
+def get_user_by_id(user_id):
+    if not user_id:
+        return None
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"users?user_id=eq.{user_id}"), headers=sb_headers(), timeout=10)
+            if r.status_code == 200 and r.json():
+                return r.json()[0]
+        except Exception as e:
+            print(f"[Supabase] get_user_by_id failed: {e}")
+        return None
+    return _load_users_store_file()["by_id"].get(user_id)
+
+
+def get_user_by_email(email):
+    if not email:
+        return None
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"users?email=eq.{email}"), headers=sb_headers(), timeout=10)
+            if r.status_code == 200 and r.json():
+                return r.json()[0]
+        except Exception as e:
+            print(f"[Supabase] get_user_by_email failed: {e}")
+        return None
+    store = _load_users_store_file()
+    uid = store["by_email"].get(email)
+    return store["by_id"].get(uid) if uid else None
+
+
+def get_user_by_google_sub(google_sub):
+    if not google_sub:
+        return None
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"users?google_sub=eq.{google_sub}"), headers=sb_headers(), timeout=10)
+            if r.status_code == 200 and r.json():
+                return r.json()[0]
+        except Exception as e:
+            print(f"[Supabase] get_user_by_google_sub failed: {e}")
+        return None
+    store = _load_users_store_file()
+    uid = store["by_google_sub"].get(google_sub)
+    return store["by_id"].get(uid) if uid else None
+
+
+def create_user(record):
+    """record must include user_id, email; may include name, picture,
+    password_hash, google_sub, created_at."""
+    record.setdefault("created_at", time.time())
+    if SUPABASE_URL:
+        try:
+            r = requests.post(sb("users"), headers=sb_headers(), json=record, timeout=10)
+            if r.status_code not in (200, 201):
+                print(f"[Supabase] create_user failed: HTTP {r.status_code} — {r.text[:300]}")
+        except Exception as e:
+            print(f"[Supabase] create_user exception: {e}")
+        return record
+    store = _load_users_store_file()
+    store["by_id"][record["user_id"]] = record
+    store["by_email"][record["email"]] = record["user_id"]
+    if record.get("google_sub"):
+        store["by_google_sub"][record["google_sub"]] = record["user_id"]
+    _save_users_store_file(store)
+    return record
+
+
+def update_user(user_id, fields):
+    if SUPABASE_URL:
+        try:
+            r = requests.patch(sb(f"users?user_id=eq.{user_id}"), headers=sb_headers(), json=fields, timeout=10)
+            if r.status_code not in (200, 204):
+                print(f"[Supabase] update_user failed: HTTP {r.status_code} — {r.text[:300]}")
+        except Exception as e:
+            print(f"[Supabase] update_user exception: {e}")
+        return
+    store = _load_users_store_file()
+    user = store["by_id"].get(user_id)
+    if not user:
+        return
+    user.update(fields)
+    if fields.get("google_sub"):
+        store["by_google_sub"][fields["google_sub"]] = user_id
+    _save_users_store_file(store)
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 
 
 def _pending_local_id():
@@ -1095,8 +1195,7 @@ def api_auth_me():
     screen or the app shell."""
     if not session.get("authenticated") or not session.get("user_id"):
         return jsonify({"authenticated": False})
-    store = _load_users_store()
-    u = store["by_id"].get(session["user_id"], {})
+    u = get_user_by_id(session["user_id"]) or {}
     return jsonify({
         "authenticated": True,
         "email": u.get("email"),
@@ -1111,63 +1210,27 @@ def api_auth_logout():
     return jsonify({"status": "ok"})
 
 
-def _sb_upsert_user(user_record: dict):
-    """Sync a user record to Supabase `users` table (best-effort — never
-    crashes the caller if Supabase is down or not configured)."""
-    if not SUPABASE_URL:
-        return
-    try:
-        payload = {
-            "user_id":       user_record.get("user_id"),
-            "email":         user_record.get("email"),
-            "name":          user_record.get("name"),
-            "picture":       user_record.get("picture"),
-            "google_sub":    user_record.get("google_sub"),
-            "created_at":    user_record.get("created_at"),
-            # Never store the raw hash in Supabase — use the local file for
-            # local-auth credential checks; Supabase row is profile-only.
-        }
-        hdrs = dict(sb_headers())
-        hdrs["Prefer"] = "resolution=merge-duplicates,return=minimal"
-        requests.post(sb("users"), headers=hdrs, json=payload, timeout=8)
-    except Exception as e:
-        print(f"[Supabase] _sb_upsert_user failed (non-fatal): {e}")
-
-
 @app.route("/api/auth/signup", methods=["POST"])
 def api_auth_signup():
     data = request.get_json(force=True) or {}
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
-    confirm = data.get("confirm_password") or ""
     name = (data.get("name") or "").strip()[:80] or email.split("@")[0]
 
-    # --- Validation ---
-    if not email:
-        return jsonify({"error": "Please enter your email address."}), 400
     if not _EMAIL_RE.match(email):
-        return jsonify({"error": "Please enter a valid email address."}), 400
+        return jsonify({"error": "Enter a valid email address."}), 400
     if len(password) < 8:
         return jsonify({"error": "Password must be at least 8 characters."}), 400
-    # Only enforce confirm_password when the client sends it (signup form always
-    # sends it; API callers that omit it skip this check for backwards compat).
-    if confirm and confirm != password:
-        return jsonify({"error": "Passwords do not match."}), 400
 
-    store = _load_users_store()
-    if email in store["by_email"]:
-        return jsonify({"error": "An account with this email already exists. Try signing in instead."}), 409
+    if get_user_by_email(email):
+        return jsonify({"error": "An account with that email already exists. Try logging in instead."}), 409
 
     user_id = _pending_local_id()
-    user_record = {
+    create_user({
         "user_id": user_id, "email": email, "name": name, "picture": None,
         "password_hash": generate_password_hash(password),
         "google_sub": None, "created_at": time.time(),
-    }
-    store["by_id"][user_id] = user_record
-    store["by_email"][email] = user_id
-    _save_users_store(store)
-    _sb_upsert_user(user_record)   # sync to Supabase (non-fatal if unavailable)
+    })
     _log_user_in(user_id)
     return jsonify({"status": "ok", "email": email, "name": name})
 
@@ -1178,219 +1241,12 @@ def api_auth_login():
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
 
-    store = _load_users_store()
-    user_id = store["by_email"].get(email)
-    user = store["by_id"].get(user_id) if user_id else None
+    user = get_user_by_email(email)
     if not user or not user.get("password_hash") or not check_password_hash(user["password_hash"], password):
         return jsonify({"error": "Incorrect email or password."}), 401
 
-    _log_user_in(user_id)
+    _log_user_in(user["user_id"])
     return jsonify({"status": "ok", "email": user["email"], "name": user["name"]})
-
-
-# --- Password reset (forgot password) ----------------------------------------
-# Stores pending reset tokens in memory + local file so they survive a single
-# worker restart. Tokens expire after 30 minutes. No email is sent by default
-# (configure RESEND_API_KEY + RESEND_FROM_EMAIL to enable actual email sending);
-# without Resend the token is returned in the JSON response for dev/testing.
-_RESET_TOKENS: dict = {}   # token -> {user_id, expires_at}
-_RESET_TOKENS_FILE = _os.path.join(_DATA_DIR, "reset_tokens.json")
-_reset_lock = threading.Lock()
-
-RESEND_API_KEY   = os.environ.get("RESEND_API_KEY", "").strip()
-RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "noreply@mythic-ai.app").strip()
-_RESET_TOKEN_TTL = 30 * 60  # 30 minutes
-
-
-def _load_reset_tokens():
-    with _reset_lock:
-        if _os.path.exists(_RESET_TOKENS_FILE):
-            try:
-                with open(_RESET_TOKENS_FILE, encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
-        return {}
-
-
-def _save_reset_tokens(data):
-    with _reset_lock:
-        try:
-            with open(_RESET_TOKENS_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-        except Exception:
-            pass
-
-
-def _send_reset_email(to_email: str, reset_url: str) -> bool:
-    """Sends password-reset email via Resend API. Returns True on success."""
-    if not RESEND_API_KEY:
-        return False
-    try:
-        resp = requests.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "from": RESEND_FROM_EMAIL,
-                "to": [to_email],
-                "subject": "Reset your Mythic AI password",
-                "html": (
-                    f"<p>Hi,</p>"
-                    f"<p>Click the link below to reset your Mythic AI password. "
-                    f"This link expires in 30 minutes.</p>"
-                    f"<p><a href='{reset_url}'>{reset_url}</a></p>"
-                    f"<p>If you didn't request this, you can ignore this email.</p>"
-                    f"<p>— Mythic AI</p>"
-                ),
-            },
-            timeout=10,
-        )
-        return resp.status_code in (200, 201)
-    except Exception as e:
-        print(f"[reset-email] failed to send to {to_email}: {e}")
-        return False
-
-
-@app.route("/api/auth/forgot-password", methods=["POST"])
-def api_auth_forgot_password():
-    """Request a password-reset link. Always returns 200 (even for unknown
-    email) so callers cannot enumerate registered accounts."""
-    data = request.get_json(force=True) or {}
-    email = (data.get("email") or "").strip().lower()
-
-    if not _EMAIL_RE.match(email):
-        return jsonify({"error": "Please enter a valid email address."}), 400
-
-    store = _load_users_store()
-    user_id = store["by_email"].get(email)
-    if not user_id:
-        # Don't reveal whether the account exists
-        return jsonify({"status": "ok", "message": "If that email is registered, a reset link has been sent."})
-
-    # Purge expired tokens, then mint a new one
-    tokens = _load_reset_tokens()
-    now = time.time()
-    tokens = {t: v for t, v in tokens.items() if v.get("expires_at", 0) > now}
-
-    token = secrets.token_urlsafe(32)
-    tokens[token] = {"user_id": user_id, "expires_at": now + _RESET_TOKEN_TTL}
-    _save_reset_tokens(tokens)
-
-    reset_url = get_public_origin() + f"/reset-password?token={token}"
-    sent = _send_reset_email(email, reset_url)
-
-    # In dev (no Resend key) return the token so it can be tested directly
-    resp = {"status": "ok", "message": "If that email is registered, a reset link has been sent."}
-    if not sent:
-        resp["_dev_reset_url"] = reset_url   # only present when email not configured
-    return jsonify(resp)
-
-
-@app.route("/api/auth/reset-password", methods=["POST"])
-def api_auth_reset_password():
-    """Consume a reset token and set a new password."""
-    data = request.get_json(force=True) or {}
-    token = (data.get("token") or "").strip()
-    new_password = data.get("password") or ""
-
-    if not token:
-        return jsonify({"error": "Reset token is missing."}), 400
-    if len(new_password) < 8:
-        return jsonify({"error": "Password must be at least 8 characters."}), 400
-
-    tokens = _load_reset_tokens()
-    entry = tokens.get(token)
-    if not entry or entry.get("expires_at", 0) < time.time():
-        return jsonify({"error": "This reset link has expired or is invalid. Please request a new one."}), 400
-
-    user_id = entry["user_id"]
-    store = _load_users_store()
-    user = store["by_id"].get(user_id)
-    if not user:
-        return jsonify({"error": "Account not found."}), 404
-
-    user["password_hash"] = generate_password_hash(new_password)
-    _save_users_store(store)
-
-    # Invalidate the token (single use)
-    del tokens[token]
-    _save_reset_tokens(tokens)
-
-    return jsonify({"status": "ok", "message": "Password updated. You can now sign in."})
-
-
-@app.route("/reset-password", methods=["GET"])
-def reset_password_page():
-    """Simple standalone page that reads ?token= and lets the user pick a
-    new password, then POSTs to /api/auth/reset-password."""
-    token = request.args.get("token", "")
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Reset password · Mythic AI</title>
-<link rel="icon" type="image/png" href="/icon.png">
-<style>
-  :root{{--bg:#0c1410;--panel:#141f19;--border:#2a3a30;--text:#f5f3ea;--muted:#9aa89e;--accent:#10a37f;}}
-  *{{box-sizing:border-box;}}
-  body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding:24px;}}
-  .card{{width:100%;max-width:380px;background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:32px 28px;}}
-  .brand{{display:flex;align-items:center;gap:10px;justify-content:center;margin-bottom:24px;}}
-  .brand img{{width:32px;height:32px;border-radius:8px;}}
-  .brand span{{font-size:20px;font-weight:700;}}
-  h1{{font-size:16px;font-weight:500;color:var(--muted);text-align:center;margin:0 0 24px;}}
-  input{{width:100%;padding:12px 14px;border-radius:10px;border:1px solid var(--border);
-    background:#0f1912;color:var(--text);font-size:14px;margin-bottom:12px;}}
-  input:focus{{outline:none;border-color:var(--accent);}}
-  button{{width:100%;padding:12px;border:none;border-radius:10px;background:var(--accent);
-    color:#06120c;font-weight:700;font-size:14px;cursor:pointer;}}
-  .msg{{border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:16px;display:none;}}
-  .err{{background:#3a1414;color:#ff9a9a;border:1px solid #5a2020;}}
-  .ok{{background:#143a1e;color:#6ef0a0;border:1px solid #205a30;}}
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="brand"><img src="/icon.png" alt=""><span>Mythic AI</span></div>
-  <h1>Create new password</h1>
-  <div class="msg err" id="err"></div>
-  <div class="msg ok" id="ok"></div>
-  <input id="pw" type="password" placeholder="New password (min. 8 characters)">
-  <input id="pw2" type="password" placeholder="Confirm new password" style="margin-bottom:20px">
-  <button id="btn">Set new password</button>
-</div>
-<script>
-  const token = {json.dumps(token)};
-  document.getElementById('btn').onclick = async () => {{
-    const pw = document.getElementById('pw').value;
-    const pw2 = document.getElementById('pw2').value;
-    const err = document.getElementById('err');
-    const ok  = document.getElementById('ok');
-    err.style.display = ok.style.display = 'none';
-    if (pw.length < 8) {{ err.textContent = 'Password must be at least 8 characters.'; err.style.display = 'block'; return; }}
-    if (pw !== pw2) {{ err.textContent = 'Passwords do not match.'; err.style.display = 'block'; return; }}
-    try {{
-      const r = await fetch('/api/auth/reset-password', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{token, password: pw}}),
-      }});
-      const j = await r.json();
-      if (!r.ok) {{ err.textContent = j.error || 'Something went wrong.'; err.style.display = 'block'; return; }}
-      ok.textContent = 'Password updated! Redirecting to sign in…';
-      ok.style.display = 'block';
-      document.getElementById('btn').disabled = true;
-      setTimeout(() => window.location.href = '/login', 2000);
-    }} catch(e) {{
-      err.textContent = 'Network error — please try again.'; err.style.display = 'block';
-    }}
-  }};
-</script>
-</body>
-</html>"""
-    return Response(html, mimetype="text/html")
 
 
 @app.route("/api/auth/google/start", methods=["GET"])
@@ -1459,31 +1315,30 @@ def api_auth_google_callback():
     if not google_sub or not email:
         return redirect("/login?error=incomplete_google_profile")
 
-    store = _load_users_store()
-    user_id = store["by_google_sub"].get(google_sub) or store["by_email"].get(email)
+    user = get_user_by_google_sub(google_sub) or get_user_by_email(email)
 
-    if user_id and user_id in store["by_id"]:
+    if user:
         # Existing account (signed up with Google before, or previously
         # with email/password using the same address) — link if needed.
-        user = store["by_id"][user_id]
+        user_id = user["user_id"]
+        updates = {}
         if not user.get("google_sub"):
-            user["google_sub"] = google_sub
-            store["by_google_sub"][google_sub] = user_id
-        user["picture"] = profile.get("picture") or user.get("picture")
-        user["name"] = user.get("name") or profile.get("name") or email.split("@")[0]
+            updates["google_sub"] = google_sub
+        if profile.get("picture"):
+            updates["picture"] = profile.get("picture")
+        if not user.get("name") and profile.get("name"):
+            updates["name"] = profile.get("name")
+        if updates:
+            update_user(user_id, updates)
     else:
         user_id = _pending_local_id()
-        store["by_id"][user_id] = {
+        create_user({
             "user_id": user_id, "email": email,
             "name": profile.get("name") or email.split("@")[0],
             "picture": profile.get("picture"), "password_hash": None,
             "google_sub": google_sub, "created_at": time.time(),
-        }
-        store["by_email"][email] = user_id
-        store["by_google_sub"][google_sub] = user_id
+        })
 
-    _save_users_store(store)
-    _sb_upsert_user(store["by_id"][user_id])   # sync to Supabase (non-fatal)
     _log_user_in(user_id)
     return redirect("/")
 
@@ -1518,35 +1373,23 @@ _LOGIN_PAGE_HTML = """<!DOCTYPE html>
   .divider::before, .divider::after { content:''; flex:1; height:1px; background:var(--border); }
   input {
     width:100%; padding:12px 14px; border-radius:10px; border:1px solid var(--border);
-    background:#0f1912; color:var(--text); font-size:16px; margin-bottom:12px;
+    background:#0f1912; color:var(--text); font-size:14px; margin-bottom:12px;
   }
   input:focus { outline:none; border-color:var(--accent); }
   button.primary {
     width:100%; padding:12px; border:none; border-radius:10px; background:var(--accent);
-    color:#06120c; font-weight:700; font-size:14px; cursor:pointer; margin-top:4px;
+    color:#06120c; font-weight:700; font-size:14px; cursor:pointer;
   }
-  button.primary:disabled { opacity:.6; cursor:not-allowed; }
   .toggle { text-align:center; margin-top:16px; font-size:13px; color:var(--muted); }
   .toggle a { color:var(--accent); cursor:pointer; text-decoration:none; }
-  .forgot-wrap { text-align:right; margin-top:-6px; margin-bottom:12px; }
-  .forgot-wrap a { font-size:12px; color:var(--muted); cursor:pointer; text-decoration:none; }
-  .forgot-wrap a:hover { color:var(--accent); }
   .err { background:#3a1414; color:#ff9a9a; border:1px solid #5a2020; border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:16px; display:none; }
-  .ok  { background:#143a1e; color:#6ef0a0; border:1px solid #205a30; border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:16px; display:none; }
-  /* Forgot-password overlay */
-  .overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; align-items:center; justify-content:center; padding:24px; }
-  .overlay.active { display:flex; }
-  .overlay-card { background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:28px 24px; width:100%; max-width:340px; }
-  .overlay-card h2 { font-size:15px; font-weight:600; margin:0 0 6px; }
-  .overlay-card p { font-size:13px; color:var(--muted); margin:0 0 16px; }
 </style>
 </head>
 <body>
   <div class="card">
     <div class="brand"><img src="/icon.png" alt=""><span>Mythic AI</span></div>
-    <h1 id="mode-label">Welcome back to Mythic AI</h1>
+    <h1 id="mode-label">Sign in to continue</h1>
     <div class="err" id="err"></div>
-    <div class="ok"  id="ok"></div>
 
     <a class="google-btn" href="/api/auth/google/start" id="google-btn">
       <svg viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.1 29.5 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.7-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.9 18.9 13 24 13c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.1 29.5 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 10-2 13.5-5.3l-6.2-5.2C29.3 35.4 26.8 36 24 36c-5.2 0-9.6-3.3-11.2-7.9l-6.5 5C9.6 39.6 16.3 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.2-4.2 5.5l6.2 5.2C40.8 36 44 30.9 44 24c0-1.3-.1-2.7-.4-3.5z"/></svg>
@@ -1555,104 +1398,48 @@ _LOGIN_PAGE_HTML = """<!DOCTYPE html>
 
     <div class="divider" id="divider">or</div>
 
-    <!-- Signup-only fields (hidden in login mode) -->
-    <input id="name" type="text" placeholder="Name" style="display:none" autocomplete="name">
-
-    <input id="email" type="email" placeholder="Email" autocomplete="email">
-    <input id="password" type="password" placeholder="Password" autocomplete="current-password">
-
-    <!-- Confirm password — shown only in signup mode -->
-    <input id="confirm-password" type="password" placeholder="Confirm password" style="display:none" autocomplete="new-password">
-
-    <!-- Forgot password link — shown only in login mode -->
-    <div class="forgot-wrap" id="forgot-wrap">
-      <a id="forgot-link">Forgot password?</a>
-    </div>
-
+    <input id="name" type="text" placeholder="Name" style="display:none">
+    <input id="email" type="email" placeholder="Email">
+    <input id="password" type="password" placeholder="Password">
     <button class="primary" id="submit-btn">Sign in</button>
 
     <div class="toggle" id="toggle-signup">Don't have an account? <a id="toggle-link">Sign up</a></div>
   </div>
-
-  <!-- Forgot-password overlay -->
-  <div class="overlay" id="forgot-overlay">
-    <div class="overlay-card">
-      <h2>Reset your password</h2>
-      <p>Enter your email and we'll send you a reset link.</p>
-      <div class="err" id="fp-err"></div>
-      <div class="ok"  id="fp-ok"></div>
-      <input id="fp-email" type="email" placeholder="Email" autocomplete="email">
-      <button class="primary" id="fp-btn" style="margin-top:4px">Send reset link</button>
-      <div class="toggle" style="margin-top:12px"><a id="fp-cancel">Cancel</a></div>
-    </div>
-  </div>
-
 <script>
   let mode = 'login';
   const els = {
-    label:    document.getElementById('mode-label'),
-    name:     document.getElementById('name'),
-    email:    document.getElementById('email'),
+    label: document.getElementById('mode-label'),
+    name: document.getElementById('name'),
+    email: document.getElementById('email'),
     password: document.getElementById('password'),
-    confirm:  document.getElementById('confirm-password'),
-    btn:      document.getElementById('submit-btn'),
+    btn: document.getElementById('submit-btn'),
+    link: document.getElementById('toggle-link'),
     toggleWrap: document.getElementById('toggle-signup'),
-    forgotWrap: document.getElementById('forgot-wrap'),
-    err:  document.getElementById('err'),
-    ok:   document.getElementById('ok'),
+    err: document.getElementById('err'),
   };
-
-  function showErr(msg) { els.err.textContent = msg; els.err.style.display = 'block'; els.ok.style.display = 'none'; }
-  function showOk(msg)  { els.ok.textContent  = msg; els.ok.style.display  = 'block'; els.err.style.display = 'none'; }
-  function clearMsg()   { els.err.style.display = els.ok.style.display = 'none'; }
-
   function setMode(m) {
     mode = m;
-    clearMsg();
     if (m === 'signup') {
-      els.label.textContent        = 'Create your account';
-      els.name.style.display       = 'block';
-      els.confirm.style.display    = 'block';
-      els.forgotWrap.style.display = 'none';
-      els.btn.textContent          = 'Create account';
-      els.password.autocomplete    = 'new-password';
-      els.toggleWrap.innerHTML     = 'Already have an account? <a id="toggle-link">Sign in</a>';
+      els.label.textContent = 'Create your account';
+      els.name.style.display = 'block';
+      els.btn.textContent = 'Create account';
+      els.toggleWrap.innerHTML = 'Already have an account? <a id="toggle-link">Sign in</a>';
     } else {
-      els.label.textContent        = 'Welcome back to Mythic AI';
-      els.name.style.display       = 'none';
-      els.confirm.style.display    = 'none';
-      els.forgotWrap.style.display = 'block';
-      els.btn.textContent          = 'Sign in';
-      els.password.autocomplete    = 'current-password';
-      els.toggleWrap.innerHTML     = "Don't have an account? <a id='toggle-link'>Sign up</a>";
+      els.label.textContent = 'Sign in to continue';
+      els.name.style.display = 'none';
+      els.btn.textContent = 'Sign in';
+      els.toggleWrap.innerHTML = 'Don\\'t have an account? <a id="toggle-link">Sign up</a>';
     }
     document.getElementById('toggle-link').onclick = () => setMode(mode === 'login' ? 'signup' : 'login');
   }
   document.getElementById('toggle-link').onclick = () => setMode('signup');
 
-  // Simple client-side email format check (mirrors server _EMAIL_RE)
-  function validEmail(v) { return new RegExp('^[^ @]+@[^ @]+[.][^ @]{2,}$').test(v.trim()); }
-
   const clientId = localStorage.getItem('mythic_client_id') || '';
 
   els.btn.onclick = async () => {
-    clearMsg();
-    const email    = els.email.value.trim();
-    const password = els.password.value;
-
-    if (!email)           { showErr('Please enter your email address.'); return; }
-    if (!validEmail(email)) { showErr('Please enter a valid email address.'); return; }
-    if (!password)        { showErr('Please enter your password.'); return; }
-
-    if (mode === 'signup') {
-      if (password.length < 8) { showErr('Password must be at least 8 characters.'); return; }
-      const confirm = els.confirm.value;
-      if (confirm !== password) { showErr('Passwords do not match.'); return; }
-    }
-
-    els.btn.disabled = true;
-    const body = { email, password };
-    if (mode === 'signup') { body.name = els.name.value.trim(); body.confirm_password = els.confirm.value; }
+    els.err.style.display = 'none';
+    const body = { email: els.email.value.trim(), password: els.password.value };
+    if (mode === 'signup') body.name = els.name.value.trim();
     try {
       const r = await fetch(mode === 'signup' ? '/api/auth/signup' : '/api/auth/login', {
         method: 'POST',
@@ -1660,59 +1447,23 @@ _LOGIN_PAGE_HTML = """<!DOCTYPE html>
         body: JSON.stringify(body),
       });
       const j = await r.json();
-      if (!r.ok) { showErr(j.error || 'Something went wrong.'); els.btn.disabled = false; return; }
+      if (!r.ok) { els.err.textContent = j.error || 'Something went wrong.'; els.err.style.display = 'block'; return; }
       window.location.href = '/';
     } catch (e) {
-      showErr('Network error — please try again.');
-      els.btn.disabled = false;
-    }
-  };
-
-  // Allow Enter key to submit
-  document.addEventListener('keydown', e => { if (e.key === 'Enter') els.btn.click(); });
-
-  // Forgot-password flow
-  document.getElementById('forgot-link').onclick = () => {
-    document.getElementById('fp-email').value = els.email.value;
-    document.getElementById('fp-err').style.display = 'none';
-    document.getElementById('fp-ok').style.display  = 'none';
-    document.getElementById('forgot-overlay').classList.add('active');
-  };
-  document.getElementById('fp-cancel').onclick = () =>
-    document.getElementById('forgot-overlay').classList.remove('active');
-
-  document.getElementById('fp-btn').onclick = async () => {
-    const fpEmail = document.getElementById('fp-email').value.trim();
-    const fpErr   = document.getElementById('fp-err');
-    const fpOk    = document.getElementById('fp-ok');
-    fpErr.style.display = fpOk.style.display = 'none';
-    if (!validEmail(fpEmail)) { fpErr.textContent = 'Please enter a valid email address.'; fpErr.style.display = 'block'; return; }
-    const btn = document.getElementById('fp-btn');
-    btn.disabled = true;
-    try {
-      const r = await fetch('/api/auth/forgot-password', {
-        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({email: fpEmail}),
-      });
-      const j = await r.json();
-      if (!r.ok) { fpErr.textContent = j.error || 'Something went wrong.'; fpErr.style.display = 'block'; btn.disabled = false; return; }
-      fpOk.textContent = j.message || 'Reset link sent — check your inbox.';
-      fpOk.style.display = 'block';
-      // In dev, if the server returned a direct URL, show it
-      if (j._dev_reset_url) {
-        fpOk.innerHTML += '<br><small style="word-break:break-all">(dev) <a href="' + j._dev_reset_url + '" style="color:inherit">' + j._dev_reset_url + '</a></small>';
-      }
-      btn.textContent = 'Sent';
-    } catch(e) {
-      fpErr.textContent = 'Network error — please try again.'; fpErr.style.display = 'block'; btn.disabled = false;
+      els.err.textContent = 'Network error — please try again.';
+      els.err.style.display = 'block';
     }
   };
 
   const params = new URLSearchParams(window.location.search);
-  if (params.get('error')) { showErr('Google sign-in failed — please try again.'); }
-  if (params.get('mode') === 'signup') { setMode('signup'); }
+  if (params.get('error')) {
+    els.err.textContent = 'Google sign-in failed — please try again.';
+    els.err.style.display = 'block';
+  }
 
   // Hide the Google button (and the "or" divider) entirely if the server
-  // doesn't have GOOGLE_CLIENT_ID/SECRET configured yet.
+  // doesn't have GOOGLE_CLIENT_ID/SECRET configured yet, instead of
+  // showing a button that just leads to an error page.
   fetch('/api/auth/config').then(r => r.json()).then(cfg => {
     if (!cfg.google_enabled) {
       document.getElementById('google-btn').style.display = 'none';
@@ -3459,6 +3210,9 @@ PAGE = r"""<!DOCTYPE html>
   #header-menu-dropdown #clear-btn { color:#ef4444; }
   #header-menu-dropdown #clear-btn:hover { background:rgba(239,68,68,.1); }
   #header-menu-dropdown #clear-btn::before { content:"🗑"; }
+  #header-menu-dropdown #logout-btn { color:#ef4444; }
+  #header-menu-dropdown #logout-btn:hover { background:rgba(239,68,68,.1); }
+  #header-menu-dropdown #logout-btn::before { content:"🚪"; }
 
   #name-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55);
     z-index:200; align-items:center; justify-content:center; }
@@ -3819,20 +3573,13 @@ PAGE = r"""<!DOCTYPE html>
         <button id="bookmarks-btn">🔖 Bookmarks</button>
         <button id="stats-btn">📊 Stats</button>
       </div>
-      <div id="sidebar-profile-row" style="display:flex;align-items:center;gap:6px;width:100%;">
-        <button id="sidebar-profile" type="button" title="Your profile — click to edit" style="flex:1;min-width:0;">
-          <span id="sidebar-profile-avatar" aria-hidden="true"></span>
-          <span id="sidebar-profile-text">
-            <span id="sidebar-profile-name">Guest</span>
-            <span id="sidebar-profile-sub" style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;max-width:140px;">Your profile</span>
-          </span>
-        </button>
-        <button id="sidebar-logout-btn" title="Sign out" style="
-          flex-shrink:0;background:none;border:1px solid var(--border);border-radius:8px;
-          padding:7px 9px;cursor:pointer;color:var(--muted);font-size:13px;line-height:1;
-          display:none;transition:background .15s,color .15s;
-        " aria-label="Sign out">⎋</button>
-      </div>
+      <button id="sidebar-profile" type="button" title="Your profile — click to edit">
+        <span id="sidebar-profile-avatar" aria-hidden="true"></span>
+        <span id="sidebar-profile-text">
+          <span id="sidebar-profile-name">Guest</span>
+          <span id="sidebar-profile-sub">Your profile</span>
+        </span>
+      </button>
       <div id="sidebar-byline">Mythic AI &middot; by Aarav Singh</div>
     </div>
   </div>
@@ -3859,6 +3606,7 @@ PAGE = r"""<!DOCTYPE html>
             <button id="export-btn" title="Export this chat">⬇<span>Download</span></button>
             <div class="menu-divider"></div>
             <button id="clear-btn">Delete chat</button>
+            <button id="logout-btn">Log out</button>
           </div>
         </div>
       </div>
@@ -5970,30 +5718,15 @@ if (!localStorage.getItem('mythic_name_prompted')) {
 // ── Sidebar profile row (bottom of sidebar) ─────────────────────────────
 // Source of truth: getUserName() / mythic_user_name and getUserAvatar() /
 // mythic_user_avatar in localStorage — same values shown in the profile modal.
-// Auth email is fetched from /api/auth/me and shown as the sub-label.
 const sidebarProfileBtn    = document.getElementById('sidebar-profile');
 const sidebarProfileAvatar = document.getElementById('sidebar-profile-avatar');
 const sidebarProfileName   = document.getElementById('sidebar-profile-name');
-const sidebarProfileSub    = document.getElementById('sidebar-profile-sub');
-const sidebarLogoutBtn     = document.getElementById('sidebar-logout-btn');
 
-function _renderSidebarProfile(authEmail) {
+function _renderSidebarProfile() {
   if (!sidebarProfileAvatar || !sidebarProfileName) return;
   const name = getUserName();
   const display = name || 'Guest';
   sidebarProfileName.textContent = display;
-
-  // Show email as sub-label when logged in
-  if (sidebarProfileSub) {
-    sidebarProfileSub.textContent = authEmail || 'Your profile';
-    sidebarProfileSub.title = authEmail || '';
-  }
-
-  // Show logout button only when authenticated
-  if (sidebarLogoutBtn) {
-    sidebarLogoutBtn.style.display = authEmail ? 'flex' : 'none';
-  }
-
   const photo = getUserAvatar();
   if (photo) {
     sidebarProfileAvatar.innerHTML = '<img src="' + photo + '" alt="">';
@@ -6003,51 +5736,28 @@ function _renderSidebarProfile(authEmail) {
   }
   sidebarProfileAvatar.setAttribute('role', 'img');
   sidebarProfileAvatar.setAttribute('aria-label', display + "'s avatar");
+
+  // Show the actual signed-in account email under the name (falls back to
+  // the existing "Your profile" label until this resolves, so there's no
+  // layout jump / blank state on first paint).
+  const subEl = document.getElementById('sidebar-profile-sub');
+  fetch('/api/auth/me').then(r => r.json()).then(info => {
+    if (!info.authenticated) return;
+    if (subEl && info.email) subEl.textContent = info.email;
+    if (info.name && !name) sidebarProfileName.textContent = info.name;
+    if (info.picture && !photo) sidebarProfileAvatar.innerHTML = '<img src="' + info.picture + '" alt="">';
+  }).catch(() => {});
 }
+if (sidebarProfileBtn) sidebarProfileBtn.addEventListener('click', openNameModal);
+_renderSidebarProfile();
 
-// Fetch logged-in user info from server and populate profile row
-(async function _initAuthProfile() {
-  try {
-    const r = await fetch('/api/auth/me');
-    if (!r.ok) { _renderSidebarProfile(null); return; }
-    const u = await r.json();
-    if (u.authenticated) {
-      // If server knows the name and local storage is empty, pre-fill it
-      if (u.name && !getUserName()) {
-        localStorage.setItem('mythic_user_name', u.name);
-      }
-      _renderSidebarProfile(u.email || null);
-    } else {
-      _renderSidebarProfile(null);
-    }
-  } catch(e) {
-    _renderSidebarProfile(null);
-  }
-})();
-
-// Logout button
-if (sidebarLogoutBtn) {
-  sidebarLogoutBtn.addEventListener('mouseenter', () => {
-    sidebarLogoutBtn.style.background = 'rgba(239,68,68,.12)';
-    sidebarLogoutBtn.style.color = '#ef4444';
-    sidebarLogoutBtn.style.borderColor = '#ef4444';
-  });
-  sidebarLogoutBtn.addEventListener('mouseleave', () => {
-    sidebarLogoutBtn.style.background = 'none';
-    sidebarLogoutBtn.style.color = 'var(--muted)';
-    sidebarLogoutBtn.style.borderColor = 'var(--border)';
-  });
-  sidebarLogoutBtn.addEventListener('click', async () => {
-    sidebarLogoutBtn.textContent = '…';
-    sidebarLogoutBtn.disabled = true;
-    try {
-      await fetch('/api/auth/logout', { method: 'POST' });
-    } catch(e) {}
+const logoutBtn = document.getElementById('logout-btn');
+if (logoutBtn) {
+  logoutBtn.addEventListener('click', async () => {
+    try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (e) {}
     window.location.href = '/login';
   });
 }
-
-if (sidebarProfileBtn) sidebarProfileBtn.addEventListener('click', openNameModal);
 
 if (isMobile()) sidebar.classList.add('hidden');
 newChatBtn.addEventListener('click', startNewChat);
@@ -15143,7 +14853,7 @@ def _save_reminders(data):
 _MEMORY_FILE = _os.path.join(_DATA_DIR, "memories.json")
 _memory_lock = threading.Lock()
 
-def _load_memory_store():
+def _load_memory_store_file():
     with _memory_lock:
         if _os.path.exists(_MEMORY_FILE):
             try:
@@ -15153,7 +14863,7 @@ def _load_memory_store():
                 pass
         return {"entries": {}, "settings": {}}
 
-def _save_memory_store(store):
+def _save_memory_store_file(store):
     with _memory_lock:
         try:
             with open(_MEMORY_FILE, "w", encoding="utf-8") as f:
@@ -15162,9 +14872,41 @@ def _save_memory_store(store):
             print(f"[memory] failed to save: {e}")
 
 
+# --- Memory: Supabase-backed when configured, local JSON file otherwise -----
+# Tables needed on Supabase:
+#   create table memories (
+#     id text primary key, username text not null, text text not null,
+#     created_at double precision, updated_at double precision
+#   );
+#   create table memory_settings (
+#     username text primary key, enabled boolean default true
+#   );
+
 def memory_enabled_for(username):
-    store = _load_memory_store()
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"memory_settings?username=eq.{username}"), headers=sb_headers(), timeout=10)
+            if r.status_code == 200 and r.json():
+                return bool(r.json()[0].get("enabled", True))
+        except Exception as e:
+            print(f"[Supabase] memory_enabled_for failed: {e}")
+        return True  # default on if no row / lookup failed
+    store = _load_memory_store_file()
     return store.get("settings", {}).get(username, {}).get("enabled", True)
+
+
+def _list_memories(username):
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"memories?username=eq.{username}&order=created_at.asc"),
+                              headers=sb_headers(), timeout=10)
+            if r.status_code == 200:
+                return r.json()
+        except Exception as e:
+            print(f"[Supabase] list memories failed: {e}")
+        return []
+    store = _load_memory_store_file()
+    return [m for m in store.get("entries", {}).values() if m.get("username") == username]
 
 
 def get_memory_context_block(username, max_chars=1500):
@@ -15174,8 +14916,7 @@ def get_memory_context_block(username, max_chars=1500):
     append the result without an extra branch."""
     if not memory_enabled_for(username):
         return ""
-    store = _load_memory_store()
-    mine = [m for m in store.get("entries", {}).values() if m.get("username") == username]
+    mine = _list_memories(username)
     if not mine:
         return ""
     mine.sort(key=lambda m: m.get("created_at", 0))
@@ -15196,8 +14937,7 @@ def api_list_memory():
     """Optional ?q=... does a simple case-insensitive substring search."""
     username = current_username()
     q = (request.args.get("q") or "").strip().lower()
-    store = _load_memory_store()
-    mine = [m for m in store.get("entries", {}).values() if m.get("username") == username]
+    mine = _list_memories(username)
     if q:
         mine = [m for m in mine if q in m["text"].lower()]
     mine.sort(key=lambda m: m.get("created_at", 0), reverse=True)
@@ -15219,12 +14959,19 @@ def api_add_memory():
                                   "Mythic AI won't store that in long-term memory."}), 400
     mid = uuid.uuid4().hex[:12]
     username = current_username()
-    store = _load_memory_store()
-    store.setdefault("entries", {})[mid] = {
-        "id": mid, "username": username, "text": text, "created_at": time.time(),
-    }
-    _save_memory_store(store)
-    return jsonify({"memory": store["entries"][mid]})
+    entry = {"id": mid, "username": username, "text": text, "created_at": time.time()}
+    if SUPABASE_URL:
+        try:
+            r = requests.post(sb("memories"), headers=sb_headers(), json=entry, timeout=10)
+            if r.status_code not in (200, 201):
+                print(f"[Supabase] add_memory failed: HTTP {r.status_code} — {r.text[:300]}")
+        except Exception as e:
+            print(f"[Supabase] add_memory exception: {e}")
+    else:
+        store = _load_memory_store_file()
+        store.setdefault("entries", {})[mid] = entry
+        _save_memory_store_file(store)
+    return jsonify({"memory": entry})
 
 
 @app.route("/api/memory/<mid>", methods=["PUT"])
@@ -15235,13 +14982,23 @@ def api_edit_memory(mid):
     if not text:
         return jsonify({"error": "'text' is required"}), 400
     username = current_username()
-    store = _load_memory_store()
+    if SUPABASE_URL:
+        try:
+            r = requests.patch(sb(f"memories?id=eq.{mid}&username=eq.{username}"), headers=sb_headers(),
+                                json={"text": text, "updated_at": time.time()}, timeout=10)
+            if r.status_code not in (200, 204) or (r.status_code == 200 and not r.json()):
+                return jsonify({"error": "not found"}), 404
+        except Exception as e:
+            print(f"[Supabase] edit_memory exception: {e}")
+            return jsonify({"error": "storage error"}), 500
+        return jsonify({"memory": {"id": mid, "username": username, "text": text}})
+    store = _load_memory_store_file()
     entry = store.get("entries", {}).get(mid)
     if not entry or entry.get("username") != username:
         return jsonify({"error": "not found"}), 404
     entry["text"] = text
     entry["updated_at"] = time.time()
-    _save_memory_store(store)
+    _save_memory_store_file(store)
     return jsonify({"memory": entry})
 
 
@@ -15249,12 +15006,18 @@ def api_edit_memory(mid):
 @login_required
 def api_delete_memory(mid):
     username = current_username()
-    store = _load_memory_store()
+    if SUPABASE_URL:
+        try:
+            requests.delete(sb(f"memories?id=eq.{mid}&username=eq.{username}"), headers=sb_headers(), timeout=10)
+        except Exception as e:
+            print(f"[Supabase] delete_memory exception: {e}")
+        return jsonify({"status": "deleted"})
+    store = _load_memory_store_file()
     entry = store.get("entries", {}).get(mid)
     if not entry or entry.get("username") != username:
         return jsonify({"error": "not found"}), 404
     del store["entries"][mid]
-    _save_memory_store(store)
+    _save_memory_store_file(store)
     return jsonify({"status": "deleted"})
 
 
@@ -15266,21 +15029,35 @@ def api_set_memory_enabled():
     saved memories, without deleting them (an easy re-enable later)."""
     data = request.get_json(force=True) or {}
     username = current_username()
-    store = _load_memory_store()
-    store.setdefault("settings", {})[username] = {"enabled": bool(data.get("enabled", True))}
-    _save_memory_store(store)
-    return jsonify({"enabled": store["settings"][username]["enabled"]})
+    enabled = bool(data.get("enabled", True))
+    if SUPABASE_URL:
+        try:
+            headers = {**sb_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"}
+            requests.post(sb("memory_settings"), headers=headers,
+                          json={"username": username, "enabled": enabled}, timeout=10)
+        except Exception as e:
+            print(f"[Supabase] set_memory_enabled exception: {e}")
+    else:
+        store = _load_memory_store_file()
+        store.setdefault("settings", {})[username] = {"enabled": enabled}
+        _save_memory_store_file(store)
+    return jsonify({"enabled": enabled})
 
 
 # ---------------------------------------------------------------------------
 # Phase 2: Personas (features 49-50). A saved persona is a name + avatar
 # emoji + instructions the user can attach to any conversation; selecting
 # one just appends its instructions to that conversation's system prompt.
+# Supabase-backed when configured, local JSON file otherwise. Table:
+#   create table personas (
+#     id text primary key, username text not null, name text not null,
+#     avatar text, description text, instructions text, created_at double precision
+#   );
 # ---------------------------------------------------------------------------
 _PERSONAS_FILE = _os.path.join(_DATA_DIR, "personas.json")
 _personas_lock = threading.Lock()
 
-def _load_personas_store():
+def _load_personas_store_file():
     with _personas_lock:
         if _os.path.exists(_PERSONAS_FILE):
             try:
@@ -15290,7 +15067,7 @@ def _load_personas_store():
                 pass
         return {}
 
-def _save_personas_store(data):
+def _save_personas_store_file(data):
     with _personas_lock:
         try:
             with open(_PERSONAS_FILE, "w", encoding="utf-8") as f:
@@ -15299,22 +15076,42 @@ def _save_personas_store(data):
             print(f"[personas] failed to save: {e}")
 
 
+def _list_personas(username):
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"personas?username=eq.{username}&order=created_at.asc"),
+                              headers=sb_headers(), timeout=10)
+            if r.status_code == 200:
+                return r.json()
+        except Exception as e:
+            print(f"[Supabase] list personas failed: {e}")
+        return []
+    all_p = _load_personas_store_file()
+    return [p for p in all_p.values() if p.get("username") == username]
+
+
 def get_persona_for(username, persona_id):
     if not persona_id:
         return None
-    all_p = _load_personas_store()
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"personas?id=eq.{persona_id}&username=eq.{username}"),
+                              headers=sb_headers(), timeout=10)
+            if r.status_code == 200 and r.json():
+                return r.json()[0]
+        except Exception as e:
+            print(f"[Supabase] get_persona_for failed: {e}")
+        return None
+    all_p = _load_personas_store_file()
     p = all_p.get(persona_id)
-    if p and p.get("username") == username:
-        return p
-    return None
+    return p if p and p.get("username") == username else None
 
 
 @app.route("/api/personas", methods=["GET"])
 @login_required
 def api_list_personas():
     username = current_username()
-    all_p = _load_personas_store()
-    mine = [p for p in all_p.values() if p.get("username") == username]
+    mine = _list_personas(username)
     mine.sort(key=lambda p: p.get("created_at", 0))
     return jsonify({"personas": mine})
 
@@ -15328,16 +15125,25 @@ def api_create_persona():
         return jsonify({"error": "'name' is required"}), 400
     pid = uuid.uuid4().hex[:12]
     username = current_username()
-    all_p = _load_personas_store()
-    all_p[pid] = {
+    persona = {
         "id": pid, "username": username, "name": name,
         "avatar": (data.get("avatar") or "🤖")[:8],
         "description": (data.get("description") or "").strip()[:200],
         "instructions": (data.get("instructions") or "").strip()[:2000],
         "created_at": time.time(),
     }
-    _save_personas_store(all_p)
-    return jsonify({"persona": all_p[pid]})
+    if SUPABASE_URL:
+        try:
+            r = requests.post(sb("personas"), headers=sb_headers(), json=persona, timeout=10)
+            if r.status_code not in (200, 201):
+                print(f"[Supabase] create_persona failed: HTTP {r.status_code} — {r.text[:300]}")
+        except Exception as e:
+            print(f"[Supabase] create_persona exception: {e}")
+    else:
+        all_p = _load_personas_store_file()
+        all_p[pid] = persona
+        _save_personas_store_file(all_p)
+    return jsonify({"persona": persona})
 
 
 @app.route("/api/personas/<pid>", methods=["PUT"])
@@ -15345,14 +15151,30 @@ def api_create_persona():
 def api_update_persona(pid):
     data = request.get_json(force=True) or {}
     username = current_username()
-    all_p = _load_personas_store()
+    fields = {}
+    for field, cap in (("name", 60), ("avatar", 8), ("description", 200), ("instructions", 2000)):
+        if field in data:
+            fields[field] = (data.get(field) or "").strip()[:cap]
+    if not fields:
+        return jsonify({"error": "no recognized fields"}), 400
+
+    if SUPABASE_URL:
+        try:
+            r = requests.patch(sb(f"personas?id=eq.{pid}&username=eq.{username}"),
+                                headers=sb_headers(), json=fields, timeout=10)
+            if r.status_code not in (200, 204):
+                return jsonify({"error": "not found"}), 404
+        except Exception as e:
+            print(f"[Supabase] update_persona exception: {e}")
+            return jsonify({"error": "storage error"}), 500
+        return jsonify({"persona": {"id": pid, "username": username, **fields}})
+
+    all_p = _load_personas_store_file()
     p = all_p.get(pid)
     if not p or p.get("username") != username:
         return jsonify({"error": "not found"}), 404
-    for field, cap in (("name", 60), ("avatar", 8), ("description", 200), ("instructions", 2000)):
-        if field in data:
-            p[field] = (data.get(field) or "").strip()[:cap]
-    _save_personas_store(all_p)
+    p.update(fields)
+    _save_personas_store_file(all_p)
     return jsonify({"persona": p})
 
 
@@ -15360,12 +15182,18 @@ def api_update_persona(pid):
 @login_required
 def api_delete_persona(pid):
     username = current_username()
-    all_p = _load_personas_store()
+    if SUPABASE_URL:
+        try:
+            requests.delete(sb(f"personas?id=eq.{pid}&username=eq.{username}"), headers=sb_headers(), timeout=10)
+        except Exception as e:
+            print(f"[Supabase] delete_persona exception: {e}")
+        return jsonify({"status": "deleted"})
+    all_p = _load_personas_store_file()
     p = all_p.get(pid)
     if not p or p.get("username") != username:
         return jsonify({"error": "not found"}), 404
     del all_p[pid]
-    _save_personas_store(all_p)
+    _save_personas_store_file(all_p)
     return jsonify({"status": "deleted"})
 
 
