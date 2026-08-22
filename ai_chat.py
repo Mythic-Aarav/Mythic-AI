@@ -6031,7 +6031,7 @@ function _renderSidebarProfile() {
   const subEl = document.getElementById('sidebar-profile-sub');
   fetch('/api/auth/me', { cache: 'no-store' }).then(r => r.json()).then(info => {
     if (!info.authenticated) return;
-    if (subEl) subEl.textContent = info.email || info.name || display;
+    if (subEl && info.email) subEl.textContent = info.email;
     if (info.name && !name) sidebarProfileName.textContent = info.name;
     if (info.picture && !photo) sidebarProfileAvatar.innerHTML = '<img src="' + info.picture + '" alt="">';
   }).catch(err => console.error('[sidebar-profile] failed to load account info:', err));
