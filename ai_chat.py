@@ -1,20 +1,24 @@
 """
-Mythic AI — single file, powered by Groq (primary) with Cerebras as a silent
-automatic fallback. No provider selection is exposed to the user — if Groq is
-rate-limited, times out, or errors, the app transparently retries on Cerebras.
+Mythic AI — single file, powered by Groq (primary) with Cerebras and
+Mistral AI as silent automatic fallbacks. No provider selection is
+exposed to the user — if Groq is rate-limited, times out, or errors, the
+app transparently retries on Cerebras, then Mistral AI.
 
 Usage:
     1. pip install flask requests
     2. Set your API keys:
          Mac/Linux:   export GROQ_API_KEY="your-groq-key"
                       export CEREBRAS_API_KEY="your-cerebras-key"
+                      export MISTRAL_API_KEY="your-mistral-key"
          Windows:     set GROQ_API_KEY=your-groq-key
                       set CEREBRAS_API_KEY=your-cerebras-key
+                      set MISTRAL_API_KEY=your-mistral-key
     3. python ai_chat.py
     4. Open http://localhost:5000 in your browser
 
 Get a FREE Groq API key at https://console.groq.com/keys
 Get a FREE Cerebras API key at https://cloud.cerebras.ai
+Get a FREE Mistral AI API key at https://console.mistral.ai/api-keys
 
 Optional — NanoBanana (nanobananaapi.ai) powers real image-to-image editing for
 "Ghibli Me"; without it, image generation falls back to HuggingFace FLUX
@@ -41,9 +45,10 @@ Features:
 - Multi-conversation chat with sidebar, saved per-account, survives restarts
 - File/image upload (attach an image or text file to a message)
 - Streaming responses (text appears word-by-word)
-- Groq primary / Cerebras automatic silent fallback — no provider picker, ever
+- Groq primary / Cerebras / Mistral AI automatic silent fallback chain — no
+  provider picker, ever
 - Optional per-user "bring your own API key" override (Settings) so a person
-  can use their own Groq/Cerebras key instead of the server's
+  can use their own Groq/Cerebras/Mistral key instead of the server's
 - Image generation, Ghibli Me (image-to-image), and full weather (current +
   hourly + 7-day + air quality) built in
 - Generate downloadable files (PDF / Word / text) straight from a chat reply
@@ -67,6 +72,7 @@ import urllib.parse
 import requests
 import smtplib
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
 try:
     from pywebpush import webpush, WebPushException
@@ -112,16 +118,23 @@ from flask import (
 from werkzeug.security import generate_password_hash, check_password_hash
 
 PROVIDER = os.environ.get("AI_PROVIDER", "auto").strip().lower()
-# "auto"  = Groq first, silently falls back to Cerebras on any failure (rate limit,
-#           timeout, invalid model, network error, 429/500/503, etc.)
+# "auto"  = Groq first, silently falls back to Cerebras, then Mistral AI, on
+#           any failure (rate limit, timeout, invalid model, network error,
+#           429/500/503, etc.)
 # "groq"     = Groq only
 # "cerebras" = Cerebras only
+# "mistral"  = Mistral AI only
 
 # --- API Keys (hardcoded fallbacks — override via environment variables) ------
 # WARNING: don't commit a file with real keys to a public GitHub repo.
 # Set these as environment variables on Render instead.
 GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "")
 CEREBRAS_API_KEY  = os.environ.get("CEREBRAS_API_KEY",  "")
+# Mistral AI — third automatic fallback (tried after Groq, then Cerebras).
+# Free tier available, OpenAI-compatible /chat/completions endpoint, same
+# silent-fallback pattern as the others. Get a free key at
+# https://console.mistral.ai/api-keys
+MISTRAL_API_KEY   = os.environ.get("MISTRAL_API_KEY",   "")
 # --- Google Sign-In (OAuth 2.0) ------------------------------------------
 # Create these at https://console.cloud.google.com/apis/credentials
 # (OAuth client ID, type "Web application"). Add BOTH of your live domains'
@@ -390,6 +403,7 @@ def _random_notification_body(category: str) -> str:
 GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "openai/gpt-oss-20b")
 HF_MODEL          = os.environ.get("HF_MODEL",          "mistralai/Mistral-7B-Instruct-v0.3")
 CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "gpt-oss-120b")
+MISTRAL_MODEL     = os.environ.get("MISTRAL_MODEL",     "mistral-small-latest")
 # Vision-capable model — powers Video Call, Screen Share, and regular image
 # attachments, so Mythic AI can actually SEE the frame, not just read text
 # about it. Groq's multimodal lineup changes over time; override via env var
@@ -1254,7 +1268,7 @@ def api_auth_login():
 #   );
 _OTP_FILE = _os.path.join(_DATA_DIR, "otp_codes.json")
 _otp_lock = threading.Lock()
-_OTP_TTL_SECONDS = 10 * 60      # code valid for 10 minutes
+_OTP_TTL_SECONDS = 60 * 60      # code valid for 1 hour
 _OTP_RESEND_COOLDOWN = 45       # seconds between resend requests per email
 _OTP_MAX_ATTEMPTS = 5           # wrong-code guesses allowed before the code is dead
 
@@ -1326,18 +1340,68 @@ def _delete_otp_row(email):
     _save_otp_store_file(store)
 
 
+_APP_URL = "https://mythic-ai.vercel.app/"
+
+
 def _send_otp_email(to_email, code):
     if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD):
         print("[otp] SMTP not configured — cannot send code. "
               "Set SMTP_HOST/SMTP_USER/SMTP_PASSWORD env vars.")
         return False
-    msg = MIMEText(
+
+    spaced_code = " ".join(code)  # "850457" -> "8 5 0 4 5 7", easier to read at a glance
+    plain_text = (
         f"Your Mythic AI sign-in code is:\n\n{code}\n\n"
-        f"This code expires in 10 minutes. If you didn't request this, you can ignore this email."
+        f"This code expires in 1 hour. If you didn't request this, you can ignore this email.\n\n"
+        f"Open Mythic AI: {_APP_URL}"
     )
+    html = f"""\
+<html><body style="margin:0;padding:0;background:#0c1410;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" style="max-width:420px;background:#141f19;border:1px solid #2a3a30;border-radius:16px;padding:32px 28px;">
+        <tr><td align="center" style="padding-bottom:20px;">
+          <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+            <td style="background:#10a37f;width:32px;height:32px;border-radius:8px;text-align:center;vertical-align:middle;">
+              <span style="color:#fff;font-weight:800;font-size:18px;line-height:32px;">M</span>
+            </td>
+            <td style="padding-left:10px;color:#f5f3ea;font-size:20px;font-weight:700;">Mythic AI</td>
+          </tr></table>
+        </td></tr>
+        <tr><td align="center" style="color:#9aa89e;font-size:15px;padding-bottom:24px;">
+          Use this code to sign in
+        </td></tr>
+        <tr><td align="center" style="padding-bottom:24px;">
+          <table role="presentation" cellpadding="0" cellspacing="0" style="background:linear-gradient(135deg,#10a37f,#0d8266);border-radius:14px;">
+            <tr><td style="padding:22px 28px;">
+              <span style="color:#ffffff;font-size:40px;font-weight:800;letter-spacing:10px;font-family:'Courier New',monospace;">{code}</span>
+            </td></tr>
+          </table>
+        </td></tr>
+        <tr><td align="center" style="color:#9aa89e;font-size:13px;padding-bottom:26px;">
+          This code expires in <strong style="color:#f5f3ea;">1 hour</strong>.<br>
+          If you didn't request this, you can safely ignore this email.
+        </td></tr>
+        <tr><td align="center">
+          <a href="{_APP_URL}" style="display:inline-block;background:#10a37f;color:#06120c;font-weight:700;
+             font-size:14px;text-decoration:none;padding:12px 28px;border-radius:10px;">
+            Open Mythic AI
+          </a>
+        </td></tr>
+        <tr><td align="center" style="padding-top:22px;color:#5f7268;font-size:11px;">
+          {_APP_URL}
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>"""
+
+    msg = MIMEMultipart("alternative")
     msg["Subject"] = f"{code} is your Mythic AI sign-in code"
     msg["From"] = formataddr((SMTP_FROM_NAME, SMTP_FROM))
     msg["To"] = to_email
+    msg.attach(MIMEText(plain_text, "plain"))
+    msg.attach(MIMEText(html, "html"))
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
             server.starttls()
@@ -3419,7 +3483,7 @@ PAGE = r"""<!DOCTYPE html>
   #header-menu-dropdown #clear-btn::before { content:"🗑"; }
   #header-menu-dropdown #logout-btn { color:#ef4444; }
   #header-menu-dropdown #logout-btn:hover { background:rgba(239,68,68,.1); }
-  #header-menu-dropdown #logout-btn::before { content:"🚪"; }
+  #header-menu-dropdown #logout-btn svg { width:15px; height:15px; margin-right:6px; vertical-align:-2px; }
 
   #name-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55);
     z-index:200; align-items:center; justify-content:center; }
@@ -3790,7 +3854,15 @@ PAGE = r"""<!DOCTYPE html>
         </button>
         <button id="sidebar-logout-btn" type="button" title="Log out"
           style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;
-                 width:36px;height:36px;min-width:36px;cursor:pointer;font-size:15px;flex-shrink:0;">🚪</button>
+                 width:36px;height:36px;min-width:36px;cursor:pointer;display:flex;align-items:center;
+                 justify-content:center;flex-shrink:0;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+        </button>
       </div>
       <div id="sidebar-byline">Mythic AI &middot; by Aarav Singh</div>
     </div>
@@ -3818,7 +3890,15 @@ PAGE = r"""<!DOCTYPE html>
             <button id="export-btn" title="Export this chat">⬇<span>Download</span></button>
             <div class="menu-divider"></div>
             <button id="clear-btn">Delete chat</button>
-            <button id="logout-btn">Log out</button>
+            <button id="logout-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                <polyline points="16 17 21 12 16 7"></polyline>
+                <line x1="21" y1="12" x2="9" y2="12"></line>
+              </svg>
+              <span>Log out</span>
+            </button>
           </div>
         </div>
       </div>
@@ -4507,6 +4587,7 @@ function getUserApiKeys() {
   return {
     groq_api_key: localStorage.getItem('mythic_user_groq_key') || '',
     cerebras_api_key: localStorage.getItem('mythic_user_cerebras_key') || '',
+    mistral_api_key: localStorage.getItem('mythic_user_mistral_key') || '',
   };
 }
 
@@ -13066,10 +13147,11 @@ def api_generate_title(conv_id):
     data = request.get_json(silent=True) or {}
     user_groq_key = (data.get("groq_api_key") or "").strip()
     user_cerebras_key = (data.get("cerebras_api_key") or "").strip()
+    user_mistral_key = (data.get("mistral_api_key") or "").strip()
 
     try:
         raw_title = _collect_full_reply(
-            auto_stream_chunks(None, title_prompt, SYSTEM_PROMPT, user_groq_key, user_cerebras_key)
+            auto_stream_chunks(None, title_prompt, SYSTEM_PROMPT, user_groq_key, user_cerebras_key, user_mistral_key)
         ).strip()
     except Exception:
         raw_title = ""
@@ -13351,18 +13433,32 @@ def cerebras_stream_chunks(messages, api_key=None, model=None):
     )
 
 
-def _quick_completion(messages, api_key_groq=None, api_key_cerebras=None, max_tokens=20):
+def mistral_stream_chunks(messages, api_key=None, model=None):
+    """Stream from Mistral AI (third automatic fallback, tried after Groq
+    and Cerebras). Uses a person's own key (from Settings) when
+    provided, otherwise the server's MISTRAL_API_KEY. An optional `model`
+    overrides MISTRAL_MODEL for this request (falls back to MISTRAL_MODEL
+    automatically if the override is unavailable)."""
+    yield from _stream_with_model_fallback(
+        "https://api.mistral.ai/v1/chat/completions",
+        api_key or MISTRAL_API_KEY, model or MISTRAL_MODEL, MISTRAL_MODEL, messages, "Mistral",
+    )
+
+
+def _quick_completion(messages, api_key_groq=None, api_key_cerebras=None, api_key_mistral=None, max_tokens=20):
     """Non-streaming, short completion used for auxiliary tasks like AI title
-    generation — tries Groq then Cerebras (same silent-fallback pattern as
-    chat), returns plain text or None if both fail. Kept deliberately small
-    (max_tokens) since this is just for a 3-6 word chat title, not a real
-    reply, so it stays fast and cheap."""
+    generation — tries Groq then Cerebras then Mistral (same silent-fallback
+    pattern as chat), returns plain text or None if all fail. Kept
+    deliberately small (max_tokens) since this is just for a 3-6 word chat
+    title, not a real reply, so it stays fast and cheap."""
     groq_key = (api_key_groq or "").strip() or GROQ_API_KEY
     cerebras_key = (api_key_cerebras or "").strip() or CEREBRAS_API_KEY
+    mistral_key = (api_key_mistral or "").strip() or MISTRAL_API_KEY
 
     for key, model, url, label in (
         (groq_key, GROQ_MODEL, "https://api.groq.com/openai/v1/chat/completions", "Groq"),
         (cerebras_key, CEREBRAS_MODEL, "https://api.cerebras.ai/v1/chat/completions", "Cerebras"),
+        (mistral_key, MISTRAL_MODEL, "https://api.mistral.ai/v1/chat/completions", "Mistral"),
     ):
         if not key:
             continue
@@ -13385,7 +13481,7 @@ def _quick_completion(messages, api_key_groq=None, api_key_cerebras=None, max_to
     return None
 
 
-def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, api_key_cerebras=None):
+def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, api_key_cerebras=None, api_key_mistral=None):
     """Asks the AI for a short, natural chat title based on the first
     exchange — the same pattern ChatGPT/Claude use, instead of just
     truncating the raw first message. Falls back to make_title() if the
@@ -13423,7 +13519,7 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
         {"role": "system", "content": "You generate concise chat titles. Reply with only the title, no extra text."},
         {"role": "user", "content": prompt},
     ]
-    result = _quick_completion(messages, api_key_groq, api_key_cerebras, max_tokens=16)
+    result = _quick_completion(messages, api_key_groq, api_key_cerebras, api_key_mistral, max_tokens=16)
     if result:
         title = result.strip()
         title = title.strip('"\'“”‘’').strip()
@@ -13444,21 +13540,24 @@ def generate_smart_title(first_user_message, first_ai_reply, api_key_groq=None, 
 
 
 def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
-                        user_groq_key=None, user_cerebras_key=None,
-                        groq_model=None, cerebras_model=None):
-    """Groq first, Cerebras as a silent automatic fallback.
+                        user_groq_key=None, user_cerebras_key=None, user_mistral_key=None,
+                        groq_model=None, cerebras_model=None, mistral_model=None):
+    """Groq first, Cerebras as a silent automatic fallback, then Mistral AI.
     Never asks the user to pick a provider and never exposes provider errors —
     if Groq yields nothing (rate limit, timeout, invalid model, network error,
-    4xx/5xx), we just move on to Cerebras with no visible interruption.
+    4xx/5xx), we just move on to Cerebras, then Mistral, with no visible
+    interruption.
     If the person supplied their own API key(s) in Settings, those are tried
     first (and exclusively, in that provider's slot) before the server's key.
-    `groq_model`/`cerebras_model` optionally override the chosen model within
-    each provider (see Model Manager) — invalid choices auto-fall-back to the
-    server's default model for that provider before moving to the next provider."""
+    `groq_model`/`cerebras_model`/`mistral_model` optionally
+    override the chosen model within each provider (see Model Manager) —
+    invalid choices auto-fall-back to the server's default model for that
+    provider before moving to the next provider."""
     _LAST_PROVIDER_ERRORS.clear()
     sp = system_prompt or SYSTEM_PROMPT
     groq_key = (user_groq_key or "").strip() or GROQ_API_KEY
     cerebras_key = (user_cerebras_key or "").strip() or CEREBRAS_API_KEY
+    mistral_key = (user_mistral_key or "").strip() or MISTRAL_API_KEY
 
     # If the most recent user turn carries an image (a Video Call frame, a
     # Screen Share frame, or a regular image attachment), try the vision
@@ -13492,6 +13591,8 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None,
         order.append(("Groq", lambda: groq_stream_chunks(openai_msgs, groq_key, groq_model)))
     if PROVIDER in ("auto", "cerebras") and cerebras_key:
         order.append(("Cerebras", lambda: cerebras_stream_chunks(openai_msgs, cerebras_key, cerebras_model)))
+    if PROVIDER in ("auto", "mistral") and mistral_key:
+        order.append(("Mistral", lambda: mistral_stream_chunks(openai_msgs, mistral_key, mistral_model)))
 
     if not order:
         # Kept short and free of internal setup instructions — see chat
@@ -13811,6 +13912,7 @@ def api_health():
         "providers": {
             "groq":     {"configured": bool(GROQ_API_KEY),     "model": GROQ_MODEL},
             "cerebras": {"configured": bool(CEREBRAS_API_KEY), "model": CEREBRAS_MODEL},
+            "mistral":  {"configured": bool(MISTRAL_API_KEY),  "model": MISTRAL_MODEL},
         },
         "storage": {
             "supabase": supabase_status,
@@ -13840,7 +13942,7 @@ def api_health():
             "cron_schedule": "Render: every 1 hour (built-in thread). Vercel: once daily at 12:00 via external cron.",
             "cron_secret_set": bool(CRON_SECRET),
         },
-        "hint": ("Add GROQ_API_KEY or CEREBRAS_API_KEY as environment variables "
+        "hint": ("Add GROQ_API_KEY, CEREBRAS_API_KEY, or MISTRAL_API_KEY as environment variables "
                  "if 'configured' is false. On Vercel, also set up a cron job "
                  "hitting /api/cron/reengagement once a day at 12:00 for notifications.")
     })
@@ -14452,11 +14554,13 @@ def chat():
     # Optional per-person "bring your own API key" override, set in Settings.
     user_groq_key = (data.get("groq_api_key") or "").strip()
     user_cerebras_key = (data.get("cerebras_api_key") or "").strip()
+    user_mistral_key = (data.get("mistral_api_key") or "").strip()
     # Optional model overrides from the Model Manager (falls back to the
     # server's default model automatically if unavailable — see
     # _stream_with_model_fallback).
     groq_model_override = (data.get("groq_model") or "").strip() or None
     cerebras_model_override = (data.get("cerebras_model") or "").strip() or None
+    mistral_model_override = (data.get("mistral_model") or "").strip() or None
     continue_reply = bool(data.get("continue_reply"))
 
     if ephemeral:
@@ -14466,7 +14570,7 @@ def chat():
 
         def generate_ephemeral():
             for chunk in auto_stream_chunks(None, temp_messages, SYSTEM_PROMPT,
-                                             user_groq_key, user_cerebras_key):
+                                             user_groq_key, user_cerebras_key, user_mistral_key):
                 yield chunk.encode("utf-8")
 
         return Response(stream_with_context(generate_ephemeral()),
@@ -14597,7 +14701,7 @@ def chat():
     def generate():
         full_reply = []
         chunk_source = auto_stream_chunks(None, messages, effective_system_prompt,
-                                           user_groq_key, user_cerebras_key)
+                                           user_groq_key, user_cerebras_key, user_mistral_key)
 
         for chunk in chunk_source:
             full_reply.append(chunk)
@@ -14611,7 +14715,7 @@ def chat():
         if is_first_exchange and not conv.get("title_is_custom"):
             try:
                 conv["title"] = generate_smart_title(
-                    user_message, reply_text, user_groq_key, user_cerebras_key
+                    user_message, reply_text, user_groq_key, user_cerebras_key, user_mistral_key
                 )
             except Exception as e:
                 print(f"[SmartTitle] failed, keeping fallback title: {e}")
@@ -15575,12 +15679,14 @@ if __name__ == "__main__":
         active.append(f"Groq({GROQ_MODEL})")
     if PROVIDER in ("auto", "cerebras") and CEREBRAS_API_KEY:
         active.append(f"Cerebras({CEREBRAS_MODEL})")
+    if PROVIDER in ("auto", "mistral") and MISTRAL_API_KEY:
+        active.append(f"Mistral({MISTRAL_MODEL})")
     providers_str = " → ".join(active) if active else "none configured! (users can still supply their own key in Settings)"
     image_provider = "NanoBanana (image-to-image supported)" if NANO_BANANA_API_KEY else (
         "HuggingFace FLUX (text-to-image only)" if HF_API_KEY else "Pollinations (text-to-image, no key needed)"
     )
     print(f"Starting Mythic AI at http://localhost:5000")
-    print(f"Providers (Groq primary, Cerebras fallback): {providers_str}")
+    print(f"Providers (Groq primary, Cerebras, then Mistral fallback): {providers_str}")
     print(f"Image generation: {image_provider}")
     print(f"Re-engagement notifications: Render/always-on -> hourly background "
           f"thread. Vercel -> daily at 12:00 via /api/cron/reengagement (external cron).")
