@@ -3780,13 +3780,18 @@ PAGE = r"""<!DOCTYPE html>
         <button id="bookmarks-btn">🔖 Bookmarks</button>
         <button id="stats-btn">📊 Stats</button>
       </div>
-      <button id="sidebar-profile" type="button" title="Your profile — click to edit">
-        <span id="sidebar-profile-avatar" aria-hidden="true"></span>
-        <span id="sidebar-profile-text">
-          <span id="sidebar-profile-name">Guest</span>
-          <span id="sidebar-profile-sub">Your profile</span>
-        </span>
-      </button>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <button id="sidebar-profile" type="button" title="Your profile — click to edit" style="flex:1; min-width:0;">
+          <span id="sidebar-profile-avatar" aria-hidden="true"></span>
+          <span id="sidebar-profile-text">
+            <span id="sidebar-profile-name">Guest</span>
+            <span id="sidebar-profile-sub">Your profile</span>
+          </span>
+        </button>
+        <button id="sidebar-logout-btn" type="button" title="Log out"
+          style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;
+                 width:36px;height:36px;min-width:36px;cursor:pointer;font-size:15px;flex-shrink:0;">🚪</button>
+      </div>
       <div id="sidebar-byline">Mythic AI &middot; by Aarav Singh</div>
     </div>
   </div>
@@ -5958,13 +5963,14 @@ function _renderSidebarProfile() {
 if (sidebarProfileBtn) sidebarProfileBtn.addEventListener('click', openNameModal);
 _renderSidebarProfile();
 
-const logoutBtn = document.getElementById('logout-btn');
-if (logoutBtn) {
-  logoutBtn.addEventListener('click', async () => {
-    try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (e) {}
-    window.location.href = '/login';
-  });
+async function doLogout() {
+  try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (e) {}
+  window.location.href = '/login';
 }
+const logoutBtn = document.getElementById('logout-btn');
+if (logoutBtn) logoutBtn.addEventListener('click', doLogout);
+const sidebarLogoutBtn = document.getElementById('sidebar-logout-btn');
+if (sidebarLogoutBtn) sidebarLogoutBtn.addEventListener('click', doLogout);
 
 if (isMobile()) sidebar.classList.add('hidden');
 newChatBtn.addEventListener('click', startNewChat);
