@@ -6029,15 +6029,16 @@ function _renderSidebarProfile() {
   // the existing "Your profile" label until this resolves, so there's no
   // layout jump / blank state on first paint).
   const subEl = document.getElementById('sidebar-profile-sub');
-  fetch('/api/auth/me').then(r => r.json()).then(info => {
+  fetch('/api/auth/me', { cache: 'no-store' }).then(r => r.json()).then(info => {
     if (!info.authenticated) return;
-    if (subEl && info.email) subEl.textContent = info.email;
+    if (subEl) subEl.textContent = info.email || info.name || display;
     if (info.name && !name) sidebarProfileName.textContent = info.name;
     if (info.picture && !photo) sidebarProfileAvatar.innerHTML = '<img src="' + info.picture + '" alt="">';
-  }).catch(() => {});
+  }).catch(err => console.error('[sidebar-profile] failed to load account info:', err));
 }
 if (sidebarProfileBtn) sidebarProfileBtn.addEventListener('click', openNameModal);
 _renderSidebarProfile();
+document.addEventListener('DOMContentLoaded', _renderSidebarProfile);
 
 async function doLogout() {
   try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (e) {}
