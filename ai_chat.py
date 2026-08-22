@@ -65,6 +65,9 @@ import datetime
 import threading
 import urllib.parse
 import requests
+import smtplib
+from email.mime.text import MIMEText
+from email.utils import formataddr
 try:
     from pywebpush import webpush, WebPushException
     _PUSH_AVAILABLE = True
@@ -127,6 +130,21 @@ CEREBRAS_API_KEY  = os.environ.get("CEREBRAS_API_KEY",  "")
 #   https://<your-render-app>.onrender.com/api/auth/google/callback
 GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+
+# --- Email sign-in (one-time code / OTP, no passwords) --------------------
+# Any SMTP provider works — e.g. Gmail (use an "App password", not your
+# normal password), SendGrid, Mailgun, Amazon SES, Resend, Postmark, etc.
+#   SMTP_HOST      e.g. smtp.gmail.com  /  smtp.sendgrid.net
+#   SMTP_PORT      e.g. 587 (STARTTLS) — this is the default if unset
+#   SMTP_USER      login username for that SMTP account
+#   SMTP_PASSWORD  password / app password / API key for that SMTP account
+#   SMTP_FROM      the "From" address shown to recipients (defaults to SMTP_USER)
+SMTP_HOST     = os.environ.get("SMTP_HOST", "")
+SMTP_PORT     = int(os.environ.get("SMTP_PORT", "587") or "587")
+SMTP_USER     = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_FROM     = os.environ.get("SMTP_FROM", "") or SMTP_USER
+SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "Mythic AI")  # display name shown in the inbox
 # HF is kept ONLY as a text-to-image fallback for /api/generate-image when
 # NanoBanana isn't configured — it is NOT used as a chat/text provider.
 HF_API_KEY        = os.environ.get("HF_API_KEY",        "")
@@ -1212,44 +1230,180 @@ def api_auth_logout():
 
 @app.route("/api/auth/signup", methods=["POST"])
 def api_auth_signup():
-    data = request.get_json(force=True) or {}
-    email = (data.get("email") or "").strip().lower()
-    password = data.get("password") or ""
-    name = (data.get("name") or "").strip()[:80] or email.split("@")[0]
-
-    if not _EMAIL_RE.match(email):
-        return jsonify({"error": "Enter a valid email address."}), 400
-    if len(password) < 8:
-        return jsonify({"error": "Password must be at least 8 characters."}), 400
-
-    if get_user_by_email(email):
-        return jsonify({"error": "An account with that email already exists. Try logging in instead."}), 409
-
-    user_id = _pending_local_id()
-    create_user({
-        "user_id": user_id, "email": email, "name": name, "picture": None,
-        "password_hash": generate_password_hash(password),
-        "google_sub": None, "created_at": time.time(),
-    })
-    _log_user_in(user_id)
-    return jsonify({"status": "ok", "email": email, "name": name})
+    # Passwords are gone entirely — email sign-in is now a one-time code
+    # (OTP) sent to the address, handled by /api/auth/otp/request and
+    # /api/auth/otp/verify below. This endpoint stays only so any old
+    # cached frontend hitting it gets a clear message instead of a raw 404.
+    return jsonify({"error": "Password sign-up is disabled. Use 'Continue with Google' "
+                              "or sign in with an emailed code instead."}), 403
 
 
 @app.route("/api/auth/login", methods=["POST"])
 def api_auth_login():
+    return jsonify({"error": "Password login is disabled. Use 'Continue with Google' "
+                              "or sign in with an emailed code instead."}), 403
+
+
+# --- Email OTP (one-time code) sign-in, no passwords ------------------------
+# Dual-backend like users/memories/personas: Supabase table if configured,
+# local JSON file otherwise. Table:
+#   create table otp_codes (
+#     email text primary key, code text not null,
+#     expires_at double precision not null, attempts int default 0,
+#     last_sent_at double precision
+#   );
+_OTP_FILE = _os.path.join(_DATA_DIR, "otp_codes.json")
+_otp_lock = threading.Lock()
+_OTP_TTL_SECONDS = 10 * 60      # code valid for 10 minutes
+_OTP_RESEND_COOLDOWN = 45       # seconds between resend requests per email
+_OTP_MAX_ATTEMPTS = 5           # wrong-code guesses allowed before the code is dead
+
+
+def _load_otp_store_file():
+    with _otp_lock:
+        if _os.path.exists(_OTP_FILE):
+            try:
+                with open(_OTP_FILE, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+
+def _save_otp_store_file(store):
+    with _otp_lock:
+        try:
+            with open(_OTP_FILE, "w", encoding="utf-8") as f:
+                json.dump(store, f)
+        except Exception as e:
+            print(f"[otp] failed to save: {e}")
+
+
+def _get_otp_row(email):
+    if SUPABASE_URL:
+        try:
+            r = requests.get(sb(f"otp_codes?email=eq.{email}"), headers=sb_headers(), timeout=10)
+            if r.status_code == 200 and r.json():
+                return r.json()[0]
+        except Exception as e:
+            print(f"[Supabase] get_otp_row failed: {e}")
+        return None
+    return _load_otp_store_file().get(email)
+
+
+def _upsert_otp_row(row):
+    if SUPABASE_URL:
+        try:
+            headers = {**sb_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"}
+            requests.post(sb("otp_codes"), headers=headers, json=row, timeout=10)
+        except Exception as e:
+            print(f"[Supabase] upsert_otp_row failed: {e}")
+        return
+    store = _load_otp_store_file()
+    store[row["email"]] = row
+    _save_otp_store_file(store)
+
+
+def _delete_otp_row(email):
+    if SUPABASE_URL:
+        try:
+            requests.delete(sb(f"otp_codes?email=eq.{email}"), headers=sb_headers(), timeout=10)
+        except Exception as e:
+            print(f"[Supabase] delete_otp_row failed: {e}")
+        return
+    store = _load_otp_store_file()
+    store.pop(email, None)
+    _save_otp_store_file(store)
+
+
+def _send_otp_email(to_email, code):
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD):
+        print("[otp] SMTP not configured — cannot send code. "
+              "Set SMTP_HOST/SMTP_USER/SMTP_PASSWORD env vars.")
+        return False
+    msg = MIMEText(
+        f"Your Mythic AI sign-in code is:\n\n{code}\n\n"
+        f"This code expires in 10 minutes. If you didn't request this, you can ignore this email."
+    )
+    msg["Subject"] = f"{code} is your Mythic AI sign-in code"
+    msg["From"] = formataddr((SMTP_FROM_NAME, SMTP_FROM))
+    msg["To"] = to_email
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_FROM, [to_email], msg.as_string())
+        return True
+    except Exception as e:
+        print(f"[otp] send failed for {to_email}: {e}")
+        return False
+
+
+@app.route("/api/auth/otp/request", methods=["POST"])
+def api_auth_otp_request():
     data = request.get_json(force=True) or {}
     email = (data.get("email") or "").strip().lower()
-    password = data.get("password") or ""
+    if not _EMAIL_RE.match(email):
+        return jsonify({"error": "Enter a valid email address."}), 400
 
+    existing = _get_otp_row(email)
+    now = time.time()
+    if existing and now - existing.get("last_sent_at", 0) < _OTP_RESEND_COOLDOWN:
+        wait = int(_OTP_RESEND_COOLDOWN - (now - existing["last_sent_at"]))
+        return jsonify({"error": f"Please wait {wait}s before requesting another code."}), 429
+
+    code = f"{secrets.randbelow(1000000):06d}"
+    if not _send_otp_email(email, code):
+        return jsonify({"error": "Couldn't send the code — email sending isn't configured on "
+                                  "the server yet. Try 'Continue with Google' instead, or "
+                                  "contact the site owner."}), 500
+
+    _upsert_otp_row({
+        "email": email, "code": code,
+        "expires_at": now + _OTP_TTL_SECONDS,
+        "attempts": 0, "last_sent_at": now,
+    })
+    return jsonify({"status": "sent"})
+
+
+@app.route("/api/auth/otp/verify", methods=["POST"])
+def api_auth_otp_verify():
+    data = request.get_json(force=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    code = (data.get("code") or "").strip()
+
+    row = _get_otp_row(email)
+    if not row:
+        return jsonify({"error": "Request a new code first."}), 400
+    if time.time() > row.get("expires_at", 0):
+        _delete_otp_row(email)
+        return jsonify({"error": "That code expired. Request a new one."}), 400
+    if row.get("attempts", 0) >= _OTP_MAX_ATTEMPTS:
+        _delete_otp_row(email)
+        return jsonify({"error": "Too many incorrect attempts. Request a new code."}), 429
+    if code != row.get("code"):
+        row["attempts"] = row.get("attempts", 0) + 1
+        _upsert_otp_row(row)
+        remaining = _OTP_MAX_ATTEMPTS - row["attempts"]
+        return jsonify({"error": f"Incorrect code. {remaining} attempt(s) left."}), 401
+
+    _delete_otp_row(email)  # one-time — burn it immediately on success
     user = get_user_by_email(email)
-    if not user or not user.get("password_hash") or not check_password_hash(user["password_hash"], password):
-        return jsonify({"error": "Incorrect email or password."}), 401
-
-    _log_user_in(user["user_id"])
-    return jsonify({"status": "ok", "email": user["email"], "name": user["name"]})
+    if user:
+        user_id = user["user_id"]
+    else:
+        user_id = _pending_local_id()
+        create_user({
+            "user_id": user_id, "email": email, "name": email.split("@")[0],
+            "picture": None, "password_hash": None, "google_sub": None,
+            "created_at": time.time(),
+        })
+    _log_user_in(user_id)
+    return jsonify({"status": "ok", "email": email})
 
 
 @app.route("/api/auth/google/start", methods=["GET"])
+
 def api_auth_google_start():
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         return Response(
@@ -1363,6 +1517,7 @@ _LOGIN_PAGE_HTML = """<!DOCTYPE html>
   .brand img { width:32px; height:32px; border-radius:8px; }
   .brand span { font-size:20px; font-weight:700; }
   h1 { font-size:16px; font-weight:500; color:var(--muted); text-align:center; margin:0 0 24px; }
+  p.sub { font-size:13px; color:var(--muted); text-align:center; margin:-16px 0 20px; }
   .google-btn {
     width:100%; display:flex; align-items:center; justify-content:center; gap:10px;
     background:#fff; color:#1f1f1f; border:none; border-radius:10px; padding:12px; font-size:15px;
@@ -1375,21 +1530,25 @@ _LOGIN_PAGE_HTML = """<!DOCTYPE html>
     width:100%; padding:12px 14px; border-radius:10px; border:1px solid var(--border);
     background:#0f1912; color:var(--text); font-size:14px; margin-bottom:12px;
   }
+  input#code { text-align:center; letter-spacing:6px; font-size:20px; font-weight:700; }
   input:focus { outline:none; border-color:var(--accent); }
   button.primary {
     width:100%; padding:12px; border:none; border-radius:10px; background:var(--accent);
     color:#06120c; font-weight:700; font-size:14px; cursor:pointer;
   }
+  button.primary:disabled { opacity:.6; cursor:default; }
   .toggle { text-align:center; margin-top:16px; font-size:13px; color:var(--muted); }
   .toggle a { color:var(--accent); cursor:pointer; text-decoration:none; }
   .err { background:#3a1414; color:#ff9a9a; border:1px solid #5a2020; border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:16px; display:none; }
+  .ok  { background:#123a26; color:#9affc4; border:1px solid #1f5a3a; border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:16px; display:none; }
 </style>
 </head>
 <body>
   <div class="card">
     <div class="brand"><img src="/icon.png" alt=""><span>Mythic AI</span></div>
-    <h1 id="mode-label">Sign in to continue</h1>
+    <h1>Sign in to continue</h1>
     <div class="err" id="err"></div>
+    <div class="ok" id="ok"></div>
 
     <a class="google-btn" href="/api/auth/google/start" id="google-btn">
       <svg viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.1 29.5 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.7-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.9 18.9 13 24 13c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 6.1 29.5 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 10-2 13.5-5.3l-6.2-5.2C29.3 35.4 26.8 36 24 36c-5.2 0-9.6-3.3-11.2-7.9l-6.5 5C9.6 39.6 16.3 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.2-4.2 5.5l6.2 5.2C40.8 36 44 30.9 44 24c0-1.3-.1-2.7-.4-3.5z"/></svg>
@@ -1398,68 +1557,97 @@ _LOGIN_PAGE_HTML = """<!DOCTYPE html>
 
     <div class="divider" id="divider">or</div>
 
-    <input id="name" type="text" placeholder="Name" style="display:none">
-    <input id="email" type="email" placeholder="Email">
-    <input id="password" type="password" placeholder="Password">
-    <button class="primary" id="submit-btn">Sign in</button>
+    <div id="step-email">
+      <input id="email" type="email" placeholder="Email" autocomplete="email">
+      <button class="primary" id="send-btn">Send code</button>
+    </div>
 
-    <div class="toggle" id="toggle-signup">Don't have an account? <a id="toggle-link">Sign up</a></div>
+    <div id="step-code" style="display:none;">
+      <p class="sub" id="sent-to"></p>
+      <input id="code" type="text" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="one-time-code">
+      <button class="primary" id="verify-btn">Verify &amp; sign in</button>
+      <div class="toggle">
+        <a id="resend-link">Resend code</a> &nbsp;·&nbsp; <a id="change-email-link">Use a different email</a>
+      </div>
+    </div>
   </div>
 <script>
-  let mode = 'login';
   const els = {
-    label: document.getElementById('mode-label'),
-    name: document.getElementById('name'),
+    stepEmail: document.getElementById('step-email'),
+    stepCode: document.getElementById('step-code'),
     email: document.getElementById('email'),
-    password: document.getElementById('password'),
-    btn: document.getElementById('submit-btn'),
-    link: document.getElementById('toggle-link'),
-    toggleWrap: document.getElementById('toggle-signup'),
+    code: document.getElementById('code'),
+    sendBtn: document.getElementById('send-btn'),
+    verifyBtn: document.getElementById('verify-btn'),
+    resend: document.getElementById('resend-link'),
+    changeEmail: document.getElementById('change-email-link'),
+    sentTo: document.getElementById('sent-to'),
     err: document.getElementById('err'),
+    ok: document.getElementById('ok'),
   };
-  function setMode(m) {
-    mode = m;
-    if (m === 'signup') {
-      els.label.textContent = 'Create your account';
-      els.name.style.display = 'block';
-      els.btn.textContent = 'Create account';
-      els.toggleWrap.innerHTML = 'Already have an account? <a id="toggle-link">Sign in</a>';
-    } else {
-      els.label.textContent = 'Sign in to continue';
-      els.name.style.display = 'none';
-      els.btn.textContent = 'Sign in';
-      els.toggleWrap.innerHTML = 'Don\\'t have an account? <a id="toggle-link">Sign up</a>';
-    }
-    document.getElementById('toggle-link').onclick = () => setMode(mode === 'login' ? 'signup' : 'login');
-  }
-  document.getElementById('toggle-link').onclick = () => setMode('signup');
-
   const clientId = localStorage.getItem('mythic_client_id') || '';
 
-  els.btn.onclick = async () => {
-    els.err.style.display = 'none';
-    const body = { email: els.email.value.trim(), password: els.password.value };
-    if (mode === 'signup') body.name = els.name.value.trim();
+  function showErr(msg) { els.err.textContent = msg; els.err.style.display = 'block'; els.ok.style.display = 'none'; }
+  function showOk(msg)  { els.ok.textContent = msg; els.ok.style.display = 'block'; els.err.style.display = 'none'; }
+  function clearMsgs()  { els.err.style.display = 'none'; els.ok.style.display = 'none'; }
+
+  async function requestCode() {
+    const email = els.email.value.trim();
+    if (!email) { showErr('Enter your email address.'); return; }
+    clearMsgs();
+    els.sendBtn.disabled = true;
     try {
-      const r = await fetch(mode === 'signup' ? '/api/auth/signup' : '/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Client-Id': clientId },
-        body: JSON.stringify(body),
+      const r = await fetch('/api/auth/otp/request', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
       });
       const j = await r.json();
-      if (!r.ok) { els.err.textContent = j.error || 'Something went wrong.'; els.err.style.display = 'block'; return; }
+      if (!r.ok) { showErr(j.error || 'Something went wrong.'); els.sendBtn.disabled = false; return; }
+      els.stepEmail.style.display = 'none';
+      els.stepCode.style.display = 'block';
+      els.sentTo.textContent = 'Code sent to ' + email;
+      els.code.focus();
+      showOk('Check your inbox for a 6-digit code.');
+    } catch (e) {
+      showErr('Network error — please try again.');
+    }
+    els.sendBtn.disabled = false;
+  }
+
+  async function verifyCode() {
+    const email = els.email.value.trim();
+    const code = els.code.value.trim();
+    if (code.length !== 6) { showErr('Enter the 6-digit code.'); return; }
+    clearMsgs();
+    els.verifyBtn.disabled = true;
+    try {
+      const r = await fetch('/api/auth/otp/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Client-Id': clientId },
+        body: JSON.stringify({ email, code }),
+      });
+      const j = await r.json();
+      if (!r.ok) { showErr(j.error || 'Something went wrong.'); els.verifyBtn.disabled = false; return; }
       window.location.href = '/';
     } catch (e) {
-      els.err.textContent = 'Network error — please try again.';
-      els.err.style.display = 'block';
+      showErr('Network error — please try again.');
+      els.verifyBtn.disabled = false;
     }
-  };
+  }
+
+  els.sendBtn.addEventListener('click', requestCode);
+  els.email.addEventListener('keydown', e => { if (e.key === 'Enter') requestCode(); });
+  els.verifyBtn.addEventListener('click', verifyCode);
+  els.code.addEventListener('keydown', e => { if (e.key === 'Enter') verifyCode(); });
+  els.resend.addEventListener('click', requestCode);
+  els.changeEmail.addEventListener('click', () => {
+    els.stepCode.style.display = 'none';
+    els.stepEmail.style.display = 'block';
+    clearMsgs();
+  });
 
   const params = new URLSearchParams(window.location.search);
-  if (params.get('error')) {
-    els.err.textContent = 'Google sign-in failed — please try again.';
-    els.err.style.display = 'block';
-  }
+  if (params.get('error')) showErr('Google sign-in failed — please try again.');
 
   // Hide the Google button (and the "or" divider) entirely if the server
   // doesn't have GOOGLE_CLIENT_ID/SECRET configured yet, instead of
